@@ -221,6 +221,7 @@ export interface DogBarkFilterSettings {
 
 export interface IntegrationSettings {
   birdweather: BirdWeatherSettings;
+  luistervink: LuistervinkSettings;
   mqtt: MQTTSettings;
   observability: ObservabilitySettings;
   weather: WeatherSettings;
@@ -232,6 +233,13 @@ export interface BirdWeatherSettings {
   latitude: number;
   longitude: number;
   locationAccuracy: number;
+  threshold: number;
+  debug: boolean;
+}
+
+export interface LuistervinkSettings {
+  enabled: boolean;
+  token: string;
   threshold: number;
   debug: boolean;
 }
@@ -345,6 +353,7 @@ export interface RealtimeSettings {
     path: string;
   };
   birdweather?: BirdWeatherSettings;
+  luistervink?: LuistervinkSettings;
   privacyFilter?: PrivacyFilterSettings;
   dogBarkFilter?: DogBarkFilterSettings;
   rtsp?: RTSPSettings;
@@ -734,6 +743,7 @@ export const outputSettings = derived(settingsStore, $store => $store.formData.o
 
 export const integrationSettings = derived(settingsStore, $store => ({
   birdweather: $store.formData.realtime?.birdweather,
+  luistervink: $store.formData.realtime?.luistervink,
   mqtt: $store.formData.realtime?.mqtt,
   observability: {
     prometheus: {

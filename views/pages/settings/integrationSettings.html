@@ -103,6 +103,95 @@
 </div>
 <!-- BirdWeather Settings end -->
 
+<!-- Luistervink Settings start -->
+<div class="collapse collapse-open bg-base-100 shadow-xs col-span-3"
+     role="region"
+     aria-labelledby="luistervinkHeader"
+     x-data="{
+    luistervink: {
+        enabled: {{.Settings.Realtime.Luistervink.Enabled}},
+        debug: {{.Settings.Realtime.Luistervink.Debug}},
+        token: '{{.Settings.Realtime.Luistervink.Token}}',
+        threshold: {{.Settings.Realtime.Luistervink.Threshold}}
+    },
+    luistervinkSettingsOpen: false,
+    showTooltip: null,
+    hasChanges: false,
+    resetChanges() {
+        console.log('Luistervink resetChanges called');
+        this.hasChanges = false;
+        hasChanges = false;
+    }
+}" x-init="
+    $watch('luistervink', () => { hasChanges = true; }, { deep: true });
+    $el._x_resetChanges = $data.resetChanges;
+">
+
+    <!-- control collapse element open state and label visibility -->
+    <input type="checkbox" id="luistervinkSettingsOpen"
+        x-on:change="luistervinkSettingsOpen = !luistervinkSettingsOpen"
+        aria-controls="luistervinkSettingsContent"
+        aria-expanded="true" />
+
+    {{template "sectionHeader" dict
+        "id" "luistervink"
+        "title" "Luistervink"
+        "description" "Upload detections to Luistervink"}}
+
+    <div class="collapse-content"
+         id="luistervinkSettingsContent"
+         role="group"
+         aria-labelledby="luistervinkDescription">
+
+        {{template "checkbox" dict
+            "id" "luistervinkEnabled"
+            "model" "luistervink.enabled"
+            "name" "realtime.luistervink.enabled"
+            "label" "Enable Luistervink Uploads"
+            "tooltip" "Enable or disable uploads to Luistervink service."}}
+
+        <div x-show="luistervink.enabled"
+             class="grid grid-cols-1 md:grid-cols-2 gap-x-6"
+             id="luistervinkOptionsGroup"
+             role="group"
+             aria-label="Luistervink Additional Settings">
+
+            {{template "passwordField" dict
+                "id" "luistervinkToken"
+                "model" "luistervink.token"
+                "name" "realtime.luistervink.token"
+                "label" "Luistervink API Token"
+                "tooltip" "Your unique Luistervink API access token."
+                }}
+
+            {{template "numberField" dict
+                "id" "luistervinkThreshold"
+                "model" "luistervink.threshold"
+                "name" "realtime.luistervink.threshold"
+                "label" "Upload Threshold"
+                "step" "0.01"
+                "min" "0"
+                "max" "1"
+                "tooltip" "Minimum confidence threshold for uploading predictions to Luistervink."
+                }}
+
+            <!-- Multi-Stage Operation Component for Luistervink Connection Test -->
+            {{template "multiStageOperation" dict
+                "operationName" "Luistervink Connection Test"
+                "apiEndpoint" "/api/v1/luistervink/test"
+                "stageOrder" "['Starting Test', 'API Connectivity', 'Authentication', 'Detection Post']"
+                "buttonText" "Test Luistervink Connection"
+                "buttonLoadingText" "Testing..."
+                "buttonDisabledCondition" "!luistervink.enabled || !luistervink.token || isRunning"
+                "buttonTooltipMap" "!luistervink.enabled ? 'Luistervink must be enabled to test' : !luistervink.token ? 'Luistervink API token must be specified' : isRunning ? 'Test in progress...' : 'Test Luistervink connection'"
+                "payload" "{enabled: luistervink.enabled, token: luistervink.token, threshold: luistervink.threshold, debug: luistervink.debug}"
+                "completionMessage" "Please remember to save settings to apply the changes permanently."
+            }}
+        </div>
+    </div>
+</div>
+<!-- Luistervink Settings end -->
+
 <!-- MQTT Settings start -->
 <div class="collapse collapse-open bg-base-100 shadow-xs col-span-3" 
      role="region" 

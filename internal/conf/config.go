@@ -224,6 +224,14 @@ type BirdweatherSettings struct {
 	RetrySettings    RetrySettings `json:"retrySettings"`    // settings for retry mechanism
 }
 
+// LuistervinkSettings contains settings for Luistervink API integration.
+type LuistervinkSettings struct {
+	Enabled   bool    `json:"enabled"`   // true to enable luistervink uploads
+	Debug     bool    `json:"debug"`     // true to enable debug mode
+	Token     string  `json:"token"`     // luistervink API token
+	Threshold float64 `json:"threshold"` // threshold for prediction confidence for uploads
+}
+
 // EBirdSettings contains settings for eBird API integration.
 type EBirdSettings struct {
 	Enabled  bool   `json:"enabled"`  // true to enable eBird integration
@@ -493,6 +501,7 @@ type RealtimeSettings struct {
 	} `json:"log"`
 	LogDeduplication LogDeduplicationSettings `json:"logDeduplication"` // Log deduplication settings
 	Birdweather      BirdweatherSettings      `json:"birdweather"`      // Birdweather integration settings
+	Luistervink      LuistervinkSettings      `json:"luistervink"`      // Luistervink integration settings
 	EBird            EBirdSettings            `json:"ebird"`            // eBird integration settings
 	OpenWeather      OpenWeatherSettings      `yaml:"-" json:"-"`       // OpenWeather integration settings
 	PrivacyFilter    PrivacyFilterSettings    `json:"privacyFilter"`    // Privacy filter settings

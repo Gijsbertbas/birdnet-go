@@ -1198,6 +1198,27 @@
           "description": "Test BirdWeather connection"
         }
       },
+      "luistervink": {
+        "title": "Luistervink",
+        "description": "Upload detections to Luistervink",
+        "enable": "Enable Luistervink Uploads",
+        "token": {
+          "label": "Luistervink API Token",
+          "helpText": "Your unique Luistervink API token."
+        },
+        "threshold": {
+          "label": "Upload Threshold",
+          "helpText": "Minimum confidence threshold for uploading predictions to Luistervink."
+        },
+        "test": {
+          "button": "Test Luistervink Connection",
+          "loading": "Testing...",
+          "enabledRequired": "Luistervink must be enabled to test",
+          "tokenRequired": "Luistervink API token must be specified",
+          "inProgress": "Test in progress...",
+          "description": "Test Luistervink connection"
+        }
+      },
       "mqtt": {
         "title": "MQTT",
         "description": "Configure MQTT broker connection",

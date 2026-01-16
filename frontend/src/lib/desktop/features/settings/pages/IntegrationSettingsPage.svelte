@@ -71,6 +71,12 @@
         threshold: 0.7,
         debug: false,
       },
+      luistervink: {
+        enabled: false,
+        token: '',
+        threshold: 0.7,
+        debug: false,
+      },
       mqtt: {
         enabled: false,
         broker: '',
@@ -105,6 +111,13 @@
     )
   );
 
+  let luistervinkHasChanges = $derived(
+    hasSettingsChanged(
+      (store.originalData as SettingsFormData)?.realtime?.luistervink,
+      (store.formData as SettingsFormData)?.realtime?.luistervink
+    )
+  );
+
   let mqttHasChanges = $derived(
     hasSettingsChanged(
       (store.originalData as SettingsFormData)?.realtime?.mqtt,
@@ -130,10 +143,12 @@
   // Test states for multi-stage operations
   let testStates = $state<{
     birdweather: { stages: Stage[]; isRunning: boolean; showSuccessNote: boolean };
+    luistervink: { stages: Stage[]; isRunning: boolean; showSuccessNote: boolean };
     mqtt: { stages: Stage[]; isRunning: boolean; showSuccessNote: boolean };
     weather: { stages: Stage[]; isRunning: boolean; showSuccessNote: boolean };
   }>({
     birdweather: { stages: [], isRunning: false, showSuccessNote: false },
+    luistervink: { stages: [], isRunning: false, showSuccessNote: false },
     mqtt: { stages: [], isRunning: false, showSuccessNote: false },
     weather: { stages: [], isRunning: false, showSuccessNote: false },
   });
@@ -157,6 +172,25 @@
   function updateBirdWeatherThreshold(threshold: number) {
     settingsActions.updateSection('realtime', {
       birdweather: { ...settings.birdweather!, threshold },
+    });
+  }
+
+  // Luistervink update handlers
+  function updateLuistervinkEnabled(enabled: boolean) {
+    settingsActions.updateSection('realtime', {
+      luistervink: { ...settings.luistervink!, enabled },
+    });
+  }
+
+  function updateLuistervinkToken(token: string) {
+    settingsActions.updateSection('realtime', {
+      luistervink: { ...settings.luistervink!, token },
+    });
+  }
+
+  function updateLuistervinkThreshold(threshold: number) {
+    settingsActions.updateSection('realtime', {
+      luistervink: { ...settings.luistervink!, threshold },
     });
   }
 
@@ -456,6 +490,194 @@
         logger.debug('Clearing BirdWeather test results after timeout');
         testStates.birdweather.stages = [];
         testStates.birdweather.showSuccessNote = false;
+      }, 30000);
+    }
+  }
+
+  async function testLuistervink() {
+    logger.debug('Starting Luistervink test...');
+    testStates.luistervink.isRunning = true;
+    testStates.luistervink.stages = [];
+
+    try {
+      const currentLuistervink = store.formData?.realtime?.luistervink || settings.luistervink!;
+      logger.debug('Luistervink test config:', currentLuistervink);
+
+      const testPayload = {
+        enabled: currentLuistervink.enabled || false,
+        token: currentLuistervink.token || '',
+        threshold: currentLuistervink.threshold || 0.7,
+        debug: currentLuistervink.debug || false,
+      };
+
+      const headers = new Headers({
+        'Content-Type': 'application/json',
+      });
+
+      if (csrfToken) {
+        headers.set('X-CSRF-Token', csrfToken);
+      }
+
+      logger.debug('Sending Luistervink test request with payload:', testPayload);
+
+      const response = await fetch('/api/v2/integrations/luistervink/test', {
+        method: 'POST',
+        headers,
+        credentials: 'same-origin',
+        body: JSON.stringify(testPayload),
+      });
+
+      logger.debug('Luistervink test response status:', response.status, response.statusText);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        throw new Error('Failed to read response stream');
+      }
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        logger.debug('Raw Luistervink chunk received:', chunk);
+
+        const jsonObjects = [];
+        let remaining = chunk;
+
+        while (remaining.trim()) {
+          try {
+            let braceCount = 0;
+            let jsonEnd = -1;
+
+            for (let i = 0; i < remaining.length; i++) {
+              // eslint-disable-next-line security/detect-object-injection
+              const char = remaining[i] || '';
+              if (char === '{') braceCount++;
+              if (char === '}') braceCount--;
+              if (braceCount === 0) {
+                jsonEnd = i + 1;
+                break;
+              }
+            }
+
+            if (jsonEnd === -1) break;
+
+            const jsonStr = remaining.substring(0, jsonEnd).trim();
+            if (jsonStr) {
+              jsonObjects.push(jsonStr);
+            }
+
+            remaining = remaining.substring(jsonEnd).trim();
+          } catch (e) {
+            logger.error('Error splitting JSON objects:', e);
+            break;
+          }
+        }
+
+        for (const jsonStr of jsonObjects) {
+          try {
+            const stageResult = JSON.parse(jsonStr);
+            logger.debug('Luistervink test result received:', stageResult);
+
+            if (!stageResult.stage) {
+              if (stageResult.success === false && stageResult.message) {
+                logger.debug('Handling initial error response:', stageResult);
+                testStates.luistervink.stages.push({
+                  id: 'initial-error',
+                  title: 'Configuration Check',
+                  status: 'error',
+                  message: stageResult.message,
+                  error: stageResult.message,
+                });
+              }
+              continue;
+            }
+
+            const stageId = stageResult.stage.toLowerCase().replace(/\\s+/g, '');
+
+            let status: 'pending' | 'in_progress' | 'completed' | 'error' | 'skipped';
+            if (stageResult.isProgress) {
+              status = 'in_progress';
+            } else if (stageResult.success) {
+              status = 'completed';
+            } else {
+              status = 'error';
+            }
+
+            const stage = {
+              id: stageId,
+              title: stageResult.stage || 'Test Stage',
+              status,
+              message: stageResult.message || '',
+              error: stageResult.error || '',
+            };
+
+            logger.debug('Adding/updating Luistervink stage:', stage);
+
+            let existingIndex = testStates.luistervink.stages.findIndex(s => s.id === stage.id);
+            if (existingIndex === -1) {
+              testStates.luistervink.stages.push(stage);
+            } else {
+              const existingStage = safeArrayAccess(testStates.luistervink.stages, existingIndex);
+              if (
+                existingStage &&
+                existingIndex >= 0 &&
+                existingIndex < testStates.luistervink.stages.length
+              ) {
+                testStates.luistervink.stages.splice(existingIndex, 1, {
+                  ...existingStage,
+                  ...stage,
+                });
+              }
+            }
+
+            logger.debug('Current Luistervink stages:', testStates.luistervink.stages);
+          } catch (parseError) {
+            logger.error('Failed to parse Luistervink test result:', parseError, jsonStr);
+          }
+        }
+      }
+    } catch (error) {
+      logger.error('Luistervink test failed:', error);
+
+      if (testStates.luistervink.stages.length === 0) {
+        testStates.luistervink.stages.push({
+          id: 'error',
+          title: 'Connection Error',
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Unknown error occurred',
+        });
+      } else {
+        const lastIndex = testStates.luistervink.stages.length - 1;
+        const lastStage = safeArrayAccess(testStates.luistervink.stages, lastIndex);
+        if (lastStage && lastStage.status !== 'completed') {
+          const updatedStage = {
+            ...lastStage,
+            status: 'error' as const,
+            error: error instanceof Error ? error.message : 'Unknown error occurred',
+          };
+          testStates.luistervink.stages.splice(lastIndex, 1, updatedStage);
+        }
+      }
+    } finally {
+      testStates.luistervink.isRunning = false;
+      logger.debug('Luistervink test finished, stages:', testStates.luistervink.stages);
+
+      const allStagesCompleted =
+        testStates.luistervink.stages.length > 0 &&
+        testStates.luistervink.stages.every(stage => stage.status === 'completed');
+      testStates.luistervink.showSuccessNote = allStagesCompleted && luistervinkHasChanges;
+
+      setTimeout(() => {
+        logger.debug('Clearing Luistervink test results after timeout');
+        testStates.luistervink.stages = [];
+        testStates.luistervink.showSuccessNote = false;
       }, 30000);
     }
   }
@@ -895,6 +1117,88 @@
           {/if}
 
           <TestSuccessNote show={testStates.birdweather.showSuccessNote} />
+        </div>
+      {/if}
+    </div>
+  </SettingsSection>
+
+  <!-- Luistervink Settings -->
+  <SettingsSection
+    title={t('settings.integration.luistervink.title')}
+    description={t('settings.integration.luistervink.description')}
+    defaultOpen={false}
+    hasChanges={luistervinkHasChanges}
+  >
+    <div class="space-y-4">
+      <Checkbox
+        checked={settings.luistervink!.enabled}
+        label={t('settings.integration.luistervink.enable')}
+        disabled={store.isLoading || store.isSaving}
+        onchange={updateLuistervinkEnabled}
+      />
+
+      {#if settings.luistervink?.enabled}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <PasswordField
+            label={t('settings.integration.luistervink.token.label')}
+            value={settings.luistervink!.token}
+            onUpdate={updateLuistervinkToken}
+            placeholder=""
+            helpText={t('settings.integration.luistervink.token.helpText')}
+            disabled={store.isLoading || store.isSaving}
+            allowReveal={true}
+          />
+
+          <NumberField
+            label={t('settings.integration.luistervink.threshold.label')}
+            value={settings.luistervink!.threshold}
+            onUpdate={updateLuistervinkThreshold}
+            min={0}
+            max={1}
+            step={0.01}
+            placeholder="0.7"
+            helpText={t('settings.integration.luistervink.threshold.helpText')}
+            disabled={store.isLoading || store.isSaving}
+          />
+        </div>
+
+        <!-- Test Connection -->
+        <div class="space-y-4">
+          <div class="flex items-center gap-3">
+            <SettingsButton
+              onclick={testLuistervink}
+              loading={testStates.luistervink.isRunning}
+              loadingText={t('settings.integration.luistervink.test.loading')}
+              disabled={!(
+                store.formData?.realtime?.luistervink?.enabled ?? settings.luistervink?.enabled
+              ) ||
+                !(store.formData?.realtime?.luistervink?.token ?? settings.luistervink?.token) ||
+                testStates.luistervink.isRunning}
+            >
+              {t('settings.integration.luistervink.test.button')}
+            </SettingsButton>
+            <span class="text-sm text-base-content/70">
+              {#if !(store.formData?.realtime?.luistervink?.enabled ?? settings.luistervink?.enabled)}
+                {t('settings.integration.luistervink.test.enabledRequired')}
+              {:else if !(store.formData?.realtime?.luistervink?.token ?? settings.luistervink?.token)}
+                {t('settings.integration.luistervink.test.tokenRequired')}
+              {:else if testStates.luistervink.isRunning}
+                {t('settings.integration.luistervink.test.inProgress')}
+              {:else}
+                {t('settings.integration.luistervink.test.description')}
+              {/if}
+            </span>
+          </div>
+
+          {#if testStates.luistervink.stages.length > 0}
+            <MultiStageOperation
+              stages={testStates.luistervink.stages}
+              variant="compact"
+              showProgress={false}
+            />
+          {/if}
+
+          <TestSuccessNote show={testStates.luistervink.showSuccessNote} />
         </div>
       {/if}
     </div>

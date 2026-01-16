@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/luistervink"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
 	"github.com/tphakala/birdnet-go/internal/weather"
 )
@@ -60,6 +61,10 @@ func (c *Controller) initIntegrationsRoutes() {
 	bwGroup := integrationsGroup.Group("/birdweather")
 	bwGroup.GET("/status", c.GetBirdWeatherStatus)
 	bwGroup.POST("/test", c.TestBirdWeatherConnection)
+
+	// Luistervink routes
+	lvGroup := integrationsGroup.Group("/luistervink")
+	lvGroup.POST("/test", c.TestLuistervinkConnection)
 
 	// Weather routes
 	weatherGroup := integrationsGroup.Group("/weather")
@@ -498,6 +503,160 @@ func (c *Controller) TestBirdWeatherConnection(ctx echo.Context) error {
 	return nil
 }
 
+// TestLuistervinkConnection handles POST /api/v2/integrations/luistervink/test
+func (c *Controller) TestLuistervinkConnection(ctx echo.Context) error {
+	var request LuistervinkTestRequest
+	if err := ctx.Bind(&request); err != nil {
+		return c.HandleError(ctx, err, "Invalid Luistervink test request", http.StatusBadRequest)
+	}
+
+	// Validate Luistervink configuration from the request
+	if !request.Enabled {
+		return ctx.JSON(http.StatusOK, map[string]any{
+			"success": false,
+			"message": "Luistervink integration is not enabled",
+			"state":   "failed",
+		})
+	}
+
+	// Validate Luistervink configuration
+	if request.Token == "" {
+		return ctx.JSON(http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Luistervink API token not configured",
+			"state":   "failed",
+		})
+	}
+
+	// Create temporary settings for the test
+	testSettings := &conf.Settings{
+		BirdNET: conf.BirdNETConfig{
+			Latitude:  c.Settings.BirdNET.Latitude,
+			Longitude: c.Settings.BirdNET.Longitude,
+		},
+		Realtime: conf.RealtimeSettings{
+			Luistervink: conf.LuistervinkSettings{
+				Enabled:   request.Enabled,
+				Token:     request.Token,
+				Threshold: request.Threshold,
+				Debug:     request.Debug,
+			},
+		},
+	}
+
+	// Create test Luistervink client with the test configuration
+	client, err := luistervink.New(testSettings)
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": fmt.Sprintf("Failed to create Luistervink client: %v", err),
+			"state":   "failed",
+		})
+	}
+
+	// Prepare for testing
+	ctx.Response().Header().Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	ctx.Response().WriteHeader(http.StatusOK)
+
+	// Channel for test results
+	resultChan := make(chan luistervink.TestResult)
+
+	// Create a done channel to signal when the client disconnects
+	doneChan := make(chan struct{})
+
+	// Use sync.Once to ensure doneChan is closed exactly once
+	var closeOnce sync.Once
+	// Helper function to safely close the doneChan
+	safeDoneClose := func() {
+		closeOnce.Do(func() {
+			close(doneChan)
+		})
+	}
+
+	// Mutex for safe writing to response
+	var writeMu sync.Mutex
+
+	// Create context with timeout that also gets cancelled if HTTP client disconnects
+	httpCtx := ctx.Request().Context()
+	testCtx, cancel := context.WithTimeout(httpCtx, 30*time.Second)
+	defer cancel()
+
+	// Run the test in a goroutine
+	go func() {
+		defer close(resultChan)
+		startTime := time.Now()
+
+		// Start the test
+		client.TestConnection(testCtx, resultChan)
+
+		// Calculate elapsed time
+		elapsedTime := time.Since(startTime).Milliseconds()
+
+		// Clean up client resources
+		client.Close()
+
+		// Send final result with elapsed time if the client is still connected
+		select {
+		case <-doneChan:
+			// HTTP client has disconnected, no need to send final result
+			c.Debug("HTTP client disconnected, skipping final result")
+		case <-testCtx.Done():
+			// Test timed out or was cancelled
+			c.Debug("Test context cancelled: %v", testCtx.Err())
+		default:
+			// Still connected, send final result
+			writeMu.Lock()
+			defer writeMu.Unlock()
+
+			// Format final response
+			finalResult := map[string]any{
+				"elapsed_time_ms": elapsedTime,
+				"state":           "completed",
+			}
+
+			// Write final result to response if possible
+			if err := c.writeJSONResponse(ctx, finalResult); err != nil {
+				c.logger.Printf("Error writing final Luistervink test result: %v", err)
+			}
+		}
+	}()
+
+	// Feed streaming results to client
+	encoder := json.NewEncoder(ctx.Response())
+
+	// Stream results to client until done
+	for result := range resultChan {
+		writeMu.Lock()
+		if err := encoder.Encode(result); err != nil {
+			c.logger.Printf("Error encoding Luistervink test result: %v", err)
+			writeMu.Unlock()
+
+			// Signal that the HTTP client has disconnected using sync.Once
+			safeDoneClose()
+
+			// Cancel the test context to stop ongoing tests
+			cancel()
+			return nil
+		}
+		ctx.Response().Flush()
+		writeMu.Unlock()
+
+		// Check if HTTP context is done (client disconnected)
+		select {
+		case <-httpCtx.Done():
+			c.Debug("HTTP client disconnected during test")
+			// Use sync.Once to safely close the channel
+			safeDoneClose()
+			cancel() // Cancel the test context
+			return nil
+		default:
+			// Continue processing
+		}
+	}
+
+	return nil
+}
+
 // BirdWeatherTestRequest represents a request to test BirdWeather connectivity
 type BirdWeatherTestRequest struct {
 	Enabled          bool    `json:"enabled"`
@@ -505,6 +664,14 @@ type BirdWeatherTestRequest struct {
 	Threshold        float64 `json:"threshold"`
 	LocationAccuracy float64 `json:"locationAccuracy"`
 	Debug            bool    `json:"debug"`
+}
+
+// LuistervinkTestRequest represents a request to test Luistervink connectivity
+type LuistervinkTestRequest struct {
+	Enabled   bool    `json:"enabled"`
+	Token     string  `json:"token"`
+	Threshold float64 `json:"threshold"`
+	Debug     bool    `json:"debug"`
 }
 
 // WeatherTestRequest represents a request to test weather provider connectivity

@@ -117,7 +117,7 @@ tasks:
         echo "  • Go dev tools (golangci-lint, air)"
         echo "  • Frontend dependencies and Playwright browsers"
         echo ""
-        read -p "Continue with setup? (y/N) " -n 1 -r
+        read -p "Continue with setup? (y/N) " -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
           echo "Setup cancelled."
@@ -147,7 +147,9 @@ tasks:
       - |
         echo "🔍 Detecting operating system..."
 
-        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        OS_NAME="$(uname -s)"
+
+        if [[ "$OS_NAME" = "Linux" ]]; then
           echo "📦 Installing dependencies for Linux (apt-based)..."
 
           # Check if running as root or with sudo
@@ -270,7 +272,7 @@ tasks:
             sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
           fi
 
-        elif [[ "$OSTYPE" == "darwin"* ]]; then
+        elif [[ "$OS_NAME" = "Darwin" ]]; then
           echo "📦 Installing dependencies for macOS (homebrew)..."
 
           # Check if homebrew is installed
@@ -350,7 +352,7 @@ tasks:
           fi
 
         else
-          echo "❌ Unsupported operating system: $OSTYPE"
+          echo "❌ Unsupported operating system: $OS_NAME"
           echo "This script supports Linux (apt-based) and macOS (homebrew)"
           exit 1
         fi
@@ -367,8 +369,7 @@ tasks:
         # Install golangci-lint
         if ! command -v golangci-lint >/dev/null 2>&1; then
           echo "📥 Installing golangci-lint..."
-          # Add timeout for install script download and execution
-          if ! timeout 120 bash -c "curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b \$(go env GOPATH)/bin"; then
+          if ! bash -c "curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b \$(go env GOPATH)/bin"; then
             echo "❌ Failed to install golangci-lint"
             echo "   Check your internet connection and try again"
             exit 1

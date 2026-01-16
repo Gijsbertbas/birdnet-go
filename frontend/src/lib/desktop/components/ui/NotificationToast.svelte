@@ -1,8 +1,8 @@
 <script lang="ts">
   import { cn } from '$lib/utils/cn';
   import { onMount } from 'svelte';
-  import type { Snippet } from 'svelte';
-  import { navigationIcons, alertIcons } from '$lib/utils/icons'; // Centralized icons - see icons.ts
+  import type { Snippet, Component } from 'svelte';
+  import { X, XCircle, TriangleAlert, Info, CircleCheck } from '@lucide/svelte';
   import { t } from '$lib/i18n';
   import { safeGet } from '$lib/utils/security';
 
@@ -47,11 +47,12 @@
   let isVisible = $state(true);
   let timeoutId: number | null = null;
 
+  // Native Tailwind classes for toast types - solid backgrounds for readability
   const typeClasses: Record<ToastType, string> = {
-    info: 'alert-info',
-    success: 'alert-success',
-    warning: 'alert-warning',
-    error: 'alert-error',
+    info: 'bg-[var(--color-info)] text-[var(--color-info-content)]',
+    success: 'bg-[var(--color-success)] text-[var(--color-success-content)]',
+    warning: 'bg-[var(--color-warning)] text-[var(--color-warning-content)]',
+    error: 'bg-[var(--color-error)] text-[var(--color-error-content)]',
   };
 
   // Position classes are intentionally left empty because all positioning styles
@@ -67,7 +68,13 @@
     'bottom-right': '',
   };
 
-  // Use centralized alert icons instead of duplicated paths
+  // Map toast types to Lucide icon components
+  const alertIcons: Record<ToastType, Component> = {
+    info: Info,
+    success: CircleCheck,
+    warning: TriangleAlert,
+    error: XCircle,
+  };
 
   function handleClose() {
     isVisible = false;
@@ -96,38 +103,34 @@
 {#if isVisible}
   <div class={cn('w-full max-w-xs', safeGet(positionClasses, position, ''))}>
     <div
-      class={cn('alert', safeGet(typeClasses, type, 'alert-info'), className)}
+      class={cn(
+        'flex items-center gap-3 p-4 rounded-lg shadow-lg',
+        safeGet(typeClasses, type, typeClasses.info),
+        className
+      )}
       role="alert"
       aria-live={type === 'error' ? 'assertive' : 'polite'}
     >
       {#if showIcon}
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-6 w-6 shrink-0 stroke-current"
-          fill="none"
-          viewBox="0 0 24 24"
-          aria-hidden="true"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d={safeGet(alertIcons, type, '')}
-          />
-        </svg>
+        {@const IconComponent = safeGet(alertIcons, type, Info)}
+        <IconComponent class="size-5 shrink-0" aria-hidden="true" />
       {/if}
 
-      <div class="flex-1">
-        <div>{message}</div>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-medium">{message}</div>
         {#if children}
           {@render children()}
         {/if}
       </div>
 
       {#if actions.length > 0}
-        <div class="flex gap-2">
-          {#each actions as action}
-            <button type="button" class="btn btn-sm" onclick={action.onClick}>
+        <div class="flex gap-2 shrink-0">
+          {#each actions as action, index (index)}
+            <button
+              type="button"
+              class="inline-flex items-center justify-center px-2 py-1 text-xs font-medium rounded transition-colors bg-white/20 hover:bg-white/30"
+              onclick={action.onClick}
+            >
               {action.label}
             </button>
           {/each}
@@ -136,11 +139,11 @@
 
       <button
         type="button"
-        class="btn btn-sm btn-circle btn-ghost"
+        class="inline-flex items-center justify-center p-1 rounded-full shrink-0 transition-colors hover:bg-white/20"
         onclick={handleClose}
         aria-label={t('common.aria.closeNotification')}
       >
-        {@html navigationIcons.close}
+        <X class="size-4" />
       </button>
     </div>
   </div>

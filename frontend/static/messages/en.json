@@ -2,8 +2,12 @@
   "common": {
     "loading": "Loading...",
     "error": "Error",
+    "unknown": "Unknown",
+    "retry": "Retry",
+    "retrying": "Retrying",
     "save": "Save",
     "cancel": "Cancel",
+    "confirm": "Confirm",
     "reset": "Reset",
     "refresh": "Refresh",
     "delete": "Delete",
@@ -29,7 +33,9 @@
     "internalServerError": "Internal Server Error",
     "actions": {
       "download": "Download",
-      "review": "Review"
+      "review": "Review",
+      "play": "Play",
+      "view": "View"
     },
     "buttons": {
       "save": "Save Changes",
@@ -63,7 +69,18 @@
       "selectAll": "Select all",
       "selectNone": "Select none",
       "required": "Required",
-      "optional": "Optional"
+      "optional": "Optional",
+      "noAudioSources": "No audio sources available",
+      "noNotifications": "No notifications",
+      "silent": "(silent)",
+      "loadingSettings": "Loading settings...",
+      "settingsNotFound": "Settings Not Found",
+      "sectionNotFound": "The requested settings section \"{section}\" could not be found.",
+      "loadingMap": "Loading map...",
+      "mapZoomHelp": "Hold Ctrl (or Cmd on Mac) + scroll to zoom. Click to set location.",
+      "mapSetLocationHelp": "Click on the map or drag the marker to set location",
+      "imageNotAvailable": "Image not available",
+      "search": "Search..."
     },
     "status": {
       "success": "Success",
@@ -116,11 +133,13 @@
       "learnEbirdTaxonomyLink": "Open eBird Taxonomy in a new tab"
     },
     "labels": {
-      "confidence": "Confidence"
+      "confidence": "Confidence",
+      "github": "GitHub"
     },
     "values": {
       "yes": "Yes",
-      "no": "No"
+      "no": "No",
+      "unknown": "Unknown"
     },
     "modal": {
       "confirmAction": "Confirm Action",
@@ -131,7 +150,8 @@
       "status": {
         "verifiedCorrect": "Verified Correct",
         "falsePositive": "False Positive",
-        "notReviewed": "Not Reviewed"
+        "notReviewed": "Not Reviewed",
+        "locked": "Locked"
       },
       "form": {
         "correctDetection": "Correct Detection",
@@ -166,6 +186,16 @@
       }
     }
   },
+  "pageTitle": {
+    "settings": "Settings - BirdNET-Go",
+    "pageNotFound": "404 - Page Not Found",
+    "serverError": "500 - Internal Server Error",
+    "componentError": "Component Load Error",
+    "speciesAnalytics": "Species Analytics",
+    "advancedAnalytics": "Advanced Analytics",
+    "detectionDetails": "Detection Details",
+    "settingsNotAvailable": "Settings Not Available"
+  },
   "navigation": {
     "dashboard": "Dashboard",
     "detections": "Detections",
@@ -192,6 +222,7 @@
     "developedBy": "Developed by",
     "developersText": "The K. Lisa Yang Center for Conservation Bioacoustics at the Cornell Lab of Ornithology in collaboration with Chemnitz University of Technology:",
     "visitBirdnetAnalyzer": "Visit BirdNET-Analyzer Project",
+    "visitBirdnetAnalyzerAriaLabel": "Visit BirdNET-Analyzer GitHub repository",
     "contributors": "Contributors",
     "contributorsText": "BirdNET-Go has grown and improved thanks to the collaborative efforts of many individuals. Their contributions, ranging from code improvements to feature suggestions, have been invaluable in making this project better.",
     "mainDeveloper": "Main Developer",
@@ -229,12 +260,19 @@
     "taxonomyCoverage": "2,374 genera, 254 families, 11,145 species",
     "visitEbird": "Visit eBird.org",
     "ebirdOrg": "eBird.org",
-    "learnEbirdTaxonomy": "Learn about eBird Taxonomy"
+    "learnEbirdTaxonomy": "Learn about eBird Taxonomy",
+    "avicommonsTitle": "Bird Thumbnails",
+    "avicommonsDescription": "BirdNET-Go uses curated bird images from Avicommons, a library of hand-picked, cropped, and oriented bird photos licensed under Creative Commons licenses.",
+    "githubStarPrompt": "If you find BirdNET-Go valuable, please consider starring the project on GitHub. Stars help others discover this project and support its continued development.",
+    "viewOnGithub": "View Project on GitHub",
+    "visitGithubAriaLabel": "Visit BirdNET-Go GitHub repository",
+    "visitAvicommonsGithub": "Visit Avicommons GitHub repository"
   },
   "notifications": {
     "title": "Notifications",
     "subtitle": "View and manage all system notifications",
     "filters": {
+      "label": "Filters",
       "allStatus": "All Status",
       "unread": "Unread",
       "read": "Read",
@@ -279,12 +317,26 @@
       "minutesAgo": "{minutes}m ago",
       "hoursAgo": "{hours}h ago",
       "daysAgo": "{days}d ago"
+    },
+    "viewMode": {
+      "label": "View mode",
+      "grouped": "Grouped view",
+      "flat": "Flat view"
+    },
+    "groups": {
+      "markAllRead": "Mark all as read",
+      "dismissAll": "Dismiss all",
+      "unread": "{count} unread",
+      "confirmBulkDelete": "Delete Multiple Notifications",
+      "bulkDeleteConfirmation": "Are you sure you want to delete {count} notifications?"
     }
   },
   "search": {
     "title": "Search Filters",
     "results": "Search Results",
-    "resultsCount": "{count, plural, =0 {No results} one {# result} other {# results}}",
+    "resultsCountZero": "No results",
+    "resultsCountOne": "1 result",
+    "resultsCountOther": "{count} results",
     "noSearchPerformed": "No search performed yet",
     "noSearchPerformedHint": "Use the search filters above to find bird detections",
     "loadingResults": "Loading results...",
@@ -377,20 +429,39 @@
       "defaultMessage": "An internal server error occurred.",
       "goToDashboard": "Go to Dashboard"
     },
+    "server": {
+      "title": "Server Connection Error",
+      "description": "Unable to connect to the server. Please check your connection and try again."
+    },
     "generic": {
       "errorDetails": "Error Details",
       "stackTrace": "Stack Trace",
       "goToDashboard": "Go to Dashboard",
       "reportIssue": "Report Issue",
-      "loginToViewDetails": "Login to View Details"
+      "loginToViewDetails": "Login to View Details",
+      "componentLoadError": "Component Load Error",
+      "failedToLoadComponent": "Failed to load the requested component"
     }
   },
   "dashboard": {
     "dailySummary": {
-      "title": "Daily Summary",
+      "title": "Daily Activity",
+      "subtitle": "Species detections by hour",
       "columns": {
         "species": "Species",
         "detections": "Detections"
+      },
+      "daylight": {
+        "label": "Daylight",
+        "sunrise": "Sunrise at {time}",
+        "sunset": "Sunset at {time}"
+      },
+      "weather": {
+        "label": "Weather"
+      },
+      "legend": {
+        "less": "Less",
+        "more": "More"
       },
       "navigation": {
         "previousDay": "Previous day",
@@ -415,14 +486,18 @@
     },
     "recentDetections": {
       "title": "Recent Detections",
+      "subtitle": "Latest identified species",
       "controls": {
         "show": "Show:",
-        "refresh": "Refresh detections"
+        "refresh": "Refresh detections",
+        "refreshPaused": "Refresh paused while interaction is active"
       },
       "headers": {
         "dateTime": "Date & Time",
+        "time": "Time",
         "commonName": "Common Name",
         "species": "Species",
+        "weather": "Weather",
         "confidence": "Confidence",
         "thumbnail": "Thumbnail",
         "status": "Status",
@@ -446,6 +521,15 @@
         "lockDetectionConfirm": "Are you sure you want to lock this detection of {species}? This will prevent it from being deleted during regular cleanup.",
         "deleteDetection": "Delete Detection of {species}",
         "deleteDetectionConfirm": "Are you sure you want to delete detection of {species}? This action cannot be undone."
+      },
+      "actions": {
+        "menuLabel": "Actions for {species}",
+        "review": "Review detection",
+        "showSpecies": "Show species",
+        "ignoreSpecies": "Ignore species",
+        "lockDetection": "Lock detection",
+        "unlockDetection": "Unlock detection",
+        "deleteDetection": "Delete detection"
       },
       "noDetections": "No recent detections"
     },
@@ -490,11 +574,25 @@
       "showing": "Showing {from} to {to} of {total} results"
     },
     "weather": {
+      "title": "Weather Information",
       "noData": "No weather data",
+      "noDataAvailable": "No weather data available",
+      "loading": "Loading weather information...",
+      "labels": {
+        "temperature": "Temperature",
+        "weather": "Weather",
+        "wind": "Wind",
+        "humidity": "Humidity",
+        "pressure": "Pressure",
+        "cloudCover": "Cloud Cover"
+      },
       "units": {
         "temperature": "°C",
+        "temperatureFahrenheit": "°F",
         "windSpeed": "m/s",
-        "humidity": "%"
+        "windSpeedImperial": "mph",
+        "humidity": "%",
+        "pressure": "hPa"
       },
       "conditions": {
         "clearsky_day": "Clear Sky",
@@ -543,16 +641,40 @@
     "notes": {
       "title": "Notes & Comments",
       "noComments": "No comments or notes for this detection."
+    },
+    "aria": {
+      "loading": "Loading detection details...",
+      "loaded": "Detection details loaded for {species}",
+      "error": "Error loading detection: {error}"
+    },
+    "errors": {
+      "notFound": "Detection not found. It may have been deleted or the ID is incorrect.",
+      "noPermission": "You don't have permission to view this detection.",
+      "loginRequired": "Please log in to view this detection.",
+      "serverError": "Server error. Please try again later or contact support if the problem persists.",
+      "loadFailed": "Failed to load detection (Error {status}). Please try refreshing the page.",
+      "noIdProvided": "No detection ID provided."
     }
   },
   "species": {
     "rarity": {
-      "title": "Species Rarity"
+      "title": "Species Rarity",
+      "score": "Score",
+      "basedOnLocation": "Based on location: {latitude}, {longitude}"
     },
     "taxonomy": {
       "hierarchy": "Taxonomic Classification",
       "subspecies": "Subspecies",
-      "noData": "No taxonomy data available."
+      "noData": "No taxonomy data available.",
+      "labels": {
+        "kingdom": "Kingdom",
+        "phylum": "Phylum",
+        "class": "Class",
+        "order": "Order",
+        "family": "Family",
+        "genus": "Genus",
+        "species": "Species"
+      }
     }
   },
   "system": {
@@ -580,10 +702,23 @@
     },
     "memoryUsage": {
       "title": "Memory Usage",
-      "ramUsage": "RAM Usage"
+      "ramUsage": "RAM Usage",
+      "labels": {
+        "free": "Free",
+        "available": "Available",
+        "buffCache": "Buff/Cache"
+      }
+    },
+    "progress": {
+      "labels": {
+        "overallProgress": "Overall Progress",
+        "progress": "Progress"
+      }
     },
     "processInfo": {
       "title": "Process Information",
+      "loading": "Loading process information...",
+      "noProcesses": "No process information available",
       "headers": {
         "pid": "PID",
         "name": "Name",
@@ -593,7 +728,15 @@
         "uptime": "Uptime"
       },
       "showAll": "Show All Processes",
-      "showBirdnetOnly": "Show BirdNET Only"
+      "showBirdnetOnly": "Show BirdNET Only",
+      "table": {
+        "process": "Process",
+        "status": "Status",
+        "cpu": "CPU",
+        "memory": "Memory",
+        "uptime": "Uptime",
+        "showAllProcesses": "Show all processes"
+      }
     },
     "errors": {
       "systemInfo": "Failed to load system information: {error}",
@@ -706,6 +849,49 @@
         "confidence": "Confidence:",
         "first": "First:"
       }
+    },
+    "advanced": {
+      "title": "Advanced Analytics",
+      "chartControls": "Chart Controls",
+      "dateRange": "Date Range",
+      "chartOptions": "Chart Options",
+      "speciesSelection": "Species Selection ({count}/{max})",
+      "speciesSelectionHint": "Search or click chips below",
+      "speciesPlaceholder": "Search and select species for analysis...",
+      "noSpeciesFound": "No species found for the selected date range",
+      "detections": "{count} detections",
+      "dateRangeOptions": {
+        "week": "Last Week",
+        "month": "Last Month",
+        "quarter": "Last Quarter",
+        "year": "Last Year",
+        "custom": "Custom Range"
+      },
+      "options": {
+        "relativeTrends": "Relative trends",
+        "zoomPan": "Zoom & pan",
+        "brushSelection": "Brush selection"
+      },
+      "charts": {
+        "timeOfDay": {
+          "title": "Detection Patterns by Time of Day",
+          "description": "Shows average detection counts throughout the day for selected species",
+          "noData": "No time-of-day data available",
+          "noDataHint": "Select species and a date range to view patterns"
+        },
+        "dailyTrend": {
+          "title": "Species Detection Trends",
+          "description": "Shows detection trends over time for selected species",
+          "noData": "No trend data available",
+          "noDataHint": "Select species and a date range to view trends"
+        }
+      },
+      "aria": {
+        "startDate": "Start date",
+        "endDate": "End date",
+        "loadingAnalytics": "Loading analytics data",
+        "loadingTrends": "Loading trend data"
+      }
     }
   },
   "settings": {
@@ -733,13 +919,26 @@
       "resetAriaLabel": "Reset all changes",
       "saveAriaLabel": "Save Changes",
       "savingAriaLabel": "Saving changes...",
-      "unsavedChanges": "Unsaved changes"
+      "unsavedChanges": "Unsaved changes",
+      "toolbar": "Settings actions"
     },
     "card": {
       "changed": "changed",
       "changedAriaLabel": "Settings changed"
     },
+    "tabs": {
+      "navigation": "Settings navigation tabs",
+      "hasChanges": "This tab has unsaved changes",
+      "setAsDefault": "Set as default",
+      "defaultIndicator": "Default input source"
+    },
     "main": {
+      "tabs": {
+        "general": "General",
+        "detection": "Detection",
+        "location": "Location",
+        "database": "Database"
+      },
       "sections": {
         "main": {
           "title": "Main Settings",
@@ -755,6 +954,7 @@
         },
         "customClassifier": {
           "title": "Custom BirdNET Classifier",
+          "description": "Configure custom BirdNET model and label files for specialized detection",
           "modelPath": {
             "label": "Model Path (Requires restart to apply)",
             "placeholder": "Path to model file",
@@ -768,6 +968,7 @@
         },
         "dynamicThreshold": {
           "title": "Dynamic Threshold",
+          "description": "Automatically adjust detection sensitivity based on prior observations",
           "enable": {
             "label": "Enable Dynamic Threshold (BirdNET-Go specific feature)",
             "helpText": "Enables dynamic confidence threshold feature for more adaptive bird call detection."
@@ -785,19 +986,30 @@
             "helpText": "The number of hours during which the dynamic threshold adjustments remain valid. After this period, the dynamic threshold is reset."
           }
         },
+        "falsePositiveFilter": {
+          "title": "False Positive Filter",
+          "description": "Reduce false detections by requiring multiple confirmations across overlapping audio segments",
+          "level": {
+            "label": "Filter Level"
+          },
+          "hardwareNote": "Strict and Maximum levels require higher overlap settings and more CPU resources. RPi 4 or better hardware is required for these levels.",
+          "overlapAdjusted": "Overlap setting automatically adjusted to {overlap}s to meet filter requirements",
+          "overlapReduced": "Overlap setting reduced to {overlap}s to match filter level"
+        },
         "rangeFilter": {
           "title": "Range Filter",
+          "description": "Limit detection to species probable in your geographic region",
           "stationLocation": {
             "label": "Station Location",
-            "helpText": "Station location, used to limit bird species to those probable in the region."
+            "helpText": "Station location, used for weather data and to limit bird species to those probable in the region."
           },
           "latitude": {
             "label": "Latitude",
-            "helpText": "Station location latitude, used to limit bird species to those probable in the region."
+            "helpText": "Station latitude, used for weather data and species range filtering."
           },
           "longitude": {
             "label": "Longitude",
-            "helpText": "Station location longitude, used to limit bird species to those probable in the region."
+            "helpText": "Station longitude, used for weather data and species range filtering."
           },
           "model": {
             "label": "Range Filter Model",
@@ -835,6 +1047,8 @@
             "helpText": "Select the database type to use for storing detections."
           },
           "sqlite": {
+            "title": "SQLite Configuration",
+            "description": "Configure the SQLite database file location",
             "note": "SQLite is recommended database type for most users.",
             "path": {
               "label": "SQLite Database Path",
@@ -843,6 +1057,8 @@
             }
           },
           "mysql": {
+            "title": "MySQL Configuration",
+            "description": "Configure connection settings for MySQL database server",
             "host": {
               "label": "MySQL Host",
               "placeholder": "Enter MySQL host",
@@ -867,21 +1083,40 @@
               "placeholder": "Enter MySQL database name",
               "helpText": "MySQL database name"
             }
+          },
+          "stats": {
+            "title": "Database Statistics",
+            "description": "Runtime information about your database",
+            "loading": "Loading database statistics...",
+            "retry": "Retry",
+            "refresh": "Refresh",
+            "noData": "No database statistics available.",
+            "type": "Type",
+            "status": "Status",
+            "size": "Size",
+            "totalDetections": "Total Detections",
+            "location": "Location",
+            "connected": "Connected",
+            "disconnected": "Disconnected"
           }
+        },
+        "interface": {
+          "title": "Interface",
+          "description": "Configure language, display preferences, and dashboard limits"
+        },
+        "visualContent": {
+          "title": "Visual Content",
+          "description": "Configure bird images and spectrogram display options"
         },
         "userInterface": {
           "title": "User Interface Settings",
           "description": "Customize user interface",
           "interface": {
             "title": "Interface Settings",
-            "description": "Choose your preferred language and interface version",
+            "description": "Choose your preferred language",
             "locale": {
               "label": "Display Language",
               "helpText": "Select the language for the user interface"
-            },
-            "newUI": {
-              "label": "Use Modern Interface",
-              "helpText": "Enable the new Svelte-based interface with improved performance and features. When disabled, uses the classic HTMX interface."
             }
           },
           "language": {
@@ -895,16 +1130,24 @@
           "dashboard": {
             "title": "Dashboard Display",
             "description": "Configure how detections are displayed on the dashboard",
+            "displaySettings": {
+              "title": "Display Settings",
+              "description": "Configure general dashboard display options like species limits."
+            },
+            "birdImages": {
+              "title": "Bird Images",
+              "description": "Configure bird species thumbnail images for detection lists."
+            },
+            "spectrogramGeneration": {
+              "title": "Spectrogram Generation",
+              "description": "Configure when and how audio spectrograms are generated for detections."
+            },
             "general": {
               "title": "General Settings"
             },
             "summaryLimit": {
               "label": "Max Number of Species on Daily Summary Table",
               "helpText": "Max number of species shown in the daily summary table (Value between 10 and 1000)"
-            },
-            "newUI": {
-              "label": "Use New User Interface",
-              "helpText": "Enable redirect from old HTMX UI to new Svelte UI"
             },
             "thumbnails": {
               "title": "Thumbnail Display",
@@ -944,6 +1187,38 @@
                 "userRequested": {
                   "label": "User-Requested Only",
                   "helpText": "Generate spectrograms only when you click the generate button. Perfect for resource-constrained systems (Raspberry Pi 3/Zero) - zero automatic overhead, you control when CPU is used."
+                }
+              },
+              "style": {
+                "label": "Spectrogram Style",
+                "helpText": "Choose the visual appearance of generated spectrograms.",
+                "preview": "Preview",
+                "previewAlt": "Spectrogram style preview",
+                "options": {
+                  "default": "Default (Colorful)",
+                  "scientificDark": "Scientific (Dark)",
+                  "highContrastDark": "High Contrast (Dark)",
+                  "scientific": "Scientific (Light)"
+                },
+                "descriptions": {
+                  "default": "Colorful spectrogram with dark background",
+                  "scientificDark": "Grayscale with Dolph window, dark background",
+                  "highContrastDark": "High color saturation with dark background",
+                  "scientific": "Grayscale with Dolph window, light background (xeno-canto style)"
+                }
+              },
+              "dynamicRange": {
+                "label": "Dynamic Range",
+                "helpText": "Controls contrast - lower values make weak signals stand out better, higher values show more detail.",
+                "options": {
+                  "highContrast": "High Contrast (80 dB)",
+                  "standard": "Standard (100 dB)",
+                  "extended": "Extended (120 dB)"
+                },
+                "descriptions": {
+                  "highContrast": "Best for weak signals. Bird calls stand out clearly from background noise. Recommended for scientific/grayscale styles.",
+                  "standard": "Default balanced setting. Good for most use cases.",
+                  "extended": "More detail visible but lower contrast. SoX default value."
                 }
               },
               "enabled": {
@@ -1143,13 +1418,262 @@
         "species": "Species Data",
         "speciesDetails": "What birds were detected and when",
         "recommendation": "Only enable external webhooks if you trust the receiving service or use self-hosted/local services."
+      },
+      "push": {
+        "title": "Push Notifications",
+        "description": "Send notifications to external services like Discord, Telegram, Slack, and more",
+        "enable": "Enable Push Notifications",
+        "disabled": "Push notifications are disabled",
+        "enabledDescription": "Push notifications will be sent to all enabled providers below",
+        "filters": {
+          "title": "Detection Filters",
+          "description": "Control which bird detections trigger push notifications",
+          "minConfidence": {
+            "label": "Minimum Confidence",
+            "helpText": "Only send notifications for detections above this confidence level. Set to 0 to disable."
+          },
+          "speciesCooldown": {
+            "label": "Species Cooldown",
+            "unit": "min",
+            "helpText": "Prevent repeated notifications for the same species within this time window. Set to 0 to disable."
+          }
+        },
+        "noProviders": "No providers configured",
+        "noProvidersDescription": "Add a provider to start receiving push notifications",
+        "providers": {
+          "title": "Notification Providers",
+          "addButton": "Add Provider",
+          "editButton": "Edit",
+          "deleteButton": "Delete",
+          "enableToggle": "Enable provider",
+          "urlsPreview": "{count} URL(s) configured",
+          "deleteConfirm": "Delete provider \"{name}\"? This action cannot be undone.",
+          "typeBadge": {
+            "shoutrrr": "Shoutrrr",
+            "webhook": "Webhook"
+          }
+        },
+        "form": {
+          "addTitle": "Add Notification Provider",
+          "editTitle": "Edit Notification Provider",
+          "name": {
+            "label": "Provider Name",
+            "placeholder": "e.g., Discord Alerts",
+            "helpText": "A friendly name to identify this provider"
+          },
+          "urls": {
+            "label": "Service URL(s)",
+            "placeholder": "discord://token@webhookid",
+            "helpText": "Enter one Shoutrrr URL per line. Multiple URLs send to multiple services.",
+            "validation": {
+              "required": "At least one URL is required",
+              "invalidFormat": "Invalid URL format. URLs should start with a service prefix (e.g., discord://, telegram://)"
+            }
+          },
+          "notificationTypes": {
+            "label": "Notification Types",
+            "helpText": "Select which types of notifications to send to this provider",
+            "detection": "Bird detections",
+            "error": "Errors",
+            "warning": "Warnings",
+            "info": "Information",
+            "system": "System events"
+          },
+          "urlFormats": {
+            "title": "Common URL Formats",
+            "discord": "Discord",
+            "discordFormat": "discord://token@webhookid",
+            "telegram": "Telegram",
+            "telegramFormat": "telegram://token@telegram?chats=@channel",
+            "slack": "Slack",
+            "slackFormat": "slack://token-a/token-b/token-c",
+            "pushover": "Pushover",
+            "pushoverFormat": "pushover://shoutrrr:apiToken@userKey",
+            "gotify": "Gotify",
+            "gotifyFormat": "gotify://hostname/token",
+            "ntfy": "ntfy",
+            "ntfyFormat": "ntfy://ntfy.sh/mytopic",
+            "moreServices": "View all supported services",
+            "shoutrrrDocs": "https://github.com/nicholas-fedor/shoutrrr?tab=readme-ov-file#supported-services"
+          },
+          "saveButton": "Save Provider",
+          "savingButton": "Saving...",
+          "cancelButton": "Cancel",
+          "testButton": "Test",
+          "testingButton": "Testing..."
+        },
+        "test": {
+          "button": "Test Provider",
+          "description": "Send a test notification to verify this provider is working",
+          "success": "Test notification sent successfully!",
+          "error": "Test failed: {message}",
+          "requiresUrl": "Enter a URL to test",
+          "requiresEnabled": "Enable the provider to test"
+        },
+        "validation": {
+          "nameRequired": "Provider name is required",
+          "urlRequired": "At least one URL is required",
+          "invalidUrl": "Invalid URL format"
+        },
+        "autoName": {
+          "discord": "Discord",
+          "telegram": "Telegram",
+          "slack": "Slack",
+          "pushover": "Pushover",
+          "gotify": "Gotify",
+          "ntfy": "ntfy",
+          "email": "Email",
+          "generic": "Shoutrrr",
+          "numbered": "{service} #{number}"
+        },
+        "services": {
+          "selectLabel": "Service",
+          "selectHelpText": "Choose a notification service to configure",
+          "discord": {
+            "name": "Discord",
+            "webhookUrl": {
+              "label": "Discord Webhook URL",
+              "placeholder": "https://discord.com/api/webhooks/...",
+              "helpText": "Paste your full Discord webhook URL"
+            },
+            "invalidUrl": "Invalid Discord webhook URL. URL should contain discord.com/api/webhooks/"
+          },
+          "telegram": {
+            "name": "Telegram",
+            "botToken": {
+              "label": "Bot Token",
+              "placeholder": "123456789:ABCdef...",
+              "helpText": "Token from @BotFather"
+            },
+            "chatId": {
+              "label": "Chat ID",
+              "placeholder": "-1001234567890 or @channel",
+              "helpText": "Chat ID, group ID, or @username"
+            },
+            "incomplete": "Both bot token and chat ID are required"
+          },
+          "ntfy": {
+            "name": "ntfy",
+            "server": {
+              "label": "Server",
+              "placeholder": "ntfy.sh",
+              "helpText": "Leave as ntfy.sh for public server or enter your self-hosted server"
+            },
+            "topic": {
+              "label": "Topic",
+              "placeholder": "my-bird-alerts",
+              "helpText": "Topic name for your notifications"
+            },
+            "incomplete": "Topic is required"
+          },
+          "gotify": {
+            "name": "Gotify",
+            "server": {
+              "label": "Server URL",
+              "placeholder": "gotify.example.com",
+              "helpText": "Your Gotify server hostname (without https://)"
+            },
+            "token": {
+              "label": "Application Token",
+              "placeholder": "A...",
+              "helpText": "Token from Gotify Apps page"
+            },
+            "incomplete": "Server and token are required"
+          },
+          "pushover": {
+            "name": "Pushover",
+            "apiToken": {
+              "label": "API Token",
+              "placeholder": "az...",
+              "helpText": "Application API token"
+            },
+            "userKey": {
+              "label": "User Key",
+              "placeholder": "u...",
+              "helpText": "Your user or group key"
+            },
+            "incomplete": "API token and user key are required"
+          },
+          "slack": {
+            "name": "Slack",
+            "webhookUrl": {
+              "label": "Slack Webhook URL",
+              "placeholder": "https://hooks.slack.com/services/...",
+              "helpText": "Paste your full Slack webhook URL"
+            },
+            "invalidUrl": "Invalid Slack webhook URL. URL should contain hooks.slack.com/services/"
+          },
+          "ifttt": {
+            "name": "IFTTT",
+            "webhookKey": {
+              "label": "Webhook Key",
+              "placeholder": "abc123xyz...",
+              "helpText": "Your IFTTT Webhook key from Maker Webhooks settings"
+            },
+            "eventName": {
+              "label": "Event Name",
+              "placeholder": "bird_detected",
+              "helpText": "The event name to trigger in your IFTTT applet"
+            },
+            "incomplete": "Webhook key and event name are required"
+          },
+          "webhook": {
+            "name": "Webhook",
+            "url": {
+              "label": "Webhook URL",
+              "placeholder": "https://api.example.com/webhook",
+              "helpText": "The HTTP(S) endpoint to send notifications to"
+            },
+            "method": {
+              "label": "HTTP Method",
+              "helpText": "HTTP method to use for the request (default: POST)"
+            },
+            "auth": {
+              "label": "Authentication",
+              "none": "None",
+              "bearer": "Bearer Token",
+              "basic": "Basic Auth",
+              "helpText": "Optional authentication for the webhook endpoint"
+            },
+            "bearerToken": {
+              "label": "Bearer Token",
+              "placeholder": "your-api-token",
+              "helpText": "Token sent in Authorization: Bearer header"
+            },
+            "basicUser": {
+              "label": "Username",
+              "placeholder": "username"
+            },
+            "basicPass": {
+              "label": "Password",
+              "placeholder": "password"
+            },
+            "basicAuth": {
+              "helpText": "Credentials sent using HTTP Basic Authentication"
+            },
+            "invalidUrl": "Invalid URL. Must start with http:// or https://",
+            "tokenRequired": "Bearer token is required when using Bearer authentication",
+            "credentialsRequired": "Username and password are required when using Basic authentication"
+          },
+          "custom": {
+            "name": "Custom URL",
+            "url": {
+              "label": "Shoutrrr URL",
+              "placeholder": "service://credentials@host",
+              "helpText": "Enter a raw Shoutrrr URL for any supported service"
+            },
+            "invalidUrl": "Invalid URL format. URL should start with service://"
+          }
+        }
       }
     },
     "filters": {
+      "title": "Filters",
       "privacyFiltering": {
         "title": "Privacy Filtering",
         "description": "Privacy filtering avoids saving audio clips when human vocals are detected",
         "enable": "Enable Privacy Filtering",
+        "disabled": "Privacy filtering is disabled",
         "confidenceLabel": "Confidence Threshold for Human Detection",
         "confidenceHelp": "Set the confidence level for human voice detection, lower value makes filter more sensitive"
       },
@@ -1157,6 +1681,7 @@
         "title": "False Positive Prevention",
         "description": "Configure false detection filters",
         "enableDogBark": "Enable Dog Bark Filter",
+        "disabled": "Dog bark filter is disabled",
         "confidenceLabel": "Confidence Threshold",
         "confidenceHelp": "Set the confidence level for dog bark detection, lower value makes filter more sensitive",
         "expireTimeLabel": "Dog Bark Expire Time (Minutes)",
@@ -1220,18 +1745,35 @@
             "helpText": "The MQTT password."
           }
         },
-        "messageSettings": {
-          "title": "Message Settings",
-          "retain": {
-            "label": "Retain Messages",
-            "note": "<strong>Home Assistant Users:</strong> It's recommended to enable the retain flag for Home Assistant integration. Without retain, MQTT sensors will appear as 'unknown' when Home Assistant restarts."
-          }
-        },
         "tls": {
           "title": "TLS/SSL Security",
           "enable": "Enable TLS/SSL",
           "skipVerify": "Skip Certificate Verification",
           "configNote": "<strong>TLS Configuration:</strong><br />• Standard TLS: Leave certificates empty for public brokers<br />• Self-signed certificates: Provide CA Certificate<br />• Mutual TLS (mTLS): Provide all three certificates"
+        },
+        "homeAssistant": {
+          "title": "Home Assistant Auto-Discovery",
+          "enable": "Enable Home Assistant MQTT Discovery",
+          "description": "When enabled, BirdNET-Go automatically registers devices and sensors with Home Assistant through MQTT discovery protocol. Devices will appear in Home Assistant's device registry without manual YAML configuration.",
+          "discoveryPrefix": {
+            "label": "Discovery Prefix",
+            "helpText": "The MQTT topic prefix for Home Assistant discovery messages. Default is 'homeassistant'. Only change this if you've configured a custom discovery prefix in Home Assistant."
+          },
+          "deviceName": {
+            "label": "Device Name",
+            "helpText": "The base name for devices as they appear in Home Assistant. Each audio source will have its own device linked to this main BirdNET-Go device."
+          },
+          "sensorsNote": "<strong>Sensors Created:</strong> For each audio source, Home Assistant will receive: Last Species, Confidence, Scientific Name, and Sound Level (if enabled). The bridge device includes online/offline availability status.",
+          "discovery": {
+            "button": "Send Discovery",
+            "success": "Discovery messages sent to Home Assistant",
+            "error": "Failed to send discovery messages",
+            "saveFirst": "Save settings before sending discovery"
+          },
+          "retain": {
+            "label": "Retain Messages",
+            "note": "<strong>Recommended:</strong> Enable the retain flag to ensure MQTT sensors show values after Home Assistant restarts."
+          }
         },
         "test": {
           "button": "Test MQTT Connection",
@@ -1246,6 +1788,7 @@
         "title": "Observability",
         "description": "Monitor BirdNET-Go's performance and bird detection metrics through Prometheus-compatible endpoint",
         "enable": "Enable Observability Integration",
+        "disabled": "Observability integration is not enabled",
         "listenAddress": {
           "label": "Listen Address",
           "placeholder": "0.0.0.0:8090"
@@ -1310,22 +1853,163 @@
           "apiKeyRequired": "API key must be specified",
           "inProgress": "Test in progress...",
           "description": "Test weather provider connection"
+        },
+        "temperatureUnit": {
+          "label": "Temperature Display Unit",
+          "helpText": "Choose how temperatures are displayed throughout the application.",
+          "options": {
+            "celsius": "Celsius (°C)",
+            "fahrenheit": "Fahrenheit (°F)"
+          }
         }
       }
     },
     "audio": {
+      "loading": "Loading audio devices...",
+      "tabs": {
+        "soundCard": "Sound Card",
+        "streams": "Streams",
+        "processing": "Processing",
+        "recording": "Recording",
+        "retention": "Retention"
+      },
+      "emptyStates": {
+        "soundCard": {
+          "title": "No Sound Cards Detected",
+          "description": "No local audio input devices were found on this system. This is normal for container or headless server deployments.",
+          "errorTitle": "Error Loading Devices",
+          "hintsTitle": "You can:",
+          "hints": {
+            "container": "This is normal for container/headless deployments",
+            "streams": "Configure network streams in the Streams tab instead",
+            "usb": "Connect a USB microphone and refresh the list"
+          },
+          "refresh": "Refresh Devices",
+          "retry": "Retry"
+        },
+        "streams": {
+          "title": "No Streams Configured",
+          "description": "Add RTSP or network audio streams from IP cameras, microphone servers, or other streaming sources.",
+          "hintsTitle": "Getting started:",
+          "hints": {
+            "rtsp": "Enter RTSP URLs in the format: rtsp://ip:port/stream",
+            "multiple": "You can add multiple streams for different locations",
+            "protocol": "Choose TCP for reliability or UDP for lower latency"
+          }
+        }
+      },
+      "soundCard": {
+        "title": "Sound Card",
+        "description": "Configure local audio input device",
+        "audioSourceLabel": "Audio Source (requires application restart to take effect)",
+        "audioSourceHelp": "Select the audio input device for bird sound detection. Changes require application restart to take effect.",
+        "noSoundCardCapture": "No sound card capture",
+        "empty": {
+          "title": "No Sound Cards Detected",
+          "description": "No local audio input devices were found on this system. This is normal for container or headless server deployments.",
+          "hintsTitle": "You can:",
+          "hintStream": "Configure network streams in the Streams tab",
+          "hintUsb": "Connect a USB microphone and refresh the list",
+          "goToStreams": "Go to Streams",
+          "refresh": "Refresh Devices"
+        }
+      },
+      "noSources": {
+        "warning": "No Audio Sources Configured",
+        "description": "BirdNET-Go needs an audio input to detect birds. Please configure at least one source in the Sound Card or Streams tab."
+      },
       "audioCapture": {
-        "title": "Audio Capture",
-        "description": "Set audio capture source, sound card or RTSP stream",
+        "title": "Sound Card Configuration",
+        "description": "Select the audio input device for bird sound detection. Changes require application restart.",
         "soundCardSource": "Sound Card Source",
         "audioSourceLabel": "Audio Source (requires application restart to take effect)",
         "audioSourceHelp": "Select the audio input device for bird sound detection. Changes require application restart to take effect.",
         "noSoundCardCapture": "No sound card capture",
+        "noDeviceSelected": "No audio device selected",
+        "refreshDevices": "Refresh",
         "rtspSource": "RTSP Source",
         "rtspTransportLabel": "RTSP Transport Protocol",
         "rtspTransportHelp": "TCP is more reliable but may have higher latency. UDP is faster but may experience packet loss on poor networks.",
         "rtspUrlsLabel": "RTSP Stream URLs",
-        "rtspUrlsHelp": "Enter one or more RTSP stream URLs for network audio sources. Format: rtsp://ip:port/stream. Note: Authentication credentials should be configured separately in your RTSP server settings for security."
+        "rtspUrlsHelp": "Enter one or more RTSP stream URLs for network audio sources. Format: rtsp://ip:port/stream. Note: Authentication credentials should be configured separately in your RTSP server settings for security.",
+        "deviceSelected": "Sound card selected and ready for capture",
+        "availableDevices": "Available Audio Devices",
+        "active": "Active",
+        "streamsConfigured": "{count} stream(s) configured"
+      },
+      "rtspStreams": {
+        "title": "Audio Stream Configuration",
+        "description": "Configure network audio streams for remote audio capture. Supports RTSP, HTTP, HLS, RTMP, and UDP protocols.",
+        "noStreamsConfigured": "No streams configured"
+      },
+      "streams": {
+        "streamLabel": "Stream",
+        "nameLabel": "Stream Name",
+        "namePlaceholder": "e.g., Front Yard Feeder",
+        "nameHelp": "A descriptive name to identify this audio stream",
+        "urlLabel": "Stream URL",
+        "urlHelp": "Enter stream URL with optional credentials (e.g., rtsp://host:port/path). Use environment variables for credentials.",
+        "typeLabel": "Stream Type",
+        "typeHelp": "Stream protocol - auto-detected from URL",
+        "transportLabel": "Protocol",
+        "summary": "{count} stream(s) configured",
+        "healthy": "healthy",
+        "unhealthy": "unhealthy",
+        "unknown": "unknown",
+        "refresh": "Refresh",
+        "addStream": "Add Stream",
+        "deleteConfirm": "Remove this stream?",
+        "restartCount": "Restarted {count} time(s)",
+        "healthLoadError": "Failed to load stream health status",
+        "status": {
+          "connected": "Connected",
+          "connecting": "Connecting",
+          "error": "Error",
+          "idle": "Idle",
+          "unknown": "Unknown"
+        },
+        "emptyState": {
+          "title": "No Streams Configured",
+          "description": "Add audio streams from IP cameras, Icecast servers, or other network sources.",
+          "hintsTitle": "Getting Started",
+          "hints": {
+            "rtsp": "Supports RTSP, HTTP, HLS, RTMP, and UDP/RTP streams",
+            "credentials": "Credentials can be included in URL or use environment variables",
+            "protocol": "TCP is more reliable for RTSP, UDP has lower latency"
+          }
+        },
+        "errors": {
+          "nameRequired": "Stream name is required",
+          "duplicateName": "A stream with this name already exists",
+          "urlRequired": "Stream URL is required",
+          "invalidUrl": "Invalid stream URL format",
+          "duplicate": "This stream URL already exists"
+        },
+        "timeline": {
+          "error": "Error",
+          "noHistory": "No state or error history available.",
+          "stateChange": "State Change",
+          "host": "Host",
+          "troubleshooting": "Troubleshooting",
+          "from": "From",
+          "to": "To",
+          "reason": "Reason",
+          "eventAt": "Event at {time}"
+        },
+        "diagnostics": {
+          "toggleDiagnostics": "Toggle diagnostics",
+          "processState": "Process State",
+          "lastData": "Last Data",
+          "restartCount": "Restart Count",
+          "connection": "Connection",
+          "stateErrorHistory": "State & Error History"
+        },
+        "connectionStatus": {
+          "stable": "Stable",
+          "degraded": "Degraded",
+          "failed": "Failed",
+          "unknown": "Unknown"
+        }
       },
       "audioFilters": {
         "title": "Audio Filters",
@@ -1360,6 +2044,7 @@
         "description": "Monitor and report environmental sound levels",
         "enable": "Enable Sound Level Monitoring",
         "enableHelp": "Track ambient noise levels to understand your recording environment and correlate with bird activity patterns.",
+        "disabled": "Sound level monitoring is disabled",
         "intervalLabel": "Measurement Interval (seconds)",
         "intervalHelp": "How often to measure and report sound levels. Lower values provide more granular data but use more resources. Minimum 5 seconds, recommended 60 seconds.",
         "dataOutputTitle": "Sound Level Data Output",
@@ -1372,9 +2057,12 @@
         "title": "Clip Settings",
         "description": "Configure audio clip capture and processing for identified bird calls"
       },
-      "audioExport": {
-        "enable": "Enable Audio Capture",
+      "clipRecording": {
+        "title": "Clip Recording",
+        "description": "Configure when and how audio clips are captured for detected bird calls.",
+        "enable": "Enable Clip Recording",
         "enableHelp": "Save audio clips of detected bird calls for review, sharing, or building custom datasets.",
+        "disabled": "Clip recording is disabled",
         "captureSettings": "Capture Settings",
         "lengthLabel": "Capture Length",
         "lengthHelp": "Duration of audio to capture for each detection (10-60 seconds). Longer clips provide more context but use more storage.",
@@ -1385,6 +2073,7 @@
         "normalization": "Audio Normalization",
         "normalizationEnable": "Enable Loudness Normalization",
         "normalizationHelp": "Automatically adjust audio levels to EBU R128 broadcast standard for consistent playback volume across all clips.",
+        "normalizationDisabled": "Audio normalization is disabled",
         "targetLUFSLabel": "Target Loudness (LUFS)",
         "targetLUFSHelp": "Integrated loudness target in LUFS (Loudness Units relative to Full Scale). -23 LUFS is the EBU R128 broadcast standard. Range: -40 to -10 LUFS.",
         "loudnessRangeLabel": "Loudness Range (LU)",
@@ -1394,13 +2083,41 @@
         "normalizationNote": "EBU R128 Standard",
         "normalizationNoteDescription": "Audio normalization follows the EBU R128 broadcast standard, ensuring consistent playback levels across different devices and preventing clipping.",
         "fileSettings": "File Settings",
-        "pathLabel": "Export Path",
+        "pathLabel": "Clips Folder",
         "pathHelp": "Directory where audio clips will be saved. Relative paths are from the application directory. Example: 'clips/' or '/var/audio/birds/'",
-        "typeLabel": "Export Format",
+        "typeLabel": "Audio Format",
+        "typeHelp": "Audio format for saved clips. WAV and FLAC are lossless (best quality, larger files). MP3, AAC, and Opus are lossy (smaller files, slight quality loss).",
+        "bitrateLabel": "Bitrate",
+        "bitrateHelp": "Audio compression bitrate for lossy formats. Range: {min}-{max} kbps. Higher values provide better quality but larger files.",
+        "losslessNote": "Lossless formats preserve original audio quality without compression artifacts.",
+        "disabledInfo": "Enable clip recording above to configure clip settings, file format, and storage options."
+      },
+      "fileSettings": {
+        "title": "File Settings",
+        "description": "Configure storage location and audio format for saved clips.",
+        "pathLabel": "Clips Folder",
+        "pathHelp": "Directory where audio clips will be saved. Relative paths are from the application directory. Example: 'clips/' or '/var/audio/birds/'",
+        "typeLabel": "Audio Format",
         "typeHelp": "Audio format for saved clips. WAV and FLAC are lossless (best quality, larger files). MP3, AAC, and Opus are lossy (smaller files, slight quality loss).",
         "bitrateLabel": "Bitrate",
         "bitrateHelp": "Audio compression bitrate for lossy formats. Range: {min}-{max} kbps. Higher values provide better quality but larger files.",
         "losslessNote": "Lossless formats preserve original audio quality without compression artifacts."
+      },
+      "audioNormalization": {
+        "title": "Audio Normalization",
+        "description": "Adjust audio levels for consistent playback volume across all clips.",
+        "enable": "Enable Loudness Normalization",
+        "enableHelp": "Automatically adjust audio levels to EBU R128 broadcast standard for consistent playback volume across all clips.",
+        "disabled": "Audio normalization is disabled",
+        "requiresRecording": "Enable clip recording in the Recording tab to use audio normalization.",
+        "targetLUFSLabel": "Target Loudness (LUFS)",
+        "targetLUFSHelp": "Integrated loudness target in LUFS (Loudness Units relative to Full Scale). -23 LUFS is the EBU R128 broadcast standard. Range: -40 to -10 LUFS.",
+        "loudnessRangeLabel": "Loudness Range (LU)",
+        "loudnessRangeHelp": "Maximum variation in loudness within the clip (0-20 LU). Lower values create more consistent volume but may reduce dynamics.",
+        "truePeakLabel": "True Peak Limit (dBTP)",
+        "truePeakHelp": "Maximum true peak level to prevent digital clipping (-10 to 0 dBTP). -2 dBTP provides safe headroom for most playback systems.",
+        "noteTitle": "EBU R128 Standard",
+        "noteDescription": "Audio normalization follows the EBU R128 broadcast standard, ensuring consistent playback levels across different devices and preventing clipping."
       },
       "audioClipRetention": {
         "title": "Audio Clip Retention",
@@ -1419,7 +2136,13 @@
           "none": "None - Keep All",
           "age": "Age-Based",
           "usage": "Disk Usage-Based"
-        }
+        },
+        "noRetentionTitle": "All Clips Retained",
+        "noRetentionDescription": "Audio clips will be kept indefinitely. Monitor disk usage to prevent storage issues.",
+        "ageRetentionTitle": "Age-Based Cleanup",
+        "ageRetentionDescription": "Clips older than the specified age will be automatically deleted, while preserving the minimum number per species.",
+        "usageRetentionTitle": "Usage-Based Cleanup",
+        "usageRetentionDescription": "When disk usage exceeds the threshold, oldest clips will be deleted until usage is within limits."
       },
       "formats": {
         "wav": "WAV",
@@ -1445,6 +2168,9 @@
       }
     },
     "security": {
+      "baseUrlLabel": "Base URL",
+      "baseUrlHelp": "Complete external URL for reverse proxy setups. When set, this URL is used as-is for notifications and OAuth redirects, ignoring Host and AutoTLS settings.",
+      "baseUrlValidation": "Please enter a valid URL starting with http:// or https:// and including a hostname",
       "hostLabel": "Host Address",
       "allowSubnetBypassLabel": "Allow Access from Subnet to Bypass Authentication",
       "allowedSubnetsLabel": "Allowed Subnets",
@@ -1470,12 +2196,40 @@
         "title": "Basic Authentication",
         "description": "Secure access with a simple password",
         "enableLabel": "Enable Password Authentication",
+        "disabled": "Password authentication is disabled",
         "passwordLabel": "Password",
         "passwordHelpText": "Limit access to settings with a password."
       },
       "oauth": {
         "title": "OAuth2 Social Authentication",
         "description": "Single sign-on to log in with your existing account",
+        "form": {
+          "editTitle": "Edit OAuth Provider",
+          "addTitle": "Add OAuth Provider",
+          "providerLabel": "Provider",
+          "providerHelpText": "Select the OAuth provider to configure",
+          "cancelButton": "Cancel",
+          "saveButton": "Save"
+        },
+        "providers": {
+          "title": "Configured Providers",
+          "addButton": "Add Provider",
+          "enableToggle": "Toggle provider enabled state",
+          "editButton": "Edit provider settings",
+          "deleteButton": "Delete provider",
+          "deleteConfirm": "Are you sure you want to delete the {provider} OAuth provider?"
+        },
+        "noProviders": "No OAuth providers configured",
+        "noProvidersDescription": "Add a provider to enable social login with Google, GitHub, Microsoft, LINE, or Kakao accounts.",
+        "enableProviderLabel": "Enable this provider",
+        "getCredentialsLabel": "Get your credentials from {provider}",
+        "redirectUriTitle": "Redirect URI:",
+        "clientIdLabel": "Client ID",
+        "clientIdHelpText": "The OAuth 2.0 Client ID from your provider's developer console",
+        "clientSecretLabel": "Client Secret",
+        "clientSecretHelpText": "The OAuth 2.0 Client Secret from your provider's developer console",
+        "userIdLabel": "User ID (optional)",
+        "userIdHelpText": "Restrict access to a specific user account by email or ID",
         "google": {
           "title": "Google OAuth",
           "enableLabel": "Allow OAuth2 Login via Google",
@@ -1497,31 +2251,108 @@
           "clientSecretLabel": "Client Secret",
           "clientSecretHelpText": "The OAuth 2.0 Client Secret obtained from GitHub Developer Settings when setting up OAuth credentials.",
           "userIdLabel": "User ID"
+        },
+        "microsoft": {
+          "title": "Microsoft Account",
+          "enableLabel": "Allow OAuth2 Login via Microsoft Account",
+          "redirectUriTitle": "Redirect URI for Azure App Registration:",
+          "getCredentialsLabel": "Get your credentials from Azure Portal",
+          "clientIdLabel": "Client ID",
+          "clientIdHelpText": "The Application (client) ID obtained from Azure App Registration.",
+          "clientSecretLabel": "Client Secret",
+          "clientSecretHelpText": "The client secret value obtained from Azure App Registration.",
+          "userIdLabel": "User ID"
+        },
+        "line": {
+          "title": "LINE Login",
+          "enableLabel": "Allow OAuth2 Login via LINE",
+          "redirectUriTitle": "Redirect URI for LINE Developers Console:",
+          "getCredentialsLabel": "Get your credentials from LINE Developers Console",
+          "clientIdLabel": "Channel ID",
+          "clientIdHelpText": "The Channel ID obtained from LINE Developers Console when setting up LINE Login.",
+          "clientSecretLabel": "Channel Secret",
+          "clientSecretHelpText": "The Channel Secret obtained from LINE Developers Console when setting up LINE Login.",
+          "userIdLabel": "User ID"
+        },
+        "kakao": {
+          "title": "Kakao Login",
+          "enableLabel": "Allow OAuth2 Login via Kakao",
+          "redirectUriTitle": "Redirect URI for Kakao Developers Console:",
+          "getCredentialsLabel": "Get your credentials from Kakao Developers Console",
+          "clientIdLabel": "REST API Key",
+          "clientIdHelpText": "The REST API Key obtained from Kakao Developers Console when setting up Kakao Login.",
+          "clientSecretLabel": "Client Secret",
+          "clientSecretHelpText": "The Client Secret obtained from Kakao Developers Console when setting up Kakao Login.",
+          "userIdLabel": "User ID"
         }
       },
       "bypassAuthentication": {
         "title": "Bypass Authentication",
-        "description": "Allow access to settings without authentication"
+        "description": "Allow access to settings without authentication",
+        "disabled": "Subnet bypass is disabled"
       },
       "placeholders": {
+        "baseUrl": "https://birdnet.example.com:5500",
         "host": "For example, localhost:8080 or example.domain.com",
         "allowedUsers": "Enter one or more allowed user emails",
         "subnet": "Enter a CIDR subnet (e.g. 192.168.1.0/24)"
       }
     },
     "species": {
+      "activeSpecies": {
+        "title": "Active Species",
+        "tabLabel": "Active",
+        "description": "Species that will be detected based on your current location and filter settings",
+        "stats": {
+          "species": "Species",
+          "location": "Location",
+          "threshold": "Threshold",
+          "updated": "Updated",
+          "justNow": "Just now",
+          "minutesAgo": "{count}m ago",
+          "hoursAgo": "{count}h ago"
+        },
+        "search": {
+          "placeholder": "Search species..."
+        },
+        "badges": {
+          "included": "Included",
+          "configured": "Configured"
+        },
+        "empty": {
+          "title": "No species found",
+          "description": "Configure your location in Main Settings to see available species"
+        },
+        "noResults": "No species match your search",
+        "infoNote": "This list is based on your location and range filter threshold. Manually included species are always added.",
+        "retry": "Retry",
+        "expand": "Expand list",
+        "collapse": "Collapse list",
+        "downloadCsv": "Download CSV",
+        "errors": {
+          "loadFailed": "Failed to load active species list"
+        },
+        "locationNotConfigured": {
+          "title": "Location Not Configured",
+          "description": "Set your location in Main Settings to see species available in your area. The range filter uses your location to determine which species are likely to be found nearby.",
+          "action": "Configure Location"
+        }
+      },
       "alwaysInclude": {
         "title": "Always Include Species",
+        "tabLabel": "Include",
         "description": "Species in this list will always be included in range of detected species",
         "noSpeciesMessage": "No species added to include list"
       },
       "alwaysExclude": {
         "title": "Always Exclude Species",
+        "tabLabel": "Exclude",
         "description": "Species in this list will always be excluded from detection",
         "noSpeciesMessage": "No species added to exclude list"
       },
       "customConfiguration": {
         "title": "Custom Species Configuration",
+        "tabLabel": "Custom",
         "description": "Species specific threshold values, detection intervals, and actions",
         "helpText": {
           "intro": "Configure species-specific settings:",
@@ -1548,7 +2379,7 @@
         "labels": {
           "threshold": "Threshold",
           "interval": "Interval",
-          "intervalSeconds": "Interval (sec)",
+          "intervalSeconds": "Interval (s)",
           "addButton": "Add"
         },
         "noConfigurationsMessage": "No custom species configurations added",
@@ -1556,6 +2387,28 @@
           "speciesPlaceholder": "Species name",
           "thresholdPlaceholder": "0.5",
           "intervalPlaceholder": "0"
+        },
+        "addConfiguration": "Add Configuration",
+        "newConfiguration": "New Configuration",
+        "editing": "Editing: {species}",
+        "configuredCount": "{count} configured",
+        "searchPlaceholder": "Type to search...",
+        "saving": "Saving...",
+        "save": "Save",
+        "cancel": "Cancel",
+        "configureActions": "Configure Actions",
+        "actionsConfigured": "Configured",
+        "list": {
+          "threshold": "Threshold:",
+          "interval": "Interval:",
+          "intervalNone": "None",
+          "actionBadge": "Action",
+          "editTitle": "Edit configuration",
+          "removeTitle": "Remove configuration"
+        },
+        "emptyState": {
+          "title": "No configurations yet.",
+          "description": "Click \"Add Configuration\" to customize species detection settings."
         }
       },
       "actionsModal": {
@@ -1595,6 +2448,140 @@
       "parametersPlaceholder": "Parameters will appear here",
       "errors": {
         "speciesLoadFailed": "Failed to load species list. Please try again."
+      },
+      "tracking": {
+        "title": "Species Tracking",
+        "tabLabel": "Tracking",
+        "description": "Configure tracking for new species detections based on time periods",
+        "enabled": {
+          "label": "Enable Species Tracking",
+          "helpText": "When enabled, the system tracks new species detections and can send notifications"
+        },
+        "newSpeciesWindowDays": {
+          "label": "New Species Window (days)",
+          "helpText": "Number of days a species is considered 'new' after first detection (1-365)"
+        },
+        "syncIntervalMinutes": {
+          "label": "Sync Interval (minutes)",
+          "helpText": "How often to synchronize tracking data with the database (1-1440)"
+        },
+        "notificationSuppressionHours": {
+          "label": "Notification Suppression (hours)",
+          "helpText": "Hours to suppress duplicate notifications for the same species (0-8760)"
+        },
+        "yearly": {
+          "title": "Yearly Tracking",
+          "description": "Track first arrivals of species each year",
+          "enabled": {
+            "label": "Enable Yearly Tracking",
+            "helpText": "Track and notify when a species is detected for the first time each year"
+          },
+          "resetMonth": {
+            "label": "Reset Month",
+            "helpText": "Month when yearly tracking resets (1-12)"
+          },
+          "resetDay": {
+            "label": "Reset Day",
+            "helpText": "Day of month when yearly tracking resets"
+          },
+          "windowDays": {
+            "label": "Window (days)",
+            "helpText": "Days to show 'new this year' indicator (1-365)"
+          }
+        },
+        "seasonal": {
+          "title": "Seasonal Tracking",
+          "description": "Track first arrivals of species each season",
+          "enabled": {
+            "label": "Enable Seasonal Tracking",
+            "helpText": "Track and notify when a species is detected for the first time each season"
+          },
+          "windowDays": {
+            "label": "Window (days)",
+            "helpText": "Days to show 'new this season' indicator (1-365)"
+          },
+          "seasons": {
+            "title": "Season Definitions",
+            "description": "Define when each season starts. Seasons are automatically adjusted based on your location's hemisphere.",
+            "spring": "Spring",
+            "summer": "Summer",
+            "fall": "Fall",
+            "winter": "Winter",
+            "wet1": "Wet Season 1",
+            "dry1": "Dry Season 1",
+            "wet2": "Wet Season 2",
+            "dry2": "Dry Season 2",
+            "startMonth": "Start Month",
+            "startDay": "Start Day",
+            "hemisphereNote": "Season dates are automatically configured based on your latitude. Northern hemisphere uses standard seasons, southern hemisphere has shifted dates, and equatorial regions use wet/dry seasons."
+          }
+        },
+        "months": {
+          "january": "January",
+          "february": "February",
+          "march": "March",
+          "april": "April",
+          "may": "May",
+          "june": "June",
+          "july": "July",
+          "august": "August",
+          "september": "September",
+          "october": "October",
+          "november": "November",
+          "december": "December"
+        },
+        "units": {
+          "days": "days",
+          "min": "min",
+          "hours": "hrs"
+        }
+      },
+      "dynamicThreshold": {
+        "tabLabel": "Learned",
+        "title": "Learned Thresholds",
+        "description": "This page shows Dynamic Threshold runtime data. When enabled in Main Settings → Detection, thresholds are automatically adjusted by multiple high-confidence detections. Species shown here are assumed to exist at this location.",
+        "stats": {
+          "active": "Active",
+          "atMinimum": "At Minimum",
+          "minThreshold": "Min Threshold",
+          "validityPeriod": "Validity Period"
+        },
+        "header": {
+          "species": "Species",
+          "threshold": "Threshold",
+          "expires": "Expires"
+        },
+        "searchPlaceholder": "Search species...",
+        "threshold": "Threshold",
+        "level": "Level",
+        "expires": "Expires",
+        "expired": "Expired",
+        "confidence": "Confidence",
+        "requiredConfidence": "Required confidence",
+        "resetAll": "Reset All",
+        "resetSpecies": "Reset threshold for this species",
+        "noEvents": "No threshold change history",
+        "changeReason": {
+          "highConfidence": "High confidence detection",
+          "expiry": "Threshold expired",
+          "manualReset": "Manual reset"
+        },
+        "note": "High-confidence detections confirm which species exist at this location. After multiple high confidence matches, the detection threshold is safely lowered to capture more calls without significant false positive risk. Thresholds automatically reset after the configured validity period.",
+        "empty": {
+          "title": "No learned thresholds",
+          "description": "High-confidence detections will automatically create learned thresholds for species"
+        },
+        "resetAllConfirm": {
+          "title": "Reset All Thresholds",
+          "message": "This will reset all {count} learned thresholds. Species will need to be detected with high confidence again to lower their thresholds."
+        },
+        "loadError": "Failed to load dynamic thresholds",
+        "resetSuccess": "Threshold reset for {species}",
+        "resetError": "Failed to reset threshold",
+        "resetAllSuccess": "Reset {count} thresholds",
+        "resetAllError": "Failed to reset thresholds",
+        "expand": "Show event history",
+        "collapse": "Hide event history"
       }
     },
     "database": {
@@ -1607,12 +2594,21 @@
     "login": "Login",
     "logout": "Logout",
     "openLoginModal": "Open login modal",
-    "loginTitle": "Login to BirdNET-Go",
+    "loginTitle": "Sign in",
+    "loginSubtitle": "Access your BirdNET-Go dashboard",
     "password": "Password",
     "passwordPlaceholder": "Enter your password",
+    "enterPassword": "Enter your password",
+    "continue": "Continue",
     "or": "or",
     "loginWithGoogle": "Login with Google",
     "loginWithGithub": "Login with GitHub",
+    "loginWithMicrosoft": "Login with Microsoft",
+    "continueWithGoogle": "Continue with Google",
+    "continueWithGithub": "Continue with GitHub",
+    "continueWithMicrosoft": "Continue with Microsoft",
+    "continueWithLine": "Continue with LINE",
+    "continueWithKakao": "Continue with Kakao",
     "errors": {
       "loginFailed": "Login failed. Please check your password and try again.",
       "passwordRequired": "Password is required.",
@@ -1737,6 +2733,7 @@
   },
   "media": {
     "audio": {
+      "settings": "Audio Settings",
       "play": "Play",
       "pause": "Pause",
       "stop": "Stop",
@@ -1747,10 +2744,14 @@
       "currentTime": "{current} / {total}",
       "loading": "Loading audio...",
       "error": "Failed to load audio",
+      "errorShort": "Error",
+      "playError": "Failed to play audio",
       "volumeGain": "Volume gain control: {value} dB",
       "filterControl": "Filter control",
       "highPassFilter": "High-pass filter control: {freq} Hz",
-      "seekProgress": "Seek audio progress: {current} / {total} seconds"
+      "seekProgress": "Seek audio progress: {current} / {total} seconds",
+      "playbackSpeed": "Playback speed",
+      "speed": "Speed"
     },
     "spectrogram": {
       "notGenerated": "Spectrogram not yet generated",
@@ -1762,10 +2763,35 @@
     }
   },
   "components": {
+    "audio": {
+      "spectrogramUnavailable": "Spectrogram unavailable",
+      "generating": "Generating...",
+      "queuePosition": "Queue: {position}"
+    },
     "forms": {
       "numberField": {
         "adjustedToMinimum": "Value was adjusted to minimum ({value})",
         "adjustedToMaximum": "Value was adjusted to maximum ({value})"
+      },
+      "rtsp": {
+        "addNewStream": "Add New RTSP Stream",
+        "maxStreamsReached": "Maximum number of RTSP streams ({max}) reached.",
+        "cameraPlaceholder": "Camera 1",
+        "urlPlaceholder": "rtsp://username:password@192.168.1.100:554/stream"
+      },
+      "subnet": {
+        "maxSubnetsReached": "Maximum number of subnets ({max}) reached."
+      },
+      "species": {
+        "loadingSpecies": "Loading species...",
+        "typePlaceholder": "Type species name...",
+        "suggestionsAvailable": "{count} species suggestions available. Use arrow keys to navigate.",
+        "noSuggestions": "No species suggestions available."
+      },
+      "select": {
+        "searchPlaceholder": "Search...",
+        "searchOptions": "Search options",
+        "noOptions": "No options found"
       }
     },
     "datePicker": {

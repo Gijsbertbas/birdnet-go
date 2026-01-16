@@ -3,6 +3,9 @@ package observability
 import (
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestNewMetricsConcurrency verifies that NewMetrics can be called concurrently
@@ -21,51 +24,25 @@ func TestNewMetricsConcurrency(t *testing.T) {
 
 			// Call NewMetrics - this should not cause a race condition
 			metrics, err := NewMetrics()
-			if err != nil {
-				t.Errorf("NewMetrics failed: %v", err)
-				return
-			}
-
-			// Verify metrics is not nil
+			// Use assert instead of require inside goroutines (require can cause issues with t.FailNow)
+			assert.NoError(t, err, "NewMetrics failed")
 			if metrics == nil {
-				t.Error("NewMetrics returned nil")
+				assert.Fail(t, "NewMetrics returned nil")
 				return
 			}
 
 			// Verify all metric fields are initialized
-			if metrics.registry == nil {
-				t.Error("metrics.registry is nil")
-			}
-			if metrics.MQTT == nil {
-				t.Error("metrics.MQTT is nil")
-			}
-			if metrics.BirdNET == nil {
-				t.Error("metrics.BirdNET is nil")
-			}
-			if metrics.ImageProvider == nil {
-				t.Error("metrics.ImageProvider is nil")
-			}
-			if metrics.DiskManager == nil {
-				t.Error("metrics.DiskManager is nil")
-			}
-			if metrics.Weather == nil {
-				t.Error("metrics.Weather is nil")
-			}
-			if metrics.SunCalc == nil {
-				t.Error("metrics.SunCalc is nil")
-			}
-			if metrics.Datastore == nil {
-				t.Error("metrics.Datastore is nil")
-			}
-			if metrics.MyAudio == nil {
-				t.Error("metrics.MyAudio is nil")
-			}
-			if metrics.SoundLevel == nil {
-				t.Error("metrics.SoundLevel is nil")
-			}
-			if metrics.HTTP == nil {
-				t.Error("metrics.HTTP is nil")
-			}
+			assert.NotNil(t, metrics.registry, "metrics.registry is nil")
+			assert.NotNil(t, metrics.MQTT, "metrics.MQTT is nil")
+			assert.NotNil(t, metrics.BirdNET, "metrics.BirdNET is nil")
+			assert.NotNil(t, metrics.ImageProvider, "metrics.ImageProvider is nil")
+			assert.NotNil(t, metrics.DiskManager, "metrics.DiskManager is nil")
+			assert.NotNil(t, metrics.Weather, "metrics.Weather is nil")
+			assert.NotNil(t, metrics.SunCalc, "metrics.SunCalc is nil")
+			assert.NotNil(t, metrics.Datastore, "metrics.Datastore is nil")
+			assert.NotNil(t, metrics.MyAudio, "metrics.MyAudio is nil")
+			assert.NotNil(t, metrics.SoundLevel, "metrics.SoundLevel is nil")
+			assert.NotNil(t, metrics.HTTP, "metrics.HTTP is nil")
 		}()
 	}
 
@@ -78,20 +55,14 @@ func TestNewMetricsConcurrency(t *testing.T) {
 func TestSetMetricsIdempotent(t *testing.T) {
 	// Create first metrics instance
 	firstMetrics, err := NewMetrics()
-	if err != nil {
-		t.Fatalf("Failed to create first metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to create first metrics")
 
 	// Create second metrics instance (different from first)
 	secondMetrics, err := NewMetrics()
-	if err != nil {
-		t.Fatalf("Failed to create second metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to create second metrics")
 
 	// Verify the two metrics instances are different
-	if firstMetrics == secondMetrics {
-		t.Error("Expected different metrics instances")
-	}
+	assert.NotSame(t, firstMetrics, secondMetrics, "Expected different metrics instances")
 
 	// Now test that SetMetrics is idempotent for each component
 	// The second call should be ignored due to sync.Once
@@ -128,9 +99,7 @@ func TestSetMetricsIdempotent(t *testing.T) {
 	metricsInstances := make([]*Metrics, numGoroutines)
 	for i := range numGoroutines {
 		m, err := NewMetrics()
-		if err != nil {
-			t.Fatalf("Failed to create metrics instance %d: %v", i, err)
-		}
+		require.NoError(t, err, "Failed to create metrics instance %d", i)
 		metricsInstances[i] = m
 	}
 

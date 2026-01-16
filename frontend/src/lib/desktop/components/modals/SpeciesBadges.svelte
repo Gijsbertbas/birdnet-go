@@ -17,7 +17,7 @@
 -->
 <script lang="ts">
   import { t } from '$lib/i18n';
-  import { alertIcons, navigationIcons } from '$lib/utils/icons';
+  import { CircleCheck, X } from '@lucide/svelte';
   import type { Detection } from '$lib/types/detection.types';
 
   interface Props {
@@ -51,7 +51,7 @@
   }
 
   // Size classes for responsive badges
-  const badgeSize = $derived(() => {
+  const badgeSize = $derived.by(() => {
     switch (size) {
       case 'sm':
         return 'badge-sm';
@@ -62,7 +62,7 @@
     }
   });
 
-  const iconSize = $derived(() => {
+  const iconSize = $derived.by(() => {
     switch (size) {
       case 'sm':
         return 'w-2 h-2';
@@ -73,7 +73,7 @@
     }
   });
 
-  const gapSize = $derived(() => {
+  const gapSize = $derived.by(() => {
     switch (size) {
       case 'sm':
         return 'gap-1';
@@ -87,38 +87,25 @@
 
 <div class={`flex items-center gap-2 flex-wrap ${className}`}>
   <!-- Verification Status Badge -->
-  <span
-    class={`badge ${badgeSize()} ${gapSize()} ${getStatusBadgeClass(detection.review?.verified)}`}
-  >
+  <span class={`badge ${badgeSize} ${gapSize} ${getStatusBadgeClass(detection.review?.verified)}`}>
     {#if detection.review?.verified === 'correct'}
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        fill="none"
-        viewBox="0 0 24 24"
-        stroke-width="2"
-        stroke="currentColor"
-        class={iconSize()}
-      >
-        <path stroke-linecap="round" stroke-linejoin="round" d={alertIcons.success} />
-      </svg>
+      <CircleCheck class={iconSize} />
     {:else if detection.review?.verified === 'false_positive'}
-      <div class={iconSize()}>
-        {@html navigationIcons.close}
-      </div>
+      <X class={iconSize} />
     {/if}
     {getStatusText(detection.review?.verified)}
   </span>
 
   <!-- Lock Status Badge -->
   {#if detection.locked}
-    <span class={`badge ${badgeSize()} badge-warning gap-1`}>
+    <span class={`badge ${badgeSize} badge-warning gap-1`}>
       <svg
         xmlns="http://www.w3.org/2000/svg"
         fill="none"
         viewBox="0 0 24 24"
         stroke-width="2"
         stroke="currentColor"
-        class={iconSize()}
+        class={iconSize}
       >
         <path
           stroke-linecap="round"

@@ -1,42 +1,52 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
+  import type { AuthConfig } from '../../../app.d';
   import { cn } from '$lib/utils/cn';
   import Header from './DesktopHeader.svelte';
   import Sidebar from './DesktopSidebar.svelte';
   import { auth as authStore } from '$lib/stores/auth';
-  import { csrf as csrfStore } from '$lib/stores/csrf';
+  import { sidebar } from '$lib/stores/sidebar';
   import ToastContainer from '$lib/desktop/components/ui/ToastContainer.svelte';
 
   interface Props {
     title?: string;
     currentPage?: string;
+    currentPath?: string;
     securityEnabled?: boolean;
     accessAllowed?: boolean;
     version?: string;
     children?: Snippet;
     className?: string;
+    authConfig?: AuthConfig;
+    onNavigate?: (_url: string) => void;
   }
 
   let {
     title = 'Dashboard',
     currentPage = 'dashboard',
+    currentPath,
     securityEnabled = false,
     accessAllowed = true,
     version = 'Development Build',
     children,
     className = '',
+    authConfig = {
+      basicEnabled: true,
+      enabledProviders: [],
+    },
+    onNavigate,
   }: Props = $props();
 
   // Drawer state
   let drawerOpen = $state(false);
 
+  // Get sidebar collapsed state for dynamic grid layout ($ prefix auto-subscribes to store)
+  let isCollapsed = $derived($sidebar);
+
   // Initialize stores on mount
   onMount(() => {
-    // Initialize CSRF token
-    csrfStore.init();
-
-    // Initialize auth state
+    // Initialize auth state (CSRF is now handled by appState in App.svelte)
     authStore.init(securityEnabled, accessAllowed);
 
     // SSE notifications are auto-initialized when imported
@@ -74,15 +84,25 @@
     // including navigation to /ui/detections with query parameters
   }
 
-  // Handle navigation
+  // Handle navigation - use passed callback or fall back to full reload
   function handleNavigate(url: string) {
-    // Convert old routes to new /ui/ routes
     const uiUrl = url.startsWith('/ui/') ? url : `/ui${url === '/' ? '/dashboard' : url}`;
-    window.location.href = uiUrl;
+    if (onNavigate) {
+      onNavigate(uiUrl);
+    } else {
+      // Fallback for when used without SPA routing
+      window.location.href = uiUrl;
+    }
   }
 </script>
 
-<div class={cn('drawer lg:drawer-open min-h-screen bg-base-200', className)}>
+<div
+  class={cn(
+    'drawer lg:drawer-open min-h-screen bg-base-200 transition-all duration-200',
+    isCollapsed ? 'sidebar-collapsed' : 'sidebar-expanded',
+    className
+  )}
+>
   <input id="my-drawer" type="checkbox" class="drawer-toggle" bind:checked={drawerOpen} />
 
   <div class="drawer-content">
@@ -126,8 +146,9 @@
     {securityEnabled}
     {accessAllowed}
     {version}
-    currentRoute={`/ui/${currentPage}`}
+    currentRoute={currentPath ?? `/ui/${currentPage}`}
     onNavigate={handleNavigate}
+    {authConfig}
   />
 
   <!-- Login Modal placeholder -->
@@ -166,12 +187,24 @@
   @media (min-width: 1024px) {
     :global(.drawer.lg\:drawer-open) {
       grid-template-columns: 256px 1fr;
+      transition: grid-template-columns 0.2s ease-in-out;
+    }
+
+    :global(.drawer.lg\:drawer-open.sidebar-collapsed) {
+      grid-template-columns: 64px 1fr;
     }
 
     :global(.drawer.lg\:drawer-open .drawer-side) {
       display: block;
       position: sticky;
       width: 256px;
+      transition: width 0.2s ease-in-out;
+      overflow: visible;
+    }
+
+    :global(.drawer.lg\:drawer-open.sidebar-collapsed .drawer-side) {
+      width: 64px;
+      overflow: visible;
     }
 
     :global(.drawer.lg\:drawer-open .drawer-content) {

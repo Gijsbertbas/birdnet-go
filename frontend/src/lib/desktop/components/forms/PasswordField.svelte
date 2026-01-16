@@ -1,9 +1,16 @@
 <script lang="ts">
-  import FormField from './FormField.svelte';
   import { cn } from '$lib/utils/cn.js';
   import type { HTMLAttributes } from 'svelte/elements';
-  import { alertIconsSvg, systemIcons } from '$lib/utils/icons';
+  import { Eye, EyeOff, TriangleAlert } from '@lucide/svelte';
   import { t } from '$lib/i18n';
+
+  // Generate unique ID using crypto.randomUUID for SSR compatibility
+  const generateUniqueId = () => {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      return `password-field-${crypto.randomUUID()}`;
+    }
+    return `password-field-${Math.random().toString(36).substr(2, 9)}-${Date.now()}`;
+  };
 
   interface Props extends HTMLAttributes<HTMLDivElement> {
     label: string;
@@ -37,6 +44,9 @@
     autocomplete = 'current-password',
     ...rest
   }: Props = $props();
+
+  // Generate unique ID for this component instance (captured at creation, intentionally non-reactive)
+  const fieldId = (() => name || generateUniqueId())();
 
   let showPassword = $state(false);
 
@@ -105,46 +115,60 @@
   }
 </script>
 
-<div class={cn('form-control', className)} {...rest}>
-  <FormField
-    type={showPassword ? 'text' : 'password'}
-    name={name || 'password-field'}
-    {label}
-    bind:value
-    {placeholder}
-    {helpText}
-    {required}
-    {disabled}
-    {autocomplete}
-    onChange={handleChange}
-    inputClassName={cn(
-      'pr-12', // Make room for toggle button
-      error ? 'input-error' : ''
-    )}
-  />
+<div class={cn('form-control min-w-0', className)} {...rest}>
+  <!-- Label rendered separately for proper button positioning -->
+  {#if label}
+    <label for={fieldId} class="label">
+      <span class="label-text">
+        {label}
+        {#if required}
+          <span class="text-error">*</span>
+        {/if}
+      </span>
+    </label>
+  {/if}
 
-  <!-- Password reveal toggle -->
-  {#if allowReveal}
-    <div class="absolute inset-y-0 right-0 flex items-center pr-3">
+  <!-- Input wrapper for toggle button positioning -->
+  <div class="relative">
+    <input
+      id={fieldId}
+      type={showPassword ? 'text' : 'password'}
+      name={fieldId}
+      bind:value
+      {placeholder}
+      {required}
+      {disabled}
+      {autocomplete}
+      onchange={e => handleChange(e.currentTarget.value)}
+      class={cn('input input-sm w-full pr-10', error ? 'input-error' : '')}
+    />
+
+    <!-- Password reveal toggle - vertically centered on input -->
+    {#if allowReveal}
       <button
         type="button"
-        class="btn btn-ghost btn-sm btn-square"
+        class="absolute right-2 top-1/2 -translate-y-1/2 flex items-center justify-center p-1 rounded-sm text-base-content/60 hover:text-base-content transition-colors disabled:opacity-50"
         onclick={togglePasswordVisibility}
         {disabled}
         aria-label={showPassword ? t('forms.labels.hidePassword') : t('forms.labels.showPassword')}
       >
         {#if showPassword}
-          {@html systemIcons.eyeOff}
+          <EyeOff class="size-4" />
         {:else}
-          {@html systemIcons.eye}
+          <Eye class="size-4" />
         {/if}
       </button>
-    </div>
+    {/if}
+  </div>
+
+  <!-- Help text rendered after input wrapper -->
+  {#if helpText}
+    <span class="help-text">{helpText}</span>
   {/if}
 
   <!-- Password strength indicator -->
   {#if showStrength && passwordStrength && value}
-    <div class="mt-2">
+    <div class="mt-2" role="status" aria-live="polite">
       <div class="flex items-center justify-between mb-1">
         <span class="text-sm font-medium">{t('forms.password.strength.label')}</span>
         <span class="text-sm font-medium {passwordStrength?.color || ''}">
@@ -170,14 +194,14 @@
       <!-- Feedback -->
       {#if passwordStrength?.feedback && passwordStrength.feedback.length > 0}
         <div class="mt-2">
-          <div class="text-xs text-base-content/70 mb-1">
+          <div class="text-xs text-base-content opacity-70 mb-1">
             {t('forms.password.strength.suggestions.title')}
           </div>
-          <ul class="text-xs text-base-content/70 space-y-1">
-            {#each passwordStrength.feedback as suggestion}
+          <ul class="text-xs text-base-content opacity-70 space-y-1">
+            {#each passwordStrength.feedback as suggestion, index (index)}
               <li class="flex items-center gap-1">
-                <div class="h-3 w-3 flex-shrink-0">
-                  {@html alertIconsSvg.warningSmall}
+                <div class="shrink-0">
+                  <TriangleAlert class="size-3" />
                 </div>
                 {suggestion}
               </li>
@@ -195,9 +219,3 @@
     </div>
   {/if}
 </div>
-
-<style>
-  .form-control {
-    position: relative;
-  }
-</style>

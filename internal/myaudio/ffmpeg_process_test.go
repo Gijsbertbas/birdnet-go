@@ -26,7 +26,7 @@ func TestFFmpegStream_ProcessCleanupNoZombies(t *testing.T) {
 	t.Attr("component", "ffmpeg")
 	t.Attr("test-type", "zombie-prevention")
 
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Zombie process testing is Unix-specific")
 	}
 
@@ -73,7 +73,7 @@ func TestFFmpegStream_ProcessCleanupNoZombies(t *testing.T) {
 // NOTE: This test doesn't use synctest because cleanupProcess uses real OS process waits
 // that need actual time to complete and cannot be virtualized.
 func TestFFmpegStream_CleanupTimeoutHandling(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Zombie process testing is Unix-specific")
 	}
 
@@ -123,7 +123,7 @@ func TestFFmpegStream_RapidRestartNoZombies(t *testing.T) {
 	t.Attr("component", "ffmpeg")
 	t.Attr("test-type", "zombie-prevention")
 
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Zombie process testing is Unix-specific")
 	}
 
@@ -187,7 +187,7 @@ func TestFFmpegStream_RapidRestartNoZombies(t *testing.T) {
 // Previously used real-time delays for child process spawning and cleanup that could be flaky.
 // With synctest, process group lifecycle testing becomes deterministic and runs instantly.
 func TestFFmpegStream_ProcessGroupCleanup(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Process group testing is Unix-specific")
 	}
 
@@ -236,7 +236,7 @@ func TestFFmpegStream_ConcurrentCleanup(t *testing.T) {
 	t.Attr("component", "ffmpeg")
 	t.Attr("test-type", "concurrency")
 
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Zombie process testing is Unix-specific")
 	}
 
@@ -273,7 +273,7 @@ func TestFFmpegStream_ConcurrentCleanup(t *testing.T) {
 func createMockFFmpegCommand(tb testing.TB, duration time.Duration) *exec.Cmd {
 	tb.Helper()
 	// Use sleep as a mock ffmpeg process
-	cmd := exec.Command("sleep", fmt.Sprintf("%.3f", duration.Seconds()))
+	cmd := exec.Command("sleep", fmt.Sprintf("%.3f", duration.Seconds())) //nolint:gosec // G204: test helper with hardcoded command
 	return cmd
 }
 
@@ -311,7 +311,7 @@ func assertNoZombieProcess(t *testing.T, pid int) {
 	t.Helper()
 	// Check /proc/[pid]/stat for zombie state
 	statPath := fmt.Sprintf("/proc/%d/stat", pid)
-	data, err := os.ReadFile(statPath)
+	data, err := os.ReadFile(statPath) //nolint:gosec // G304: statPath is /proc path with pid
 	if err != nil {
 		// Process doesn't exist, which is fine (not a zombie)
 		return
@@ -321,14 +321,10 @@ func assertNoZombieProcess(t *testing.T, pid int) {
 	stat := string(data)
 	// Find the last ')' to skip the command name which might contain spaces/parentheses
 	lastParen := strings.LastIndex(stat, ")")
-	if lastParen == -1 {
-		t.Fatalf("Invalid stat format for PID %d", pid)
-	}
+	require.NotEqual(t, -1, lastParen, "Invalid stat format for PID %d", pid)
 
 	fields := strings.Fields(stat[lastParen+1:])
-	if len(fields) < 1 {
-		t.Fatalf("Invalid stat format for PID %d", pid)
-	}
+	require.NotEmpty(t, fields, "Invalid stat format for PID %d", pid)
 
 	state := fields[0]
 	assert.NotEqual(t, "Z", state, "Process %d is a zombie", pid)
@@ -337,7 +333,7 @@ func assertNoZombieProcess(t *testing.T, pid int) {
 // Helper function to get child processes of a parent PID
 func getChildProcesses(t *testing.T, parentPid int) []int {
 	t.Helper()
-	cmd := exec.Command("pgrep", "-P", fmt.Sprintf("%d", parentPid))
+	cmd := exec.Command("pgrep", "-P", fmt.Sprintf("%d", parentPid)) //nolint:gosec // G204: test helper with hardcoded command
 	output, err := cmd.Output()
 	if err != nil {
 		// No children found
@@ -416,7 +412,7 @@ func TestFFmpegStream_WaitGoroutineLeak(t *testing.T) {
 // Previously used real-time delays for process exit simulation that could be flaky.
 // With synctest, process reaping testing becomes deterministic and runs instantly.
 func TestFFmpegStream_ProcessReapingAfterExit(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Process reaping testing is Unix-specific")
 	}
 
@@ -474,7 +470,7 @@ func TestFFmpegStream_ProcessReapingAfterExit(t *testing.T) {
 
 // Benchmark process cleanup performance
 func BenchmarkFFmpegStream_ProcessCleanup(b *testing.B) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		b.Skip("Process benchmarking is Unix-specific")
 	}
 

@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tphakala/birdnet-go/internal/datastore"
-	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/observability"
 )
@@ -25,14 +26,10 @@ func setupTestCache(t *testing.T) (*mockProviderWithAPICounter, *imageprovider.B
 
 	mockStore := newMockStore()
 	metrics, err := observability.NewMetrics()
-	if err != nil {
-		t.Fatalf("Failed to create metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to create metrics")
 
 	cache, err := imageprovider.CreateDefaultCache(metrics, mockStore)
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
+	require.NoError(t, err, "Failed to create cache")
 	cache.SetImageProvider(mockProvider)
 
 	return mockProvider, cache
@@ -50,114 +47,78 @@ func setupTestCacheWithSharedStore(t *testing.T) (*mockProviderWithAPICounter, *
 
 	mockStore := newMockStore()
 	metrics, err := observability.NewMetrics()
-	if err != nil {
-		t.Fatalf("Failed to create metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to create metrics")
 
 	cache, err := imageprovider.CreateDefaultCache(metrics, mockStore)
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
+	require.NoError(t, err, "Failed to create cache")
 	cache.SetImageProvider(mockProvider)
 
 	return mockProvider, cache, mockStore, metrics
+}
+
+// runConcurrentGets runs concurrent Get requests and returns any errors.
+func runConcurrentGets(cache *imageprovider.BirdImageCache, species string, count int) []error {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []error
+
+	for range count {
+		wg.Go(func() {
+			if _, err := cache.Get(species); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	return errs
 }
 
 // TestCacheEffectiveness validates that caching effectively reduces external API calls
 func TestCacheEffectiveness(t *testing.T) {
 	t.Parallel()
 
-	// Test 1: Multiple requests for same species should only trigger one API call
 	t.Run("DeduplicationTest", func(t *testing.T) {
 		t.Parallel()
 		mockProvider, cache := setupTestCache(t)
-
-		species := "Parus major"
-
-		// Make 10 concurrent requests
-		var wg sync.WaitGroup
-		for range 10 {
-			wg.Go(func() {
-				_, err := cache.Get(species)
-				if err != nil {
-					t.Errorf("Failed to get image: %v", err)
-				}
-			})
-		}
-		wg.Wait()
-
-		// Should only have made 1 API call
-		if mockProvider.getAPICallCount() != 1 {
-			t.Errorf("Expected 1 API call, got %d", mockProvider.getAPICallCount())
-		}
+		errs := runConcurrentGets(cache, "Parus major", 10)
+		assert.Empty(t, errs, "Expected no errors from concurrent requests")
+		assert.Equal(t, int64(1), mockProvider.getAPICallCount(), "Expected 1 API call for concurrent requests")
 	})
 
-	// Test 2: Subsequent requests should use cache
 	t.Run("CacheHitTest", func(t *testing.T) {
 		t.Parallel()
 		mockProvider, cache := setupTestCache(t)
-
 		species := "Carduelis carduelis"
 
-		// First request - should hit API
 		_, err := cache.Get(species)
-		if err != nil {
-			t.Fatalf("Failed to get image: %v", err)
-		}
+		require.NoError(t, err, "Failed to get image")
+		assert.Equal(t, int64(1), mockProvider.getAPICallCount(), "Expected 1 initial API call")
 
-		initialCalls := mockProvider.getAPICallCount()
-		if initialCalls != 1 {
-			t.Errorf("Expected 1 initial API call, got %d", initialCalls)
-		}
-
-		// Make 100 more requests - should all be cache hits
-		for i := range 100 {
+		for range 100 {
 			_, err := cache.Get(species)
-			if err != nil {
-				t.Errorf("Failed to get image on request %d: %v", i, err)
-			}
+			require.NoError(t, err)
 		}
-
-		// API calls should not increase
-		if mockProvider.getAPICallCount() != initialCalls {
-			t.Errorf("Expected no additional API calls, got %d total calls", mockProvider.getAPICallCount())
-		}
+		assert.Equal(t, int64(1), mockProvider.getAPICallCount(), "Expected no additional API calls")
 	})
 
-	// Test 3: DB cache persistence
 	t.Run("DBCachePersistenceTest", func(t *testing.T) {
 		t.Parallel()
 		mockProvider, cache, mockStore, metrics := setupTestCacheWithSharedStore(t)
-
 		species := "Sturnus vulgaris"
 
-		// First request
 		_, err := cache.Get(species)
-		if err != nil {
-			t.Fatalf("Failed to get image: %v", err)
-		}
+		require.NoError(t, err, "Failed to get image")
+		assert.Equal(t, int64(1), mockProvider.getAPICallCount(), "Expected 1 API call for initial fetch")
 
-		if mockProvider.getAPICallCount() != 1 {
-			t.Errorf("Expected 1 API call for initial fetch, got %d", mockProvider.getAPICallCount())
-		}
-
-		// Create new cache instance (simulating restart)
 		cache2, err := imageprovider.CreateDefaultCache(metrics, mockStore)
-		if err != nil {
-			t.Fatalf("Failed to create second cache: %v", err)
-		}
+		require.NoError(t, err, "Failed to create second cache")
 		cache2.SetImageProvider(mockProvider)
 
-		// Request same species - should load from DB, not API
 		_, err = cache2.Get(species)
-		if err != nil {
-			t.Fatalf("Failed to get image from new cache: %v", err)
-		}
-
-		// Should still be 1 API call (no new call)
-		if mockProvider.getAPICallCount() != 1 {
-			t.Errorf("Expected no new API calls after restart, got %d total calls", mockProvider.getAPICallCount())
-		}
+		require.NoError(t, err, "Failed to get image from new cache")
+		assert.Equal(t, int64(1), mockProvider.getAPICallCount(), "Expected no new API calls after restart")
 	})
 }
 
@@ -172,14 +133,10 @@ func TestNegativeCaching(t *testing.T) {
 
 	mockStore := newMockStore()
 	metrics, err := observability.NewMetrics()
-	if err != nil {
-		t.Fatalf("Failed to create metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to create metrics")
 
 	cache, err := imageprovider.CreateDefaultCache(metrics, mockStore)
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
+	require.NoError(t, err, "Failed to create cache")
 	cache.SetImageProvider(mockProvider)
 
 	// Test repeated requests for non-existent species
@@ -191,9 +148,7 @@ func TestNegativeCaching(t *testing.T) {
 		// Make 5 requests for non-existent species
 		for range 5 {
 			_, err := cache.Get("Imaginary species")
-			if !errors.Is(err, imageprovider.ErrImageNotFound) {
-				t.Errorf("Expected ErrImageNotFound, got %v", err)
-			}
+			require.ErrorIs(t, err, imageprovider.ErrImageNotFound, "Expected ErrImageNotFound")
 		}
 
 		// With negative caching implemented, only first request should hit API
@@ -201,9 +156,7 @@ func TestNegativeCaching(t *testing.T) {
 		t.Logf("API calls for non-existent species: %d (with negative caching)", apiCalls)
 
 		// Verify negative caching is working
-		if apiCalls != 1 {
-			t.Errorf("Expected 1 API call with negative caching, got %d", apiCalls)
-		}
+		assert.Equal(t, int64(1), apiCalls, "Expected 1 API call with negative caching")
 	})
 }
 
@@ -225,26 +178,21 @@ func TestBackgroundRefreshIsolation(t *testing.T) {
 
 	mockStore := newMockStore()
 	metrics, err := observability.NewMetrics()
-	if err != nil {
-		t.Fatalf("Failed to create metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to create metrics")
 
 	// Pre-populate with stale entry
 	staleTime := time.Now().Add(-15 * 24 * time.Hour)
 	species := "Turdus merula"
-	if err := mockStore.SaveImageCache(&datastore.ImageCache{
+	err = mockStore.SaveImageCache(&datastore.ImageCache{
 		ScientificName: species,
 		ProviderName:   "wikimedia",
 		URL:            "http://example.com/old.jpg",
 		CachedAt:       staleTime,
-	}); err != nil {
-		t.Fatalf("Failed to save stale cache entry: %v", err)
-	}
+	})
+	require.NoError(t, err, "Failed to save stale cache entry")
 
 	cache, err := imageprovider.CreateDefaultCache(metrics, mockStore)
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
+	require.NoError(t, err, "Failed to create cache")
 	cache.SetImageProvider(mockProvider)
 
 	// Wait for background refresh to potentially start
@@ -255,27 +203,19 @@ func TestBackgroundRefreshIsolation(t *testing.T) {
 	img, err := cache.Get(species)
 	duration := time.Since(start)
 
-	if err != nil {
-		t.Fatalf("Failed to get image: %v", err)
-	}
+	require.NoError(t, err, "Failed to get image")
 
 	// Should return quickly (not wait for background refresh)
-	if duration > 10*time.Millisecond {
-		t.Errorf("User request took too long: %v, expected < 10ms", duration)
-	}
+	assert.LessOrEqual(t, duration, 10*time.Millisecond, "User request took too long, expected < 10ms")
 
 	// Should have returned stale data
-	if img.URL != "http://example.com/old.jpg" {
-		t.Errorf("Expected stale URL, got %s", img.URL)
-	}
+	assert.Equal(t, "http://example.com/old.jpg", img.URL, "Expected stale URL")
 
 	// Wait for background refresh to complete
 	time.Sleep(200 * time.Millisecond)
 
 	// Check that background refresh happened
-	if mockProvider.getBackgroundFetchCount() == 0 {
-		t.Error("Expected background refresh to occur")
-	}
+	assert.Positive(t, mockProvider.getBackgroundFetchCount(), "Expected background refresh to occur")
 
 	t.Logf("User fetches: %d, Background fetches: %d",
 		mockProvider.getUserFetchCount(), mockProvider.getBackgroundFetchCount())
@@ -290,14 +230,10 @@ func TestCacheMetrics(t *testing.T) {
 
 	mockStore := newMockStore()
 	metrics, err := observability.NewMetrics()
-	if err != nil {
-		t.Fatalf("Failed to create metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to create metrics")
 
 	cache, err := imageprovider.CreateDefaultCache(metrics, mockStore)
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
+	require.NoError(t, err, "Failed to create cache")
 	cache.SetImageProvider(mockProvider)
 
 	// Track metrics before and after operations
@@ -307,17 +243,13 @@ func TestCacheMetrics(t *testing.T) {
 	// First fetch each species
 	for _, s := range species {
 		_, err := cache.Get(s)
-		if err != nil {
-			t.Errorf("Failed to get %s: %v", s, err)
-		}
+		require.NoError(t, err, "Failed to get %s", s)
 	}
 
 	// Fetch again (should be cache hits)
 	for _, s := range species {
 		_, err := cache.Get(s)
-		if err != nil {
-			t.Errorf("Failed to get %s: %v", s, err)
-		}
+		require.NoError(t, err, "Failed to get %s", s)
 	}
 
 	// Log the results

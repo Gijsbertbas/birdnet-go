@@ -5,20 +5,25 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
-// WAVHeaderSize is the standard size of a WAV file header in bytes
-const WAVHeaderSize = 44
+// Audio file constants
+const (
+	// audioDirPermission is the permission mode for created directories
+	audioDirPermission = 0o750
+)
 
 // saveBufferToFile writes a bytes.Buffer containing audio data to a file, along with
 // timestamp and format information for debugging purposes.
 func saveBufferToFile(buffer *bytes.Buffer, filename string, startTime, endTime time.Time) error {
+	log := GetLogger()
+
 	// Validate input parameters
 	if buffer == nil {
 		return errors.New(fmt.Errorf("buffer is nil")).
@@ -28,12 +33,15 @@ func saveBufferToFile(buffer *bytes.Buffer, filename string, startTime, endTime 
 			Build()
 	}
 
+	// Clean the filename to prevent path traversal (gosec G304)
+	cleanFilename := filepath.Clean(filename)
+
 	// Get the buffer size before any operations that might consume it
 	bufferSize := buffer.Len()
 
 	// Create directory if it doesn't exist
-	dirPath := filepath.Dir(filename)
-	if err := os.MkdirAll(dirPath, 0o750); err != nil {
+	dirPath := filepath.Dir(cleanFilename)
+	if err := os.MkdirAll(dirPath, audioDirPermission); err != nil {
 		return errors.New(err).
 			Component("birdweather").
 			Category(errors.CategoryFileIO).
@@ -43,18 +51,18 @@ func saveBufferToFile(buffer *bytes.Buffer, filename string, startTime, endTime 
 	}
 
 	// Save the audio file
-	file, err := os.Create(filename)
+	file, err := os.Create(cleanFilename) //nolint:gosec // G304: filename is cleaned above
 	if err != nil {
 		return errors.New(err).
 			Component("birdweather").
 			Category(errors.CategoryFileIO).
-			FileContext(filename, 0).
+			FileContext(cleanFilename, 0).
 			Context("operation", "create_file").
 			Build()
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			log.Printf("Failed to close audio file: %v", err)
+			log.Warn("Failed to close audio file", logger.Error(err))
 		}
 	}()
 
@@ -63,15 +71,15 @@ func saveBufferToFile(buffer *bytes.Buffer, filename string, startTime, endTime 
 		return errors.New(err).
 			Component("birdweather").
 			Category(errors.CategoryFileIO).
-			FileContext(filename, int64(bufferSize)).
+			FileContext(cleanFilename, int64(bufferSize)).
 			Context("operation", "write_file").
 			Build()
 	}
 
 	// Get the actual file size from the filesystem
-	fileInfo, err := os.Stat(filename)
+	fileInfo, err := os.Stat(cleanFilename)
 	if err != nil {
-		log.Printf("Warning: couldn't get file size: %v", err)
+		log.Warn("Couldn't get file size", logger.Error(err))
 	}
 	actualFileSize := int64(0)
 	if fileInfo != nil {
@@ -79,15 +87,15 @@ func saveBufferToFile(buffer *bytes.Buffer, filename string, startTime, endTime 
 	}
 
 	// Create a metadata file with the same name but .txt extension
-	metaFilename := filename[:len(filename)-len(filepath.Ext(filename))] + ".txt"
-	metaFile, err := os.Create(metaFilename)
+	metaFilename := filepath.Clean(cleanFilename[:len(cleanFilename)-len(filepath.Ext(cleanFilename))] + ".txt")
+	metaFile, err := os.Create(metaFilename) //nolint:gosec // G304: filename is cleaned above
 	if err != nil {
-		log.Printf("Warning: could not create metadata file: %v", err)
+		log.Warn("Could not create metadata file", logger.Error(err))
 		return nil // Continue even if metadata file creation fails
 	}
 	defer func() {
 		if err := metaFile.Close(); err != nil {
-			log.Printf("Failed to close metadata file: %v", err)
+			log.Warn("Failed to close metadata file", logger.Error(err))
 		}
 	}()
 
@@ -101,20 +109,12 @@ func saveBufferToFile(buffer *bytes.Buffer, filename string, startTime, endTime 
 	metaInfo += fmt.Sprintf("File Size: %d bytes\n", actualFileSize)
 	metaInfo += fmt.Sprintf("Buffer Size: %d bytes\n", bufferSize)
 
-	// Add format-specific info if known (basic for now)
-	if fileExt == ".wav" {
-		// Calculate estimated PCM data size for WAV
-		pcmDataSize := max(actualFileSize-WAVHeaderSize, 0)
-		metaInfo += fmt.Sprintf("Estimated PCM Data Size: %d bytes\n", pcmDataSize)
-		metaInfo += fmt.Sprintf("Expected Audio Duration (PCM): %.3f seconds\n",
-			float64(pcmDataSize)/(48000.0*2.0))
-	}
 	metaInfo += "Sample Rate: 48000 Hz\n"
 	metaInfo += "Bits Per Sample: 16\n"
 	metaInfo += "Channels: 1\n"
 
 	if _, err := metaFile.WriteString(metaInfo); err != nil {
-		log.Printf("Warning: could not write to metadata file: %v", err)
+		log.Warn("Could not write to metadata file", logger.Error(err))
 	}
 
 	return nil

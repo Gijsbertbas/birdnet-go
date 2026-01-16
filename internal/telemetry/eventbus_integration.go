@@ -2,98 +2,84 @@ package telemetry
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/events"
-	"github.com/tphakala/birdnet-go/internal/logging"
-	"log/slog"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 var (
 	// telemetryWorker is the singleton telemetry worker
-	telemetryWorker *TelemetryWorker
-	logger          *slog.Logger
+	telemetryWorker     *TelemetryWorker
+	telemetryWorkerOnce sync.Once
+	errWorkerInit       error // Stores worker initialization error
 )
-
-func init() {
-	logger = logging.ForService("telemetry-integration")
-	if logger == nil {
-		logger = slog.Default().With("service", "telemetry-integration")
-	}
-}
 
 // InitializeEventBusIntegration sets up the telemetry worker as an event consumer
 // This should be called after both Sentry and event bus are initialized
+// Thread-safe: uses sync.Once to ensure single initialization
 func InitializeEventBusIntegration() error {
+	log := GetLogger()
+
 	// Check if Sentry is enabled (skip check in test mode)
 	if atomic.LoadInt32(&testMode) == 0 {
 		settings := conf.GetSettings()
 		if settings == nil || !settings.Sentry.Enabled {
-			logger.Info("Sentry telemetry disabled, skipping event bus integration")
+			log.Info("Sentry telemetry disabled, skipping event bus integration")
 			return nil
 		}
 	}
 
 	// Check if event bus is initialized
 	if !events.IsInitialized() {
-		logger.Warn("event bus not initialized, skipping telemetry integration")
+		log.Warn("event bus not initialized, skipping telemetry integration")
 		return nil
 	}
 
-	// Check if already initialized
-	if telemetryWorker != nil {
-		logger.Debug("telemetry worker already initialized, skipping")
-		return nil
-	}
+	// Thread-safe initialization using sync.Once
+	telemetryWorkerOnce.Do(func() {
+		// Create telemetry worker with default config
+		// Uses shared constants from worker.go and system_init_manager.go
+		config := DefaultWorkerConfig()
 
-	// Create telemetry worker with custom config
-	config := &WorkerConfig{
-		FailureThreshold:   10,
-		RecoveryTimeout:    60 * time.Second,
-		HalfOpenMaxEvents:  5,
-		RateLimitWindow:    1 * time.Minute,
-		RateLimitMaxEvents: 100, // Reasonable limit for Sentry
-		SamplingRate:       1.0, // 100% sampling by default
-		BatchingEnabled:    true,
-		BatchSize:          10,
-		BatchTimeout:       100 * time.Millisecond,
-	}
+		worker, err := NewTelemetryWorker(true, config)
+		if err != nil {
+			errWorkerInit = fmt.Errorf("failed to create telemetry worker: %w", err)
+			return
+		}
 
-	worker, err := NewTelemetryWorker(true, config)
-	if err != nil {
-		return fmt.Errorf("failed to create telemetry worker: %w", err)
-	}
+		// Get event bus
+		eventBus := events.GetEventBus()
+		if eventBus == nil {
+			errWorkerInit = fmt.Errorf("event bus is nil")
+			return
+		}
 
-	// Get event bus
-	eventBus := events.GetEventBus()
-	if eventBus == nil {
-		return fmt.Errorf("event bus is nil")
-	}
+		// Register the worker as a consumer
+		if err := eventBus.RegisterConsumer(worker); err != nil {
+			errWorkerInit = fmt.Errorf("failed to register telemetry worker: %w", err)
+			return
+		}
 
-	// Register the worker as a consumer
-	if err := eventBus.RegisterConsumer(worker); err != nil {
-		return fmt.Errorf("failed to register telemetry worker: %w", err)
-	}
+		// Store reference for stats/monitoring
+		telemetryWorker = worker
 
-	// Store reference for stats/monitoring
-	telemetryWorker = worker
+		// Log registration details
+		GetLogger().Info("telemetry worker registered with event bus",
+			logger.String("consumer", worker.Name()),
+			logger.Bool("supports_batching", worker.SupportsBatching()),
+			logger.Bool("batching_enabled", config.BatchingEnabled),
+			logger.Int("batch_size", config.BatchSize),
+			logger.Duration("batch_timeout", config.BatchTimeout),
+			logger.Int("circuit_breaker_threshold", config.FailureThreshold),
+			logger.Duration("recovery_timeout", config.RecoveryTimeout),
+			logger.Int("rate_limit", config.RateLimitMaxEvents),
+			logger.Float64("sampling_rate", config.SamplingRate))
+	})
 
-	// Log registration details
-	logTelemetryInfo(logger, "telemetry worker registered with event bus",
-		"consumer", worker.Name(),
-		"supports_batching", worker.SupportsBatching(),
-		"batching_enabled", config.BatchingEnabled,
-		"batch_size", config.BatchSize,
-		"batch_timeout", config.BatchTimeout,
-		"circuit_breaker_threshold", config.FailureThreshold,
-		"recovery_timeout", config.RecoveryTimeout,
-		"rate_limit", config.RateLimitMaxEvents,
-		"sampling_rate", config.SamplingRate,
-	)
-
-	return nil
+	return errWorkerInit
 }
 
 // GetTelemetryWorker returns the telemetry worker instance
@@ -116,16 +102,12 @@ func UpdateSamplingRate(rate float64) error {
 		return fmt.Errorf("telemetry worker not initialized")
 	}
 
-	if rate < 0.0 || rate > 1.0 {
-		return fmt.Errorf("sampling rate must be between 0.0 and 1.0")
+	if err := telemetryWorker.SetSamplingRate(rate); err != nil {
+		return err
 	}
 
-	telemetryWorker.configMu.Lock()
-	telemetryWorker.config.SamplingRate = rate
-	telemetryWorker.configMu.Unlock()
-
 	// Log the update
-	logTelemetryInfo(logger, "updated telemetry sampling rate", "rate", rate)
+	GetLogger().Info("updated telemetry sampling rate", logger.Float64("rate", rate))
 
 	return nil
 }

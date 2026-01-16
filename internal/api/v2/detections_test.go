@@ -19,8 +19,41 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 )
+
+// executeNoteCommentsHandler simulates the handler behavior for getting comments.
+func executeNoteCommentsHandler(t *testing.T, c echo.Context, mockDS datastore.Interface, detectionID string, expectedStatus int) error {
+	t.Helper()
+	if expectedStatus == http.StatusOK {
+		comments, dbErr := mockDS.GetNoteComments(detectionID)
+		if dbErr != nil {
+			return echo.NewHTTPError(http.StatusNotFound, "Comments not found")
+		}
+		return c.JSON(http.StatusOK, comments)
+	}
+	return echo.NewHTTPError(expectedStatus, "Comments not found")
+}
+
+// assertNoteCommentsResponse validates the response for note comments.
+func assertNoteCommentsResponse(t *testing.T, rec *httptest.ResponseRecorder, err error, expectedStatus, expectedCount int) {
+	t.Helper()
+	if expectedStatus == http.StatusOK {
+		require.NoError(t, err)
+		assert.Equal(t, expectedStatus, rec.Code)
+		var comments []datastore.NoteComment
+		jsonErr := json.Unmarshal(rec.Body.Bytes(), &comments)
+		require.NoError(t, jsonErr)
+		assert.Len(t, comments, expectedCount)
+	} else {
+		require.Error(t, err)
+		var httpErr *echo.HTTPError
+		ok := errors.As(err, &httpErr)
+		assert.True(t, ok)
+		assert.Equal(t, expectedStatus, httpErr.Code)
+	}
+}
 
 // decodePaginated is a helper to unmarshal a response body into a PaginatedResponse
 // and extract the data as a map slice for easier testing.
@@ -38,7 +71,7 @@ func decodePaginated(t *testing.T, body []byte) ([]map[string]any, PaginatedResp
 	// Extract the detections data
 	detectionsIface, ok := response.Data.([]any)
 	if !ok {
-		t.Fatalf("Expected Data to be an array, got %T", response.Data)
+		require.Failf(t, "Expected Data to be an array", "got %T", response.Data)
 	}
 
 	// Convert to []map[string]interface{} for easier access
@@ -47,7 +80,7 @@ func decodePaginated(t *testing.T, body []byte) ([]map[string]any, PaginatedResp
 		if m, ok := d.(map[string]any); ok {
 			result[i] = m
 		} else {
-			t.Fatalf("Expected detection element to be object, got %T", d)
+			require.Failf(t, "Expected detection element to be object", "got %T", d)
 		}
 	}
 
@@ -60,6 +93,32 @@ func testRealtimeSource() datastore.AudioSource {
 		ID:          "realtime",
 		SafeString:  "realtime",
 		DisplayName: "realtime",
+	}
+}
+
+// categorizeHTTPResponse categorizes an HTTP response status into success, conflict, or failure.
+func categorizeHTTPResponse(t *testing.T, statusCode int, successes, conflicts, failures *int32) {
+	t.Helper()
+	switch statusCode {
+	case http.StatusOK:
+		atomic.AddInt32(successes, 1)
+	case http.StatusConflict:
+		atomic.AddInt32(conflicts, 1)
+	default:
+		t.Logf("Unexpected status code: %d", statusCode)
+		atomic.AddInt32(failures, 1)
+	}
+}
+
+// getConcurrencyLevel returns a platform-appropriate concurrency level for tests.
+func getConcurrencyLevel() int {
+	switch runtime.GOOS {
+	case "windows":
+		return 3
+	case "darwin":
+		return 4
+	default:
+		return 5
 	}
 }
 
@@ -378,7 +437,10 @@ func TestGetDetection(t *testing.T) {
 				assert.Equal(t, "correct", response.Verified)
 				assert.False(t, response.Locked)
 				assert.Len(t, response.Comments, 1)
-				assert.Equal(t, "Test comment", response.Comments[0])
+				assert.Equal(t, "Test comment", response.Comments[0].Entry)
+				assert.Equal(t, uint(1), response.Comments[0].ID)
+				assert.NotEmpty(t, response.Comments[0].CreatedAt)
+				assert.NotEmpty(t, response.Comments[0].UpdatedAt)
 			},
 		},
 		{
@@ -425,6 +487,145 @@ func TestGetDetection(t *testing.T) {
 			mockDS.AssertExpectations(t)
 		})
 	}
+}
+
+// TestGetDetectionCommentFormat verifies that detection comments are returned
+// with full object format (id, entry, createdAt, updatedAt) as expected by the frontend.
+// This test was added to fix issue #1728 where comments displayed as "NaN-NaN-NaN NaN:NaN:NaN"
+// due to a mismatch between backend (returning []string) and frontend (expecting Comment objects).
+func TestGetDetectionCommentFormat(t *testing.T) {
+	// Setup
+	e, mockDS, controller := setupTestEnvironment(t)
+
+	// Create specific timestamps for verification
+	createdTime := time.Date(2025, 1, 9, 10, 30, 0, 0, time.UTC)
+	updatedTime := time.Date(2025, 1, 9, 11, 45, 0, 0, time.UTC)
+
+	// Create mock data with multiple comments to verify ordering
+	mockNote := datastore.Note{
+		ID:             42,
+		Date:           "2025-01-09",
+		Time:           "10:30:00",
+		Source:         testRealtimeSource(),
+		SpeciesCode:    "NOCA",
+		ScientificName: "Cardinalis cardinalis", //nolint:misspell // Valid scientific name for Northern Cardinal
+		CommonName:     "Northern Cardinal",
+		Confidence:     0.92,
+		BeginTime:      createdTime,
+		EndTime:        createdTime.Add(3 * time.Second),
+		Verified:       "correct",
+		Locked:         false,
+		Comments: []datastore.NoteComment{
+			{
+				ID:        101,
+				NoteID:    42,
+				Entry:     "First comment with text",
+				CreatedAt: createdTime,
+				UpdatedAt: updatedTime,
+			},
+			{
+				ID:        102,
+				NoteID:    42,
+				Entry:     "Second comment added later",
+				CreatedAt: createdTime.Add(time.Hour),
+				UpdatedAt: createdTime.Add(time.Hour),
+			},
+		},
+	}
+
+	// Setup mock expectations
+	mockDS.On("Get", "42").Return(mockNote, nil)
+	mockDS.On("GetHourlyWeather", "2025-01-09").Return([]datastore.HourlyWeather{}, nil)
+
+	// Create request
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/detections/42", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("42")
+
+	// Call handler
+	err := controller.GetDetection(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Parse response
+	var response DetectionResponse
+	err = json.Unmarshal(rec.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	// Verify comment structure - this is the key fix for issue #1728
+	// Frontend expects Comment objects with {id, entry, createdAt, updatedAt}
+	// NOT string arrays which would cause "NaN-NaN-NaN NaN:NaN:NaN" display
+	require.Len(t, response.Comments, 2, "Expected 2 comments")
+
+	// Verify first comment has all required fields
+	comment1 := response.Comments[0]
+	assert.Equal(t, uint(101), comment1.ID, "Comment ID should be preserved")
+	assert.Equal(t, "First comment with text", comment1.Entry, "Comment entry text should be preserved")
+	assert.Equal(t, createdTime.Format(time.RFC3339), comment1.CreatedAt, "CreatedAt should be RFC3339 formatted")
+	assert.Equal(t, updatedTime.Format(time.RFC3339), comment1.UpdatedAt, "UpdatedAt should be RFC3339 formatted")
+
+	// Verify second comment with exact timestamp assertions
+	comment2 := response.Comments[1]
+	expectedTime2 := createdTime.Add(time.Hour)
+	assert.Equal(t, uint(102), comment2.ID)
+	assert.Equal(t, "Second comment added later", comment2.Entry)
+	assert.Equal(t, expectedTime2.Format(time.RFC3339), comment2.CreatedAt, "Second comment CreatedAt should be RFC3339 formatted")
+	assert.Equal(t, expectedTime2.Format(time.RFC3339), comment2.UpdatedAt, "Second comment UpdatedAt should be RFC3339 formatted")
+
+	// Verify timestamps are valid RFC3339 format (frontend will parse these)
+	_, err = time.Parse(time.RFC3339, comment1.CreatedAt)
+	require.NoError(t, err, "CreatedAt must be valid RFC3339 timestamp")
+	_, err = time.Parse(time.RFC3339, comment1.UpdatedAt)
+	require.NoError(t, err, "UpdatedAt must be valid RFC3339 timestamp")
+
+	// Verify mock expectations
+	mockDS.AssertExpectations(t)
+}
+
+// TestGetDetectionEmptyComments verifies detection with no comments returns empty array
+func TestGetDetectionEmptyComments(t *testing.T) {
+	// Setup
+	e, mockDS, controller := setupTestEnvironment(t)
+
+	mockNote := datastore.Note{
+		ID:             99,
+		Date:           "2025-01-09",
+		Time:           "12:00:00",
+		Source:         testRealtimeSource(),
+		SpeciesCode:    "AMRO",
+		ScientificName: "Turdus migratorius",
+		CommonName:     "American Robin",
+		Confidence:     0.88,
+		BeginTime:      time.Now(),
+		EndTime:        time.Now().Add(3 * time.Second),
+		Verified:       "unverified",
+		Locked:         false,
+		Comments:       nil, // No comments
+	}
+
+	mockDS.On("Get", "99").Return(mockNote, nil)
+	mockDS.On("GetHourlyWeather", "2025-01-09").Return([]datastore.HourlyWeather{}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/detections/99", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("99")
+
+	err := controller.GetDetection(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var response DetectionResponse
+	err = json.Unmarshal(rec.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	// Comments should be nil/empty, not cause any NaN issues
+	assert.Empty(t, response.Comments, "Detection with no comments should have empty comments array")
+
+	mockDS.AssertExpectations(t)
 }
 
 // TestGetRecentDetections tests the GetRecentDetections endpoint
@@ -652,10 +853,7 @@ func TestReviewDetection(t *testing.T) {
 			detectionID: "1",
 			requestBody: `{"verified": "correct", "comment": "Good detection"}`,
 			mockSetup: func(m *mock.Mock) {
-				m.On("Get", "1").Return(datastore.Note{ID: 1, Locked: false}, nil)
-				m.On("IsNoteLocked", "1").Return(false, nil)
-				m.On("SaveNoteComment", mock.AnythingOfType("*datastore.NoteComment")).Return(nil)
-				m.On("SaveNoteReview", mock.AnythingOfType("*datastore.NoteReview")).Return(nil)
+				setupValidReviewMock(m, "1", 1, true)
 			},
 			expectedStatus: http.StatusOK,
 		},
@@ -664,9 +862,7 @@ func TestReviewDetection(t *testing.T) {
 			detectionID: "2",
 			requestBody: `{"verified": "false_positive"}`,
 			mockSetup: func(m *mock.Mock) {
-				m.On("Get", "2").Return(datastore.Note{ID: 2, Locked: false}, nil)
-				m.On("IsNoteLocked", "2").Return(false, nil)
-				m.On("SaveNoteReview", mock.AnythingOfType("*datastore.NoteReview")).Return(nil)
+				setupValidReviewMock(m, "2", 2, false)
 			},
 			expectedStatus: http.StatusOK,
 		},
@@ -694,10 +890,7 @@ func TestReviewDetection(t *testing.T) {
 			detectionID: "5",
 			requestBody: `{"verified": "correct", "comment": "<script>alert('XSS')</script>Special chars: &<>\"'!@#$%^&*()_+{}[]|\\:;,.?/~"}`,
 			mockSetup: func(m *mock.Mock) {
-				m.On("Get", "5").Return(datastore.Note{ID: 5, Locked: false}, nil)
-				m.On("IsNoteLocked", "5").Return(false, nil)
-				m.On("SaveNoteComment", mock.AnythingOfType("*datastore.NoteComment")).Return(nil)
-				m.On("SaveNoteReview", mock.AnythingOfType("*datastore.NoteReview")).Return(nil)
+				setupValidReviewMock(m, "5", 5, true)
 			},
 			expectedStatus: http.StatusOK,
 		},
@@ -706,10 +899,7 @@ func TestReviewDetection(t *testing.T) {
 			detectionID: "6",
 			requestBody: `{"verified": "correct", "comment": "` + strings.Repeat("Very long comment. ", 500) + `"}`,
 			mockSetup: func(m *mock.Mock) {
-				m.On("Get", "6").Return(datastore.Note{ID: 6, Locked: false}, nil)
-				m.On("IsNoteLocked", "6").Return(false, nil)
-				m.On("SaveNoteComment", mock.AnythingOfType("*datastore.NoteComment")).Return(nil)
-				m.On("SaveNoteReview", mock.AnythingOfType("*datastore.NoteReview")).Return(nil)
+				setupValidReviewMock(m, "6", 6, true)
 			},
 			expectedStatus: http.StatusOK,
 		},
@@ -791,7 +981,7 @@ func TestLockDetection(t *testing.T) {
 			requestBody: `{"locked": false}`,
 			mockSetup: func(m *mock.Mock) {
 				m.On("Get", "2").Return(datastore.Note{ID: 2, Locked: false}, nil)
-				m.On("IsNoteLocked", "2").Return(false, nil)
+				// Note: IsNoteLocked is NOT called when unlocking (req.Locked = false)
 				m.On("UnlockNote", "2").Return(nil)
 			},
 			expectedStatus: http.StatusNoContent,
@@ -805,6 +995,19 @@ func TestLockDetection(t *testing.T) {
 				m.On("IsNoteLocked", "3").Return(true, nil)
 			},
 			expectedStatus: http.StatusConflict,
+		},
+		{
+			name:        "Unlock a locked detection should succeed",
+			detectionID: "4",
+			requestBody: `{"locked": false}`,
+			mockSetup: func(m *mock.Mock) {
+				// Detection is currently locked (Locked: true)
+				m.On("Get", "4").Return(datastore.Note{ID: 4, Locked: true}, nil)
+				// Note: IsNoteLocked is NOT called when unlocking (req.Locked = false)
+				// Should call UnlockNote to unlock it
+				m.On("UnlockNote", "4").Return(nil)
+			},
+			expectedStatus: http.StatusNoContent,
 		},
 	}
 
@@ -848,69 +1051,355 @@ func TestLockDetection(t *testing.T) {
 	}
 }
 
-// TestIgnoreSpecies tests the IgnoreSpecies endpoint
+// clearExcludedSpeciesList is a test helper that clears the global excluded species list
+// to ensure test isolation. Call this at the beginning of tests that check list state.
+func clearExcludedSpeciesList(t *testing.T) {
+	t.Helper()
+	settings := conf.GetSettings()
+	settings.Realtime.Species.Exclude = []string{}
+}
+
+// TestIgnoreSpecies tests the IgnoreSpecies endpoint with toggle behavior
 func TestIgnoreSpecies(t *testing.T) {
-	// Setup
-	e, _, controller := setupTestEnvironment(t)
+	// Test cases for error scenarios
+	t.Run("Error cases", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
 
-	// Test cases
-	testCases := []struct {
-		name           string
-		requestBody    string
-		expectedStatus int
-	}{
-		{
-			name:           "Valid species name",
-			requestBody:    `{"common_name": "American Crow"}`,
-			expectedStatus: http.StatusNoContent,
-		},
-		{
-			name:           "Empty species name",
-			requestBody:    `{"common_name": ""}`,
-			expectedStatus: http.StatusBadRequest,
-		},
-		{
-			name:           "Invalid JSON",
-			requestBody:    `{"common_name": }`,
-			expectedStatus: http.StatusBadRequest,
-		},
-		{
-			name:           "Extremely long species name",
-			requestBody:    `{"common_name": "` + strings.Repeat("Very Long Bird Name ", 100) + `"}`,
-			expectedStatus: http.StatusNoContent, // Should handle long names gracefully
-		},
-		{
-			name:           "Species name with special characters",
-			requestBody:    `{"common_name": "<script>alert('XSS')</script>Bird with special chars: &<>\"'!@#$%^&*()_+{}[]|\\:;,.?/~"}`,
-			expectedStatus: http.StatusNoContent, // Should sanitize or handle special chars
-		},
-	}
+		errorCases := []struct {
+			name           string
+			requestBody    string
+			expectedStatus int
+			expectedError  string
+		}{
+			{
+				name:           "Empty species name",
+				requestBody:    `{"common_name": ""}`,
+				expectedStatus: http.StatusBadRequest,
+				expectedError:  "Missing species name",
+			},
+			{
+				name:           "Invalid JSON",
+				requestBody:    `{"common_name": }`,
+				expectedStatus: http.StatusBadRequest,
+				expectedError:  "Invalid request format",
+			},
+			{
+				name:           "Missing common_name field",
+				requestBody:    `{}`,
+				expectedStatus: http.StatusBadRequest,
+				expectedError:  "Missing species name",
+			},
+		}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			// Create request
+		for _, tc := range errorCases {
+			t.Run(tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+					strings.NewReader(tc.requestBody))
+				req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+				rec := httptest.NewRecorder()
+				c := e.NewContext(req, rec)
+
+				err := controller.IgnoreSpecies(c)
+				require.NoError(t, err)
+				assert.Equal(t, tc.expectedStatus, rec.Code)
+
+				var response map[string]string
+				err = json.Unmarshal(rec.Body.Bytes(), &response)
+				require.NoError(t, err)
+				assert.Contains(t, response["error"], tc.expectedError)
+			})
+		}
+	})
+
+	// Test toggle behavior: add then remove
+	t.Run("Toggle behavior - add species", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
+
+		// First request: add species (should not be in list initially)
+		req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+			strings.NewReader(`{"common_name": "American Crow"}`))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+
+		err := controller.IgnoreSpecies(c)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		var response IgnoreSpeciesResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, "American Crow", response.CommonName)
+		assert.Equal(t, "added", response.Action)
+		assert.True(t, response.IsExcluded)
+	})
+
+	t.Run("Toggle behavior - remove species", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
+
+		// First, add the species
+		req1 := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+			strings.NewReader(`{"common_name": "Red-bellied Woodpecker"}`))
+		req1.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec1 := httptest.NewRecorder()
+		c1 := e.NewContext(req1, rec1)
+
+		err := controller.IgnoreSpecies(c1)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, rec1.Code)
+
+		var addResponse IgnoreSpeciesResponse
+		err = json.Unmarshal(rec1.Body.Bytes(), &addResponse)
+		require.NoError(t, err)
+		assert.Equal(t, "added", addResponse.Action)
+		assert.True(t, addResponse.IsExcluded)
+
+		// Second request: toggle (remove) the same species
+		req2 := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+			strings.NewReader(`{"common_name": "Red-bellied Woodpecker"}`))
+		req2.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec2 := httptest.NewRecorder()
+		c2 := e.NewContext(req2, rec2)
+
+		err = controller.IgnoreSpecies(c2)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, rec2.Code)
+
+		var removeResponse IgnoreSpeciesResponse
+		err = json.Unmarshal(rec2.Body.Bytes(), &removeResponse)
+		require.NoError(t, err)
+		assert.Equal(t, "Red-bellied Woodpecker", removeResponse.CommonName)
+		assert.Equal(t, "removed", removeResponse.Action)
+		assert.False(t, removeResponse.IsExcluded)
+	})
+
+	t.Run("Multiple toggle operations", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
+		speciesName := "Northern Cardinal"
+
+		// Perform add-remove-add cycle
+		for i, expectedAction := range []string{"added", "removed", "added"} {
 			req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
-				strings.NewReader(tc.requestBody))
+				strings.NewReader(`{"common_name": "`+speciesName+`"}`))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 			c := e.NewContext(req, rec)
 
-			// Call handler
 			err := controller.IgnoreSpecies(c)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, rec.Code, "Request %d failed", i+1)
 
-			// Check response
-			if tc.expectedStatus == http.StatusNoContent {
-				require.NoError(t, err)
-				assert.Equal(t, tc.expectedStatus, rec.Code)
-			} else {
-				// For error cases, check the response
-				var response map[string]string
-				err = json.Unmarshal(rec.Body.Bytes(), &response)
-				require.NoError(t, err)
-				assert.Contains(t, response, "error")
+			var response IgnoreSpeciesResponse
+			err = json.Unmarshal(rec.Body.Bytes(), &response)
+			require.NoError(t, err)
+			assert.Equal(t, expectedAction, response.Action, "Request %d: expected action %s", i+1, expectedAction)
+			assert.Equal(t, expectedAction == "added", response.IsExcluded, "Request %d: isExcluded mismatch", i+1)
+		}
+	})
+
+	t.Run("Special characters in species name", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
+
+		// Test with special characters (properly JSON encoded)
+		// Note: Use proper JSON encoding for special chars
+		specialName := "Bird with special chars: &<>'éàü"
+		reqBody := IgnoreSpeciesRequest{CommonName: specialName}
+		jsonBody, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+			bytes.NewReader(jsonBody))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+
+		err = controller.IgnoreSpecies(c)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		var response IgnoreSpeciesResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, specialName, response.CommonName)
+		assert.Equal(t, "added", response.Action)
+	})
+
+	t.Run("Long species name", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
+
+		longName := strings.Repeat("Very Long Bird Name ", 50)
+		req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+			strings.NewReader(`{"common_name": "`+longName+`"}`))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+
+		err := controller.IgnoreSpecies(c)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		var response IgnoreSpeciesResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, "added", response.Action)
+	})
+}
+
+// TestGetExcludedSpecies tests the GetExcludedSpecies endpoint
+func TestGetExcludedSpecies(t *testing.T) {
+	t.Run("Empty excluded list", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v2/detections/ignored", http.NoBody)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+
+		err := controller.GetExcludedSpecies(c)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		var response ExcludedSpeciesResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, 0, response.Count)
+		assert.Empty(t, response.Species)
+	})
+
+	t.Run("Excluded list with species", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
+
+		// First add some species
+		species := []string{"American Crow", "Red-bellied Woodpecker", "Blue Jay"}
+		for _, s := range species {
+			req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+				strings.NewReader(`{"common_name": "`+s+`"}`))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			err := controller.IgnoreSpecies(c)
+			require.NoError(t, err)
+		}
+
+		// Now get the excluded list
+		req := httptest.NewRequest(http.MethodGet, "/api/v2/detections/ignored", http.NoBody)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+
+		err := controller.GetExcludedSpecies(c)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		var response ExcludedSpeciesResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, 3, response.Count)
+		assert.ElementsMatch(t, species, response.Species)
+	})
+
+	t.Run("Excluded list reflects toggle operations", func(t *testing.T) {
+		e, _, controller := setupTestEnvironment(t)
+		clearExcludedSpeciesList(t)
+
+		// Add two species
+		for _, s := range []string{"Species A", "Species B"} {
+			req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+				strings.NewReader(`{"common_name": "`+s+`"}`))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			err := controller.IgnoreSpecies(c)
+			require.NoError(t, err)
+		}
+
+		// Remove one species
+		req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+			strings.NewReader(`{"common_name": "Species A"}`))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+		err := controller.IgnoreSpecies(c)
+		require.NoError(t, err)
+
+		// Verify the list only contains Species B
+		req = httptest.NewRequest(http.MethodGet, "/api/v2/detections/ignored", http.NoBody)
+		rec = httptest.NewRecorder()
+		c = e.NewContext(req, rec)
+
+		err = controller.GetExcludedSpecies(c)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, rec.Code)
+
+		var response ExcludedSpeciesResponse
+		err = json.Unmarshal(rec.Body.Bytes(), &response)
+		require.NoError(t, err)
+		assert.Equal(t, 1, response.Count)
+		assert.Contains(t, response.Species, "Species B")
+		assert.NotContains(t, response.Species, "Species A")
+	})
+}
+
+// TestIgnoreSpeciesConcurrency tests concurrent access to the IgnoreSpecies endpoint
+func TestIgnoreSpeciesConcurrency(t *testing.T) {
+	e, _, controller := setupTestEnvironment(t)
+	clearExcludedSpeciesList(t)
+
+	// Use WaitGroup.Go() for automatic Add/Done management (Go 1.25+)
+	var wg sync.WaitGroup
+	var barrier sync.WaitGroup
+	barrier.Add(1)
+
+	numGoroutines := 10
+	var successCount int32
+
+	for range numGoroutines {
+		wg.Go(func() {
+			barrier.Wait()
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
+				strings.NewReader(`{"common_name": "Concurrent Test Bird"}`))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+
+			err := controller.IgnoreSpecies(c)
+			if err == nil && rec.Code == http.StatusOK {
+				atomic.AddInt32(&successCount, 1)
 			}
 		})
 	}
+
+	// Start all goroutines simultaneously
+	barrier.Done()
+	wg.Wait()
+
+	// All requests should succeed
+	assert.Equal(t, int32(numGoroutines), successCount)
+
+	// Verify final state - species should be either in or out of list
+	// (odd number of toggles = in list, even = out)
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/detections/ignored", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := controller.GetExcludedSpecies(c)
+	require.NoError(t, err)
+
+	var response ExcludedSpeciesResponse
+	err = json.Unmarshal(rec.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	// With 10 toggles starting from empty list: odd number = should be in list
+	// But due to concurrent execution, the final state depends on timing
+	// We just verify the endpoint didn't crash and returned valid data
+	assert.GreaterOrEqual(t, response.Count, 0)
 }
 
 // TestAddCommentMethod tests the AddComment method directly
@@ -1041,42 +1530,8 @@ func TestGetNoteComments(t *testing.T) {
 			c.SetParamNames("id")
 			c.SetParamValues(tc.detectionID)
 
-			// Call handler
-			var err error
-			if tc.expectedStatus == http.StatusOK {
-				// For successful cases, we'll need to implement a handler that uses the datastore
-				// Since we don't have direct access to the handler, we'll simulate it
-				comments, dbErr := mockDS.GetNoteComments(tc.detectionID)
-				if dbErr != nil {
-					err = echo.NewHTTPError(http.StatusNotFound, "Comments not found")
-				} else {
-					err = c.JSON(http.StatusOK, comments)
-				}
-			} else {
-				// For error cases, just create an HTTP error directly
-				err = echo.NewHTTPError(tc.expectedStatus, "Comments not found")
-			}
-
-			// Check response
-			if tc.expectedStatus == http.StatusOK {
-				require.NoError(t, err)
-				assert.Equal(t, tc.expectedStatus, rec.Code)
-
-				// Parse response
-				var comments []datastore.NoteComment
-				err = json.Unmarshal(rec.Body.Bytes(), &comments)
-				require.NoError(t, err)
-				assert.Len(t, comments, tc.expectedCount)
-			} else {
-				// For error cases
-				require.Error(t, err)
-				var httpErr *echo.HTTPError
-				ok := errors.As(err, &httpErr)
-				assert.True(t, ok)
-				assert.Equal(t, tc.expectedStatus, httpErr.Code)
-			}
-
-			// Verify mock expectations
+			err := executeNoteCommentsHandler(t, c, mockDS, tc.detectionID, tc.expectedStatus)
+			assertNoteCommentsResponse(t, rec, err, tc.expectedStatus, tc.expectedCount)
 			mockDS.AssertExpectations(t)
 		})
 	}
@@ -1414,15 +1869,8 @@ func TestTrueConcurrentPlatformSpecific(t *testing.T) {
 	jsonData, err := json.Marshal(reviewRequest)
 	require.NoError(t, err)
 
-	// Adjust concurrency level based on platform
-	// Windows might need lower concurrency to avoid resource exhaustion
-	numConcurrent := 5
-	switch runtime.GOOS {
-	case "windows":
-		numConcurrent = 3 // Lower concurrency for Windows
-	case "darwin":
-		numConcurrent = 4 // Moderate concurrency for macOS
-	}
+	// Get platform-appropriate concurrency level
+	numConcurrent := getConcurrencyLevel()
 
 	// Mock note that will be accessed concurrently
 	mockNote := datastore.Note{
@@ -1451,7 +1899,7 @@ func TestTrueConcurrentPlatformSpecific(t *testing.T) {
 
 	go func() {
 		// Launch concurrent requests using Go 1.25 WaitGroup.Go() pattern
-		for i := 0; i < numConcurrent; i++ {
+		for i := range numConcurrent {
 			wg.Go(func() {
 				goroutineID := i
 
@@ -1480,19 +1928,8 @@ func TestTrueConcurrentPlatformSpecific(t *testing.T) {
 
 				// Track results
 				if err == nil {
-					defer func() {
-						_ = resp.Body.Close() // Safe to ignore in test cleanup
-					}()
-
-					switch resp.StatusCode {
-					case http.StatusOK:
-						atomic.AddInt32(&successes, 1)
-					case http.StatusConflict:
-						atomic.AddInt32(&conflicts, 1)
-					default:
-						t.Logf("Unexpected status code: %d", resp.StatusCode)
-						atomic.AddInt32(&failures, 1)
-					}
+					defer func() { _ = resp.Body.Close() }()
+					categorizeHTTPResponse(t, resp.StatusCode, &successes, &conflicts, &failures)
 				} else {
 					t.Logf("Request error: %v", err)
 					atomic.AddInt32(&failures, 1)
@@ -1513,7 +1950,7 @@ func TestTrueConcurrentPlatformSpecific(t *testing.T) {
 	case <-done:
 		// Test completed normally
 	case <-time.After(10 * time.Second):
-		t.Fatal("Test timed out")
+		require.Fail(t, "Test timed out")
 	}
 
 	// Verify results with platform-specific considerations

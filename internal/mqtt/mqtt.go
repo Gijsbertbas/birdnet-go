@@ -3,13 +3,9 @@ package mqtt
 
 import (
 	"context"
-	"io"
-	"log"
-	"log/slog"
-	"path/filepath"
 	"time"
 
-	"github.com/tphakala/birdnet-go/internal/logging"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // Timeout constants for MQTT operations
@@ -23,7 +19,35 @@ const (
 	ShutdownDisconnectTimeout = 2 * time.Second
 	// ConnectTimeoutGrace is the additional time to wait beyond ConnectTimeout for cleanup
 	ConnectTimeoutGrace = 500 * time.Millisecond
+	// KeepAliveInterval is the MQTT keep-alive interval
+	KeepAliveInterval = 30 * time.Second
+	// PingTimeout is the timeout for MQTT ping responses
+	PingTimeout = 10 * time.Second
+	// WriteTimeout is the timeout for MQTT write operations
+	WriteTimeout = 10 * time.Second
+	// DNSLookupTimeout is the timeout for DNS resolution during connection
+	DNSLookupTimeout = 5 * time.Second
+	// MinConnectTimeout is the minimum allowed connect timeout
+	MinConnectTimeout = 500 * time.Millisecond
+	// ReconnectContextGrace is the additional time beyond ConnectTimeout for reconnect context
+	ReconnectContextGrace = 10 * time.Second
 )
+
+// durationToMillisUint safely converts a time.Duration to uint milliseconds.
+// Returns 0 for negative durations. This prevents integer overflow when
+// converting int64 milliseconds to uint (gosec G115).
+func durationToMillisUint(d time.Duration) uint {
+	ms := d.Milliseconds()
+	if ms < 0 {
+		return 0
+	}
+	return uint(ms) // #nosec G115 -- checked for negative values
+}
+
+// OnConnectHandler is a callback function that is called when the MQTT client
+// successfully connects or reconnects to the broker. This allows external code
+// to perform actions like publishing Home Assistant discovery messages.
+type OnConnectHandler func()
 
 // Client defines the interface for MQTT client operations.
 type Client interface {
@@ -34,6 +58,10 @@ type Client interface {
 	// Publish sends a message to the specified topic on the MQTT broker.
 	// It returns an error if the publish operation fails.
 	Publish(ctx context.Context, topic string, payload string) error
+
+	// PublishWithRetain sends a message with explicit retain flag control.
+	// This is useful for discovery messages that must be retained regardless of client config.
+	PublishWithRetain(ctx context.Context, topic string, payload string, retain bool) error
 
 	// IsConnected returns true if the client is currently connected to the MQTT broker.
 	IsConnected() bool
@@ -48,6 +76,11 @@ type Client interface {
 	// SetControlChannel sets the control channel for the client.
 	// This channel is used to send control signals to the MQTT service.
 	SetControlChannel(ch chan string)
+
+	// RegisterOnConnectHandler registers a callback that will be invoked each time
+	// the client successfully connects or reconnects to the broker. Multiple handlers
+	// can be registered and will be called in order of registration.
+	RegisterOnConnectHandler(handler OnConnectHandler)
 }
 
 // Config holds the configuration for the MQTT client.
@@ -62,13 +95,25 @@ type Config struct {
 	ReconnectCooldown time.Duration
 	ReconnectDelay    time.Duration
 	// Connection timeouts
-	ConnectTimeout    time.Duration
-	ReconnectTimeout  time.Duration
-	PublishTimeout       time.Duration
-	DisconnectTimeout    time.Duration
+	ConnectTimeout            time.Duration
+	PublishTimeout            time.Duration
+	DisconnectTimeout         time.Duration
 	ShutdownDisconnectTimeout time.Duration // Timeout for disconnect during shutdown (shorter than normal)
 	// TLS configuration
 	TLS TLSConfig
+	// Last Will and Testament (LWT) configuration for availability tracking
+	LWT LWTConfig
+}
+
+// LWTConfig holds Last Will and Testament configuration for MQTT availability tracking.
+// When enabled, the broker will publish the WillPayload to WillTopic if the client
+// disconnects unexpectedly, allowing Home Assistant to detect offline status.
+type LWTConfig struct {
+	Enabled     bool   // true to enable LWT
+	Topic       string // topic for LWT messages (e.g., "birdnet/status")
+	Payload     string // payload to send on unexpected disconnect (e.g., "offline")
+	QoS         byte   // QoS level for LWT message (0, 1, or 2)
+	Retain      bool   // true to retain LWT message
 }
 
 // TLSConfig holds TLS/SSL configuration for secure MQTT connections
@@ -80,66 +125,20 @@ type TLSConfig struct {
 	ClientKey          string // path to client key file
 }
 
-// Package-level logger for MQTT related events
-var (
-	mqttLogger *slog.Logger
-	// mqttLogWriter   io.Writer     // No longer needed directly
-	mqttLogCloser   func() error         // Stores the closer function
-	mqttLogFilePath string               // Stores the log file path
-	mqttLevelVar    = new(slog.LevelVar) // Dynamic level control
-	// mqttLogMutex    sync.RWMutex // No longer needed for level changes
-)
-
-func init() {
-	mqttLogFilePath = filepath.Join("logs", "mqtt.log") // Use filepath.Join for safety
-	initialLevel := slog.LevelInfo                      // Default level
-	mqttLevelVar.Set(initialLevel)                      // Set initial level
-
-	var err error
-	// Initialize the service-specific file logger using the LevelVar
-	mqttLogger, mqttLogCloser, err = logging.NewFileLogger(mqttLogFilePath, "mqtt", mqttLevelVar)
-	if err != nil {
-		// Use standard log for this critical setup error, as logging might not be fully functional
-		log.Printf("ERROR: Failed to initialize MQTT file logger at %s: %v. Service logging disabled.", mqttLogFilePath, err)
-		// Fallback to a disabled logger to prevent nil panics
-		mqttLogger = slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: mqttLevelVar}))
-		// mqttLogWriter = io.Discard // No longer needed
-		mqttLogCloser = func() error { return nil } // No-op closer for fallback
-	} else {
-		// Use standard log for initial confirmation message
-		mqttLogger.Info("MQTT file logger initialised", "path", mqttLogFilePath)
-	}
-}
-
-// SetLogLevel dynamically changes the logging level for the MQTT logger.
-func SetLogLevel(level slog.Level) {
-	oldLevel := mqttLevelVar.Level()
-	if level == oldLevel {
-		return
-	}
-
-	mqttLevelVar.Set(level)
-}
-
-// CloseLogger closes the MQTT-specific file logger, if one was successfully initialized.
-// This should be called during graceful shutdown.
-func CloseLogger() error {
-	if mqttLogCloser != nil {
-		log.Println("Closing MQTT file logger...")
-		return mqttLogCloser()
-	}
-	return nil
+// GetLogger returns the module-scoped logger for MQTT operations.
+// This logger is automatically integrated with the application's central logging system.
+func GetLogger() logger.Logger {
+	return logger.Global().Module("mqtt")
 }
 
 // DefaultConfig returns a Config with reasonable default values
 func DefaultConfig() Config {
 	return Config{
-		ReconnectCooldown: 5 * time.Second,
-		ReconnectDelay:    1 * time.Second,
-		ConnectTimeout:    30 * time.Second,
-		ReconnectTimeout:         5 * time.Second,
-		PublishTimeout:           10 * time.Second,
-		DisconnectTimeout:        GracefulDisconnectTimeout, // Use constant for consistency
+		ReconnectCooldown:         5 * time.Second,
+		ReconnectDelay:            1 * time.Second,
+		ConnectTimeout:            30 * time.Second,
+		PublishTimeout:            10 * time.Second,
+		DisconnectTimeout:         GracefulDisconnectTimeout, // Use constant for consistency
 		ShutdownDisconnectTimeout: ShutdownDisconnectTimeout, // Shorter timeout for shutdown
 	}
 }

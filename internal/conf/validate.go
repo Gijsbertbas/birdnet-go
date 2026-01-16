@@ -4,7 +4,6 @@ package conf
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"os/exec"
 	"regexp"
@@ -14,6 +13,7 @@ import (
 	"text/template"
 
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // MinSoundLevelInterval is the minimum sound level interval in seconds to prevent excessive CPU usage
@@ -33,6 +33,20 @@ const (
 	MinAudioGain = -40.0 // Minimum allowed audio gain in dB
 	MaxAudioGain = 40.0  // Maximum allowed audio gain in dB
 )
+
+// Stream validation constants
+const (
+	MaxStreamNameLength = 64
+)
+
+// ValidStreamTypes contains all supported stream types
+var ValidStreamTypes = map[string]bool{
+	StreamTypeRTSP: true,
+	StreamTypeHTTP: true,
+	StreamTypeHLS:  true,
+	StreamTypeRTMP: true,
+	StreamTypeUDP:  true,
+}
 
 // EBU R128 normalization limits
 const (
@@ -72,6 +86,97 @@ type ValidationResult struct {
 	Errors     []string // Validation errors (fatal)
 	Warnings   []string // Non-fatal warnings
 	Normalized any      // Normalized/transformed config (type matches input)
+}
+
+// Validate validates a single stream configuration
+func (s *StreamConfig) Validate() error {
+	// Name is required
+	name := strings.TrimSpace(s.Name)
+	if name == "" {
+		return fmt.Errorf("stream name is required")
+	}
+
+	// Name length limit (check trimmed name for consistency)
+	if len(name) > MaxStreamNameLength {
+		return fmt.Errorf("stream name '%s' exceeds maximum length of %d characters", name, MaxStreamNameLength)
+	}
+
+	// URL is required
+	if strings.TrimSpace(s.URL) == "" {
+		return fmt.Errorf("stream URL is required for '%s'", s.Name)
+	}
+
+	// Validate stream type
+	if !ValidStreamTypes[s.Type] {
+		return fmt.Errorf("invalid stream type '%s' for '%s': must be one of rtsp, http, hls, rtmp, udp", s.Type, s.Name)
+	}
+
+	// Validate transport (only tcp/udp allowed, empty defaults to tcp)
+	if s.Transport != "" && s.Transport != "tcp" && s.Transport != "udp" {
+		return fmt.Errorf("invalid transport '%s' for '%s': must be tcp or udp", s.Transport, s.Name)
+	}
+
+	// Validate URL scheme matches type
+	return s.validateURLScheme()
+}
+
+// validateURLScheme checks URL scheme matches declared stream type
+func (s *StreamConfig) validateURLScheme() error {
+	urlLower := strings.ToLower(s.URL)
+
+	switch s.Type {
+	case StreamTypeRTSP:
+		if !strings.HasPrefix(urlLower, "rtsp://") && !strings.HasPrefix(urlLower, "rtsps://") {
+			return fmt.Errorf("stream '%s': RTSP type requires rtsp:// or rtsps:// URL", s.Name)
+		}
+	case StreamTypeHTTP:
+		if !strings.HasPrefix(urlLower, "http://") && !strings.HasPrefix(urlLower, "https://") {
+			return fmt.Errorf("stream '%s': HTTP type requires http:// or https:// URL", s.Name)
+		}
+	case StreamTypeHLS:
+		if !strings.HasPrefix(urlLower, "http://") && !strings.HasPrefix(urlLower, "https://") {
+			return fmt.Errorf("stream '%s': HLS type requires http:// or https:// URL", s.Name)
+		}
+	case StreamTypeRTMP:
+		if !strings.HasPrefix(urlLower, "rtmp://") && !strings.HasPrefix(urlLower, "rtmps://") {
+			return fmt.Errorf("stream '%s': RTMP type requires rtmp:// or rtmps:// URL", s.Name)
+		}
+	case StreamTypeUDP:
+		if !strings.HasPrefix(urlLower, "udp://") && !strings.HasPrefix(urlLower, "rtp://") {
+			return fmt.Errorf("stream '%s': UDP type requires udp:// or rtp:// URL", s.Name)
+		}
+	}
+
+	return nil
+}
+
+// ValidateStreams validates the streams collection for uniqueness and individual validity
+func (r *RTSPSettings) ValidateStreams() error {
+	names := make(map[string]bool)
+	urls := make(map[string]bool)
+
+	for i, stream := range r.Streams {
+		// Validate individual stream
+		if err := stream.Validate(); err != nil {
+			return fmt.Errorf("stream %d: %w", i+1, err)
+		}
+
+		// Check for duplicate names (case-insensitive)
+		nameLower := strings.ToLower(strings.TrimSpace(stream.Name))
+		if names[nameLower] {
+			return fmt.Errorf("duplicate stream name: '%s'", stream.Name)
+		}
+		names[nameLower] = true
+
+		// Check for duplicate URLs (trimmed for consistency)
+		urlTrimmed := strings.TrimSpace(stream.URL)
+		if urls[urlTrimmed] {
+			return fmt.Errorf("stream '%s' has a duplicate URL: '%s'", stream.Name, stream.URL)
+		}
+		urls[urlTrimmed] = true
+	}
+
+	return nil
 }
 
 // ValidateBirdNETSettings performs BirdNET validation without side effects.
@@ -419,7 +524,7 @@ func validateBirdNETSettings(birdnetSettings *BirdNETConfig, settings *Settings)
 
 	// Handle warnings (side effects: logging + storing in settings)
 	for _, warning := range result.Warnings {
-		log.Printf("Configuration warning: %s", warning)
+		GetLogger().Warn("Configuration warning", logger.String("message", warning))
 
 		// Store the validation warning for telemetry reporting
 		if settings.ValidationWarnings == nil {
@@ -462,22 +567,24 @@ func validateWebServerSettings(settings *WebServerSettings) error {
 
 // validateSecuritySettings validates the security-specific settings
 func validateSecuritySettings(settings *Security) error {
-	// Check if any OAuth provider is enabled (OAuth providers require host for redirect URLs)
+	// Check if any OAuth provider is enabled (OAuth providers require host or baseUrl for redirect URLs)
 	// Note: BasicAuth doesn't require host as it doesn't use OAuth redirects
-	if (settings.GoogleAuth.Enabled || settings.GithubAuth.Enabled) && settings.Host == "" {
-		return errors.New(fmt.Errorf("security.host must be set when using OAuth authentication providers (Google or GitHub)")).
+	if (settings.GoogleAuth.Enabled || settings.GithubAuth.Enabled || settings.MicrosoftAuth.Enabled) && settings.Host == "" && settings.BaseURL == "" {
+		return errors.New(fmt.Errorf("security.host or security.baseUrl must be set when using OAuth authentication providers (Google, GitHub, or Microsoft)")).
 			Category(errors.CategoryValidation).
 			Context("validation_type", "security-oauth-host").
 			Context("google_enabled", settings.GoogleAuth.Enabled).
 			Context("github_enabled", settings.GithubAuth.Enabled).
+			Context("microsoft_enabled", settings.MicrosoftAuth.Enabled).
 			Build()
 	}
 
 	// AutoTLS validation
 	if settings.AutoTLS {
-		// Host is required for AutoTLS
-		if settings.Host == "" {
-			return errors.New(fmt.Errorf("security.host must be set when AutoTLS is enabled")).
+		// Host is required for AutoTLS (can be extracted from BaseURL)
+		hostname := settings.GetHostnameForCertificates()
+		if hostname == "" {
+			return errors.New(fmt.Errorf("security.host (or hostname in security.baseUrl) must be set when AutoTLS is enabled")).
 				Category(errors.CategoryValidation).
 				Context("validation_type", "security-autotls-host").
 				Build()
@@ -485,12 +592,9 @@ func validateSecuritySettings(settings *Security) error {
 
 		// Warning about port requirements when running in container
 		if RunningInContainer() {
-			log.Println("WARNING: AutoTLS requires ports 80 and 443 to be exposed.")
-			log.Println("Ensure your Docker configuration maps these ports:")
-			log.Println("  ports:")
-			log.Println("    - \"80:80\"    # Required for ACME HTTP-01 challenge")
-			log.Println("    - \"443:443\"  # Required for HTTPS/AutoTLS")
-			log.Println("Consider using docker-compose.autotls.yml for proper AutoTLS configuration.")
+			GetLogger().Warn("AutoTLS requires ports 80 and 443 to be exposed",
+				logger.String("ports", "80:80 (ACME HTTP-01), 443:443 (HTTPS)"),
+				logger.String("hint", "Consider using docker-compose.autotls.yml for proper AutoTLS configuration"))
 		}
 	}
 
@@ -545,7 +649,14 @@ func validateRealtimeSettings(settings *RealtimeSettings) error {
 		return err
 	}
 
-	// Add more realtime settings validation as needed
+	// Validate stream configurations
+	if err := settings.RTSP.ValidateStreams(); err != nil {
+		return errors.New(err).
+			Category(errors.CategoryValidation).
+			Context("validation_type", "stream-config").
+			Build()
+	}
+
 	return nil
 }
 
@@ -606,7 +717,7 @@ func validateBirdweatherSettings(settings *BirdweatherSettings) error {
 
 	// Handle warnings (side effect: logging)
 	for _, warning := range result.Warnings {
-		log.Println(warning)
+		GetLogger().Warn("Birdweather validation warning", logger.String("message", warning))
 	}
 
 	// Return errors if validation failed
@@ -626,7 +737,7 @@ func validateAudioSettings(settings *AudioSettings) error {
 	// Validate and determine the effective FFmpeg path
 	validatedFfmpegPath, ffmpegErr := ValidateToolPath(settings.FfmpegPath, GetFfmpegBinaryName())
 	if ffmpegErr != nil {
-		log.Printf("FFmpeg validation failed: %v. Audio export/conversion requiring FFmpeg might be disabled or use defaults.", ffmpegErr)
+		GetLogger().Warn("FFmpeg validation failed", logger.Error(ffmpegErr), logger.String("impact", "Audio export/conversion requiring FFmpeg might be disabled or use defaults"))
 		// Log validation warning for telemetry
 		logValidationWarning(ffmpegErr, "audio-tool-ffmpeg", "ffmpeg-not-available")
 		settings.FfmpegPath = "" // Ensure path is empty if validation failed
@@ -640,9 +751,9 @@ func validateAudioSettings(settings *AudioSettings) error {
 		settings.FfmpegMinor = minor
 
 		if major > 0 {
-			log.Printf("Detected FFmpeg version: %s (major: %d, minor: %d)", version, major, minor)
+			GetLogger().Debug("Detected FFmpeg version", logger.String("version", version), logger.Int("major", major), logger.Int("minor", minor))
 		} else {
-			log.Printf("Warning: Could not detect FFmpeg version from: %s", version)
+			GetLogger().Warn("Could not detect FFmpeg version", logger.String("version_string", version))
 		}
 	}
 
@@ -652,7 +763,7 @@ func validateAudioSettings(settings *AudioSettings) error {
 	if soxLookPathErr != nil {
 		settings.SoxPath = ""
 		settings.SoxAudioTypes = nil
-		log.Println("SoX not found in system PATH. Audio source processing requiring SoX might be disabled.")
+		GetLogger().Warn("SoX not found in system PATH", logger.String("impact", "Audio source processing requiring SoX might be disabled"))
 	} else {
 		settings.SoxPath = soxPath
 		// Get supported formats if SoX is found
@@ -731,13 +842,13 @@ func validateAudioSettings(settings *AudioSettings) error {
 
 			// Warn if gain is also set (normalization takes precedence)
 			if settings.Export.Gain != 0 {
-				log.Printf("WARNING: Both gain and normalization are configured. Normalization will take precedence, gain setting will be ignored.")
+				GetLogger().Warn("Both gain and normalization are configured", logger.String("action", "Normalization will take precedence, gain setting will be ignored"))
 			}
 		}
 
 		if settings.FfmpegPath == "" {
 			settings.Export.Type = "wav"
-			log.Printf("FFmpeg not available, using WAV format for audio export")
+			GetLogger().Warn("FFmpeg not available, using WAV format for audio export")
 		} else {
 			// Validate audio type and bitrate
 			switch settings.Export.Type {
@@ -798,7 +909,7 @@ func validateDashboardSettings(settings *Dashboard) error {
 		isValid := slices.Contains(validLocales, settings.Locale)
 		if !isValid {
 			// Log warning but don't fail - fallback to default
-			log.Printf("WARNING: Invalid UI locale '%s', will use default 'en'", settings.Locale)
+			GetLogger().Warn("Invalid UI locale, will use default", logger.String("invalid_locale", settings.Locale), logger.String("fallback", "en"))
 			settings.Locale = "en"
 		}
 	}
@@ -809,15 +920,38 @@ func validateDashboardSettings(settings *Dashboard) error {
 		isValid := slices.Contains(validModes, settings.Spectrogram.Mode)
 		if !isValid {
 			// Log warning but don't fail - GetMode() will handle fallback
-			log.Printf("WARNING: Invalid spectrogram mode '%s', valid modes are: auto, prerender, user-requested. Using GetMode() fallback.", settings.Spectrogram.Mode)
+			GetLogger().Warn("Invalid spectrogram mode, using GetMode() fallback",
+				logger.String("invalid_mode", settings.Spectrogram.Mode),
+				logger.String("valid_modes", "auto, prerender, user-requested"))
+		}
+	}
+
+	// Validate spectrogram style
+	if settings.Spectrogram.Style != "" {
+		validStyles := []string{
+			SpectrogramStyleDefault,
+			SpectrogramStyleScientificDark,
+			SpectrogramStyleHighContrastDark,
+			SpectrogramStyleScientific,
+		}
+		if !slices.Contains(validStyles, settings.Spectrogram.Style) {
+			// Log warning but don't fail - default to "default" style
+			GetLogger().Warn("Invalid spectrogram style, using default",
+				logger.String("invalid_style", settings.Spectrogram.Style),
+				logger.String("valid_styles", strings.Join(validStyles, ", ")))
+			settings.Spectrogram.Style = SpectrogramStyleDefault
 		}
 	}
 
 	// Log the effective spectrogram mode at startup for troubleshooting
 	effectiveMode := settings.Spectrogram.GetMode()
-	log.Printf("Spectrogram configuration: enabled=%v, mode='%s', effective_mode='%s', size='%s', raw=%v",
-		settings.Spectrogram.Enabled, settings.Spectrogram.Mode, effectiveMode,
-		settings.Spectrogram.Size, settings.Spectrogram.Raw)
+	GetLogger().Debug("Spectrogram configuration",
+		logger.Bool("enabled", settings.Spectrogram.Enabled),
+		logger.String("mode", settings.Spectrogram.Mode),
+		logger.String("effective_mode", effectiveMode),
+		logger.String("size", settings.Spectrogram.Size),
+		logger.Bool("raw", settings.Spectrogram.Raw),
+		logger.String("style", settings.Spectrogram.Style))
 
 	return nil
 }

@@ -230,6 +230,49 @@ func (m *MockDatastore) BatchSaveDynamicThresholds(thresholds []datastore.Dynami
 	return nil
 }
 
+// BG-59: Add new dynamic threshold methods
+func (m *MockDatastore) DeleteAllDynamicThresholds() (int64, error) {
+	count := int64(len(m.thresholds))
+	m.thresholds = make(map[string]*datastore.DynamicThreshold)
+	return count, nil
+}
+
+func (m *MockDatastore) GetDynamicThresholdStats() (totalCount, activeCount, atMinimumCount int64, levelDistribution map[int]int64, err error) {
+	levelDistribution = make(map[int]int64)
+	now := time.Now()
+	for _, t := range m.thresholds {
+		totalCount++
+		if t.ExpiresAt.After(now) {
+			activeCount++
+			if t.Level == 3 {
+				atMinimumCount++
+			}
+			levelDistribution[t.Level]++
+		}
+	}
+	return totalCount, activeCount, atMinimumCount, levelDistribution, nil
+}
+
+func (m *MockDatastore) SaveThresholdEvent(*datastore.ThresholdEvent) error {
+	return nil
+}
+
+func (m *MockDatastore) GetThresholdEvents(string, int) ([]datastore.ThresholdEvent, error) {
+	return []datastore.ThresholdEvent{}, nil
+}
+
+func (m *MockDatastore) GetRecentThresholdEvents(int) ([]datastore.ThresholdEvent, error) {
+	return []datastore.ThresholdEvent{}, nil
+}
+
+func (m *MockDatastore) DeleteThresholdEvents(string) error {
+	return nil
+}
+
+func (m *MockDatastore) DeleteAllThresholdEvents() (int64, error) {
+	return 0, nil
+}
+
 // BG-17 fix: Add notification history methods
 func (m *MockDatastore) GetActiveNotificationHistory(after time.Time) ([]datastore.NotificationHistory, error) {
 	return []datastore.NotificationHistory{}, nil
@@ -248,6 +291,13 @@ func (m *MockDatastore) SaveNotificationHistory(history *datastore.NotificationH
 
 func (m *MockDatastore) DeleteExpiredNotificationHistory(before time.Time) (int64, error) {
 	return 0, nil
+}
+
+func (m *MockDatastore) GetDatabaseStats() (*datastore.DatabaseStats, error) {
+	return &datastore.DatabaseStats{
+		Type:      "mock",
+		Connected: true,
+	}, nil
 }
 
 // createTestProcessor creates a processor with mock datastore for testing
@@ -498,7 +548,7 @@ func TestThresholdGoroutineLifecycle(t *testing.T) {
 		case <-p.thresholdsCtx.Done():
 			// Context is properly cancelled
 		default:
-			t.Error("Context should be cancelled")
+			assert.Fail(t, "Context should be cancelled")
 		}
 	})
 }

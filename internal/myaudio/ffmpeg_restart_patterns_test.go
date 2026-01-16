@@ -25,7 +25,7 @@ func TestFFmpegStream_RealWorldRestartPattern(t *testing.T) {
 	t.Attr("component", "ffmpeg")
 	t.Attr("test-type", "process-lifecycle")
 
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Process testing is Unix-specific")
 	}
 
@@ -52,7 +52,7 @@ func TestFFmpegStream_RealWorldRestartPattern(t *testing.T) {
 			// Create a process that exits quickly (< 5 seconds)
 			// This simulates ffmpeg failing to connect or maintain RTSP stream
 			runtimeMs := 1000 + (i%4)*1000 // 1-4 seconds
-			mockCmd := exec.Command("sh", "-c", fmt.Sprintf("sleep %.3f", float64(runtimeMs)/1000.0))
+			mockCmd := exec.Command("sh", "-c", fmt.Sprintf("sleep %.3f", float64(runtimeMs)/1000.0)) //nolint:gosec // G204: test with hardcoded command
 
 			stream.cmdMu.Lock()
 			// Go 1.25: time.Now() returns fake time (starts at 2000-01-01 00:00:00 UTC)
@@ -141,7 +141,7 @@ func TestFFmpegStream_HealthCheckRestartLoop(t *testing.T) {
 	t.Attr("component", "ffmpeg")
 	t.Attr("test-type", "health-monitoring")
 
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Process testing is Unix-specific")
 	}
 
@@ -240,7 +240,7 @@ func TestFFmpegStream_HealthCheckRestartLoop(t *testing.T) {
 // TestFFmpegStream_ConcurrentRestartRequests tests the scenario where multiple restart requests
 // arrive while a process is already being cleaned up (as seen in logs with rapid restart requests)
 func TestFFmpegStream_ConcurrentRestartRequests(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Process testing is Unix-specific")
 	}
 
@@ -313,7 +313,7 @@ func TestFFmpegStream_ExtendedBackoffPattern(t *testing.T) {
 		exponent := count - 1
 		exponent = min(exponent, maxBackoffExponent)
 
-		expectedBackoff := stream.backoffDuration * time.Duration(1<<uint(exponent))
+		expectedBackoff := stream.backoffDuration * time.Duration(1<<uint(exponent)) //nolint:gosec // G115: exponent is capped by maxBackoffExponent
 		expectedBackoff = min(expectedBackoff, stream.maxBackoff)
 
 		t.Logf("Restart count %d: backoff = %v", count, expectedBackoff)
@@ -329,7 +329,7 @@ func TestFFmpegStream_ExtendedBackoffPattern(t *testing.T) {
 // TestFFmpegStream_ProcessCleanupUnderLoad tests cleanup behavior when system is under load
 // (simulating the production scenario with many rapid restarts)
 func TestFFmpegStream_ProcessCleanupUnderLoad(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Process testing is Unix-specific")
 	}
 

@@ -10,8 +10,16 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	errors_pkg "github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/suncalc"
 	"gorm.io/gorm"
+)
+
+// Weather constants (file-local)
+const (
+	timePeriodNight        = "Night"
+	minTimeStringLength    = 2  // Minimum length for parsing hour from time string
+	weatherSunWindowMinute = 30 // Minutes before/after sunrise/sunset for weather
 )
 
 // DailyWeatherResponse represents the API response for daily weather data
@@ -94,49 +102,41 @@ func (c *Controller) buildDailyWeatherResponse(dailyEvents datastore.DailyEvents
 func (c *Controller) GetDailyWeather(ctx echo.Context) error {
 	date := ctx.Param("date")
 	if date == "" {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Missing date parameter in daily weather request",
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Missing date parameter in daily weather request",
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return c.HandleError(ctx, echo.NewHTTPError(http.StatusBadRequest), "Date parameter is required", http.StatusBadRequest)
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Getting daily weather",
-			"date", date,
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Getting daily weather",
+		logger.String("date", date),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	// Get daily weather data from datastore
 	dailyEvents, err := c.DS.GetDailyEvents(date)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to get daily weather data",
-				"date", date,
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to get daily weather data",
+			logger.String("date", date),
+			logger.Error(err),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return c.HandleError(ctx, err, "Failed to get daily weather data", http.StatusInternalServerError)
 	}
 
 	// Convert to response format using the helper function
 	response := c.buildDailyWeatherResponse(dailyEvents)
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved daily weather data",
-			"date", date,
-			"sunrise", response.Sunrise.Format(time.RFC3339),
-			"sunset", response.Sunset.Format(time.RFC3339),
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Retrieved daily weather data",
+		logger.String("date", date),
+		logger.String("sunrise", response.Sunrise.Format(time.RFC3339)),
+		logger.String("sunset", response.Sunset.Format(time.RFC3339)),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	return ctx.JSON(http.StatusOK, response)
 }
@@ -144,148 +144,70 @@ func (c *Controller) GetDailyWeather(ctx echo.Context) error {
 // GetHourlyWeatherForDay handles GET /api/v2/weather/hourly/:date
 // Retrieves all hourly weather data for a specific date
 func (c *Controller) GetHourlyWeatherForDay(ctx echo.Context) error {
+	ip, path := ctx.RealIP(), ctx.Request().URL.Path
 	date := ctx.Param("date")
 	if date == "" {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Missing date parameter in hourly weather request",
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Missing date parameter in hourly weather request", logger.String("path", path), logger.String("ip", ip))
 		return c.HandleError(ctx, echo.NewHTTPError(http.StatusBadRequest), "Date parameter is required", http.StatusBadRequest)
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Getting hourly weather for day",
-			"date", date,
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Getting hourly weather for day", logger.String("date", date), logger.String("path", path), logger.String("ip", ip))
 
-	// Get hourly weather data from datastore
 	hourlyWeather, err := c.DS.GetHourlyWeather(date)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to get hourly weather data",
-				"date", date,
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to get hourly weather data", logger.String("date", date), logger.Error(err), logger.String("path", path), logger.String("ip", ip))
 		return c.HandleError(ctx, err, "Failed to get hourly weather data", http.StatusInternalServerError)
 	}
 
-	// Check if we got any data
 	if len(hourlyWeather) == 0 {
-		// Create structured log information as a formatted message
-		logInfo := "No hourly weather data found for date: " + date
-		reason := "missing_data"
-
-		// Determine if this is a valid date but with no data, or potentially a future date
-		requestedDate, parseErr := time.Parse("2006-01-02", date)
-		if parseErr == nil {
-			today := time.Now()
-
-			if requestedDate.After(today) {
-				// Future date
-				reason = "future_date"
-				logInfo = "No hourly weather data available for future date: " + date
-
-				// Log at warning level since this might indicate a client issue
-				c.logger.Printf("WARN: [Weather API] %s (reason=%s, endpoint=GetHourlyWeatherForDay)",
-					logInfo, reason)
-
-				if c.apiLogger != nil {
-					c.apiLogger.Warn("No hourly weather data for future date",
-						"date", date,
-						"reason", reason,
-						"path", ctx.Request().URL.Path,
-						"ip", ctx.RealIP(),
-					)
-				}
-
-				return ctx.JSON(http.StatusOK, struct {
-					Message string                  `json:"message"`
-					Data    []HourlyWeatherResponse `json:"data"`
-				}{
-					Message: "No weather data available for future date",
-					Data:    []HourlyWeatherResponse{},
-				})
-			}
-		} else {
-			logInfo += " (invalid date format, parse error: " + parseErr.Error() + ")"
-
-			if c.apiLogger != nil {
-				c.apiLogger.Error("Invalid date format in hourly weather request",
-					"date", date,
-					"error", parseErr.Error(),
-					"path", ctx.Request().URL.Path,
-					"ip", ctx.RealIP(),
-				)
-			}
-		}
-
-		// Log at warning level since missing data might indicate a system issue
-		c.logger.Printf("WARN: [Weather API] %s (reason=%s, endpoint=GetHourlyWeatherForDay)",
-			logInfo, reason)
-
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("No hourly weather data found",
-				"date", date,
-				"reason", reason,
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
-
-		return ctx.JSON(http.StatusOK, struct {
-			Message string                  `json:"message"`
-			Data    []HourlyWeatherResponse `json:"data"`
-		}{
-			Message: "No weather data found for the specified date",
-			Data:    []HourlyWeatherResponse{},
-		})
+		return c.handleEmptyHourlyWeather(ctx, date, ip, path)
 	}
 
-	// Convert to response format
-	response := make([]HourlyWeatherResponse, 0, len(hourlyWeather))
-	for i := range hourlyWeather {
-		hw := &hourlyWeather[i]
-		response = append(response, HourlyWeatherResponse{
-			Time:        hw.Time.Format("15:04:05"),
-			Temperature: hw.Temperature,
-			FeelsLike:   hw.FeelsLike,
-			TempMin:     hw.TempMin,
-			TempMax:     hw.TempMax,
-			Pressure:    hw.Pressure,
-			Humidity:    hw.Humidity,
-			Visibility:  hw.Visibility,
-			WindSpeed:   hw.WindSpeed,
-			WindDeg:     hw.WindDeg,
-			WindGust:    hw.WindGust,
-			Clouds:      hw.Clouds,
-			WeatherMain: hw.WeatherMain,
-			WeatherDesc: hw.WeatherDesc,
-			WeatherIcon: hw.WeatherIcon,
-		})
-	}
-
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved hourly weather data",
-			"date", date,
-			"count", len(response),
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	response := c.buildHourlyWeatherResponseList(hourlyWeather)
+	c.logInfoIfEnabled("Retrieved hourly weather data", logger.String("date", date), logger.Int("count", len(response)), logger.String("path", path), logger.String("ip", ip))
 
 	return ctx.JSON(http.StatusOK, struct {
 		Data []HourlyWeatherResponse `json:"data"`
 	}{
 		Data: response,
 	})
+}
+
+// handleEmptyHourlyWeather handles the case when no hourly weather data is found
+func (c *Controller) handleEmptyHourlyWeather(ctx echo.Context, date, ip, path string) error {
+	emptyResponse := struct {
+		Message string                  `json:"message"`
+		Data    []HourlyWeatherResponse `json:"data"`
+	}{
+		Data: []HourlyWeatherResponse{},
+	}
+
+	// Check if it's a future date
+	requestedDate, parseErr := time.Parse("2006-01-02", date)
+	if parseErr != nil {
+		c.logErrorIfEnabled("Invalid date format in hourly weather request", logger.String("date", date), logger.Error(parseErr), logger.String("path", path), logger.String("ip", ip))
+		emptyResponse.Message = "No weather data found for the specified date"
+		return ctx.JSON(http.StatusOK, emptyResponse)
+	}
+
+	if requestedDate.After(time.Now()) {
+		c.logWarnIfEnabled("No hourly weather data for future date", logger.String("date", date), logger.String("reason", "future_date"), logger.String("path", path), logger.String("ip", ip))
+		emptyResponse.Message = "No weather data available for future date"
+		return ctx.JSON(http.StatusOK, emptyResponse)
+	}
+
+	c.logWarnIfEnabled("No hourly weather data found", logger.String("date", date), logger.String("reason", "missing_data"), logger.String("path", path), logger.String("ip", ip))
+	emptyResponse.Message = "No weather data found for the specified date"
+	return ctx.JSON(http.StatusOK, emptyResponse)
+}
+
+// buildHourlyWeatherResponseList converts hourly weather data to response format
+func (c *Controller) buildHourlyWeatherResponseList(hourlyWeather []datastore.HourlyWeather) []HourlyWeatherResponse {
+	response := make([]HourlyWeatherResponse, 0, len(hourlyWeather))
+	for i := range hourlyWeather {
+		response = append(response, c.buildHourlyWeatherResponse(&hourlyWeather[i]))
+	}
+	return response
 }
 
 // GetHourlyWeatherForHour handles GET /api/v2/weather/hourly/:date/:hour
@@ -314,7 +236,7 @@ func (c *Controller) GetHourlyWeatherForHour(ctx echo.Context) error {
 	var targetHourData *HourlyWeatherResponse
 	for i := range hourlyWeather {
 		hw := &hourlyWeather[i]
-		storedHourStr := hw.Time.Format("15")
+		storedHourStr := hw.Time.In(time.Local).Format("15")
 		storedHour, err := strconv.Atoi(storedHourStr)
 		if err != nil {
 			return c.HandleError(ctx, echo.NewHTTPError(http.StatusInternalServerError),
@@ -322,23 +244,7 @@ func (c *Controller) GetHourlyWeatherForHour(ctx echo.Context) error {
 		}
 
 		if storedHour == requestedHour {
-			response := HourlyWeatherResponse{
-				Time:        hw.Time.Format("15:04:05"),
-				Temperature: hw.Temperature,
-				FeelsLike:   hw.FeelsLike,
-				TempMin:     hw.TempMin,
-				TempMax:     hw.TempMax,
-				Pressure:    hw.Pressure,
-				Humidity:    hw.Humidity,
-				Visibility:  hw.Visibility,
-				WindSpeed:   hw.WindSpeed,
-				WindDeg:     hw.WindDeg,
-				WindGust:    hw.WindGust,
-				Clouds:      hw.Clouds,
-				WeatherMain: hw.WeatherMain,
-				WeatherDesc: hw.WeatherDesc,
-				WeatherIcon: hw.WeatherIcon,
-			}
+			response := c.buildHourlyWeatherResponse(hw)
 			targetHourData = &response
 			break
 		}
@@ -359,147 +265,137 @@ func (c *Controller) GetHourlyWeatherForHour(ctx echo.Context) error {
 // then use this endpoint to separately retrieve the associated weather data.
 // This allows for more efficient data loading and keeps concerns separated.
 func (c *Controller) GetWeatherForDetection(ctx echo.Context) error {
-	ip := ctx.RealIP()
-	path := ctx.Request().URL.Path
+	ip, path := ctx.RealIP(), ctx.Request().URL.Path
 	id := ctx.Param("id")
 	if id == "" {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Missing detection ID", "path", path, "ip", ip)
-		}
+		c.logErrorIfEnabled("Missing detection ID", logger.String("path", path), logger.String("ip", ip))
 		return c.HandleError(ctx, echo.NewHTTPError(http.StatusBadRequest), "Detection ID is required", http.StatusBadRequest)
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Getting weather for detection", "detection_id", id, "path", path, "ip", ip)
-	}
+	c.logInfoIfEnabled("Getting weather for detection", logger.String("detection_id", id), logger.String("path", path), logger.String("ip", ip))
 
-	// 1. Get the detection
+	// Get the detection
 	note, err := c.DS.Get(id)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to get detection", "detection_id", id, "error", err.Error(), "path", path, "ip", ip)
-		}
-		// Determine if it's a not found error or other server error
-		status := http.StatusInternalServerError
-		msg := "Failed to get detection"
-		if errors.Is(err, gorm.ErrRecordNotFound) { // Use errors.Is for robust check
-			status = http.StatusNotFound
-			msg = "Detection not found"
-		}
-		return c.HandleError(ctx, err, msg, status)
+		return c.handleDetectionFetchError(ctx, err, id, ip, path)
 	}
 
-	// 2. Get daily weather data (best effort)
+	// Fetch weather data and build response
 	date := note.Date
-	dailyEvents, err := c.DS.GetDailyEvents(date)
-	if err != nil {
-		c.logger.Printf("WARN: [Weather API] Failed to get daily weather data for detection %s, date %s: %v", id, date, err)
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Failed to get daily weather data for detection", "detection_id", id, "date", date, "error", err.Error(), "path", path, "ip", ip)
-		}
-		// Use zero-value struct if daily data fails
-		dailyEvents = datastore.DailyEvents{Date: date} // Ensure date is still set
-	}
-	dailyResponse := c.buildDailyWeatherResponse(dailyEvents)
+	dailyResponse := c.fetchDailyWeatherForDetection(date, id, ip, path)
+	hourlyWeatherList := c.fetchHourlyWeatherForDetection(date, id, ip, path)
+	detectionTime, timeOfDay := c.getDetectionTimeOfDay(&note, date, id)
+	closestHourlyData := c.findClosestHourlyWeatherWithFallback(detectionTime, hourlyWeatherList, &note, id, ip, path)
 
-	// 3. Get hourly weather data for the day (best effort)
-	hourlyWeatherList, err := c.DS.GetHourlyWeather(date)
-	if err != nil {
-		c.logger.Printf("WARN: [Weather API] Failed to get hourly weather data for detection %s, date %s: %v", id, date, err)
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Failed to get hourly weather data for detection", "detection_id", id, "date", date, "error", err.Error(), "path", path, "ip", ip)
-		}
-		// Continue with empty list if hourly data fails
-		hourlyWeatherList = []datastore.HourlyWeather{}
-	}
-
-	// 4. Determine TimeOfDay
-	detectionTime, timeOfDay, parseErr := c.determineTimeOfDayForDetection(&note, date, id)
-	if parseErr != nil {
-		// Error already logged in helper
-		// Proceed with default timeOfDay ("Night") but maybe log the issue here too
-		c.logger.Printf("WARN: [Weather API] Proceeding with default TimeOfDay for detection %s due to parsing/calculation error: %v", id, parseErr)
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Proceeding with default TimeOfDay due to parsing/calculation error", "detection_id", id, "error", parseErr.Error())
-		}
-	}
-
-	// 5. Find Closest Hourly Weather
-	closestHourlyData := HourlyWeatherResponse{}            // Default to empty struct
-	if len(hourlyWeatherList) > 0 && detectionTime != nil { // Only search if we have data and a valid detection time
-		closestHourlyData = c.findClosestHourlyWeather(*detectionTime, hourlyWeatherList)
-	} else if len(hourlyWeatherList) > 0 {
-		// Fallback if detectionTime parsing failed but we have hourly data: try matching by hour string
-		hourStr := ""
-		if len(note.Time) >= 2 {
-			hourStr = note.Time[:2]
-		}
-		requestedHour, convErr := strconv.Atoi(hourStr)
-		if convErr == nil {
-			for i := range hourlyWeatherList {
-				hw := &hourlyWeatherList[i]
-				if hw.Time.Hour() == requestedHour { // Compare integer hours
-					closestHourlyData = c.buildHourlyWeatherResponse(hw)
-					break
-				}
-			}
-		} else if c.apiLogger != nil {
-			c.apiLogger.Error("Invalid hour derived from detection time during fallback", "detection_id", id, "hour", hourStr, "time", note.Time, "error", convErr.Error(), "path", path, "ip", ip)
-		}
-	}
-
-	// 6. Build the combined response
 	response := DetectionWeatherResponse{
 		Daily:     dailyResponse,
 		Hourly:    closestHourlyData,
 		TimeOfDay: timeOfDay,
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved weather for detection", "detection_id", id, "date", date, "time_of_day", timeOfDay, "path", path, "ip", ip)
+	c.logInfoIfEnabled("Retrieved weather for detection", logger.String("detection_id", id), logger.String("date", date), logger.String("time_of_day", timeOfDay), logger.String("path", path), logger.String("ip", ip))
+	return ctx.JSON(http.StatusOK, response)
+}
+
+// handleDetectionFetchError handles errors when fetching a detection
+func (c *Controller) handleDetectionFetchError(ctx echo.Context, err error, id, ip, path string) error {
+	c.logErrorIfEnabled("Failed to get detection", logger.String("detection_id", id), logger.Error(err), logger.String("path", path), logger.String("ip", ip))
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return c.HandleError(ctx, err, "Detection not found", http.StatusNotFound)
+	}
+	return c.HandleError(ctx, err, "Failed to get detection", http.StatusInternalServerError)
+}
+
+// fetchDailyWeatherForDetection fetches daily weather data with error handling
+func (c *Controller) fetchDailyWeatherForDetection(date, id, ip, path string) DailyWeatherResponse {
+	dailyEvents, err := c.DS.GetDailyEvents(date)
+	if err != nil {
+		c.logWarnIfEnabled("Failed to get daily weather data for detection", logger.String("detection_id", id), logger.String("date", date), logger.Error(err), logger.String("path", path), logger.String("ip", ip))
+		dailyEvents = datastore.DailyEvents{Date: date}
+	}
+	return c.buildDailyWeatherResponse(dailyEvents)
+}
+
+// fetchHourlyWeatherForDetection fetches hourly weather data with error handling
+func (c *Controller) fetchHourlyWeatherForDetection(date, id, ip, path string) []datastore.HourlyWeather {
+	hourlyWeatherList, err := c.DS.GetHourlyWeather(date)
+	if err != nil {
+		c.logWarnIfEnabled("Failed to get hourly weather data for detection", logger.String("detection_id", id), logger.String("date", date), logger.Error(err), logger.String("path", path), logger.String("ip", ip))
+		return []datastore.HourlyWeather{}
+	}
+	return hourlyWeatherList
+}
+
+// getDetectionTimeOfDay determines time of day for a detection
+func (c *Controller) getDetectionTimeOfDay(note *datastore.Note, date, id string) (detectionTime *time.Time, timeOfDay string) {
+	detectionTime, timeOfDay, parseErr := c.determineTimeOfDayForDetection(note, date, id)
+	if parseErr != nil {
+		c.logWarnIfEnabled("Proceeding with default TimeOfDay due to parsing/calculation error", logger.String("detection_id", id), logger.Error(parseErr))
+	}
+	return detectionTime, timeOfDay
+}
+
+// findClosestHourlyWeatherWithFallback finds closest hourly weather with fallback logic
+func (c *Controller) findClosestHourlyWeatherWithFallback(detectionTime *time.Time, hourlyWeatherList []datastore.HourlyWeather, note *datastore.Note, id, ip, path string) HourlyWeatherResponse {
+	if len(hourlyWeatherList) == 0 {
+		return HourlyWeatherResponse{}
 	}
 
-	// 7. Return JSON
-	return ctx.JSON(http.StatusOK, response)
+	// Primary: use detection time if available
+	if detectionTime != nil {
+		return c.findClosestHourlyWeather(*detectionTime, hourlyWeatherList)
+	}
+
+	// Fallback: match by hour string
+	return c.findHourlyWeatherByHourString(hourlyWeatherList, note.Time, id, ip, path)
+}
+
+// findHourlyWeatherByHourString finds hourly weather by matching hour from time string
+func (c *Controller) findHourlyWeatherByHourString(hourlyWeatherList []datastore.HourlyWeather, timeStr, id, ip, path string) HourlyWeatherResponse {
+	if len(timeStr) < minTimeStringLength {
+		return HourlyWeatherResponse{}
+	}
+
+	hourStr := timeStr[:2]
+	requestedHour, convErr := strconv.Atoi(hourStr)
+	if convErr != nil {
+		c.logErrorIfEnabled("Invalid hour derived from detection time during fallback", logger.String("detection_id", id), logger.String("hour", hourStr), logger.String("time", timeStr), logger.Error(convErr), logger.String("path", path), logger.String("ip", ip))
+		return HourlyWeatherResponse{}
+	}
+
+	for i := range hourlyWeatherList {
+		if hourlyWeatherList[i].Time.Hour() == requestedHour {
+			return c.buildHourlyWeatherResponse(&hourlyWeatherList[i])
+		}
+	}
+	return HourlyWeatherResponse{}
 }
 
 // determineTimeOfDayForDetection calculates the time of day string ("Day", "Night", etc.)
 // It returns the parsed detection time, the calculated timeOfDay string, and any error during parsing or calculation.
 func (c *Controller) determineTimeOfDayForDetection(note *datastore.Note, date, detectionID string) (*time.Time, string, error) {
-	timeOfDay := "Night" // Default
+	timeOfDay := timePeriodNight // Default
 
 	detectionTimeStr := date + " " + note.Time
-	loc := time.Local // Assuming detection times are stored relative to local server time
-	detectionTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", detectionTimeStr, loc)
-
+	detectionTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", detectionTimeStr, time.Local)
 	if parseErr != nil {
-		c.logger.Printf("WARN: [Weather API] Failed to parse detection time '%s' in location %s for detection %s: %v. Cannot determine TimeOfDay accurately.", detectionTimeStr, loc.String(), detectionID, parseErr)
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Failed to parse detection time for TimeOfDay calculation", "detection_id", detectionID, "time_str", detectionTimeStr, "error", parseErr.Error())
-		}
-		return nil, timeOfDay, parseErr // Return default timeOfDay and the error
+		c.logWarnIfEnabled("Failed to parse detection time for TimeOfDay calculation", logger.String("detection_id", detectionID), logger.String("time_str", detectionTimeStr), logger.Error(parseErr))
+		return nil, timeOfDay, parseErr
 	}
 
 	if c.SunCalc == nil {
-		c.logger.Printf("WARN: [Weather API] SunCalc not initialized. Cannot determine TimeOfDay for detection %s.", detectionID)
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("SunCalc not initialized for TimeOfDay calculation", "detection_id", detectionID)
-		}
-		return &detectionTime, timeOfDay, nil // Return parsed time and default timeOfDay
+		c.logWarnIfEnabled("SunCalc not initialized for TimeOfDay calculation", logger.String("detection_id", detectionID))
+		return &detectionTime, timeOfDay, nil
 	}
 
 	sunTimes, sunErr := c.SunCalc.GetSunEventTimes(detectionTime)
 	if sunErr != nil {
-		c.logger.Printf("WARN: [Weather API] Failed to get sun times for date %s for detection %s: %v. Cannot determine TimeOfDay.", date, detectionID, sunErr)
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Failed to get sun times for TimeOfDay calculation", "detection_id", detectionID, "date", date, "error", sunErr.Error())
-		}
-		return &detectionTime, timeOfDay, sunErr // Return parsed time, default timeOfDay, and suncalc error
+		c.logWarnIfEnabled("Failed to get sun times for TimeOfDay calculation", logger.String("detection_id", detectionID), logger.String("date", date), logger.Error(sunErr))
+		return &detectionTime, timeOfDay, sunErr
 	}
 
-	// Successfully got sun times, calculate actual time of day
 	timeOfDay = c.calculateTimeOfDay(detectionTime, &sunTimes)
-	return &detectionTime, timeOfDay, nil // Return parsed time, calculated timeOfDay, and nil error
+	return &detectionTime, timeOfDay, nil
 }
 
 // findClosestHourlyWeather finds the hourly weather record closest to the detection time.
@@ -529,12 +425,8 @@ func (c *Controller) findClosestHourlyWeather(detectionTime time.Time, hourlyWea
 	}
 
 	if !found {
-		// This case should ideally not happen if hourlyWeatherList is not empty,
-		// but good practice to handle. Log potentially?
-		c.logger.Printf("WARN: [Weather API] No closest hourly weather found despite having %d records.", len(hourlyWeatherList))
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("No closest hourly weather record found", "count", len(hourlyWeatherList))
-		}
+		// This case should ideally not happen if hourlyWeatherList is not empty
+		c.logWarnIfEnabled("No closest hourly weather record found despite having data", logger.Int("count", len(hourlyWeatherList)))
 	}
 
 	return closestHourlyData
@@ -543,7 +435,7 @@ func (c *Controller) findClosestHourlyWeather(detectionTime time.Time, hourlyWea
 // buildHourlyWeatherResponse creates an HourlyWeatherResponse from an HourlyWeather struct
 func (c *Controller) buildHourlyWeatherResponse(hw *datastore.HourlyWeather) HourlyWeatherResponse {
 	return HourlyWeatherResponse{
-		Time:        hw.Time.Format("15:04:05"), // Consider if Timezone matters here
+		Time:        hw.Time.In(time.Local).Format("15:04:05"),
 		Temperature: hw.Temperature,
 		FeelsLike:   hw.FeelsLike,
 		TempMin:     hw.TempMin,
@@ -564,28 +456,24 @@ func (c *Controller) buildHourlyWeatherResponse(hw *datastore.HourlyWeather) Hou
 // GetLatestWeather handles GET /api/v2/weather/latest
 // Retrieves the latest available weather data
 func (c *Controller) GetLatestWeather(ctx echo.Context) error {
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Getting latest weather data",
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Getting latest weather data",
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	// Get the latest hourly weather data
 	latestWeather, err := c.DS.LatestHourlyWeather()
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to get latest weather data",
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to get latest weather data",
+			logger.Error(err),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return c.HandleError(ctx, err, "Failed to get latest weather data", http.StatusInternalServerError)
 	}
 
-	// Get the date from the latest weather
-	date := latestWeather.Time.Format("2006-01-02")
+	// Get the date from the latest weather (convert to local time for correct date)
+	date := latestWeather.Time.In(time.Local).Format("2006-01-02")
 
 	// Build response with hourly data
 	response := struct {
@@ -593,58 +481,34 @@ func (c *Controller) GetLatestWeather(ctx echo.Context) error {
 		Hourly HourlyWeatherResponse `json:"hourly"`
 		Time   string                `json:"timestamp"`
 	}{
-		// Initialize with nil daily data, will be populated if available
-		Daily: nil,
-		// Always include hourly data since we have it
-		Hourly: HourlyWeatherResponse{
-			Time:        latestWeather.Time.Format("15:04:05"),
-			Temperature: latestWeather.Temperature,
-			FeelsLike:   latestWeather.FeelsLike,
-			TempMin:     latestWeather.TempMin,
-			TempMax:     latestWeather.TempMax,
-			Pressure:    latestWeather.Pressure,
-			Humidity:    latestWeather.Humidity,
-			Visibility:  latestWeather.Visibility,
-			WindSpeed:   latestWeather.WindSpeed,
-			WindDeg:     latestWeather.WindDeg,
-			WindGust:    latestWeather.WindGust,
-			Clouds:      latestWeather.Clouds,
-			WeatherMain: latestWeather.WeatherMain,
-			WeatherDesc: latestWeather.WeatherDesc,
-			WeatherIcon: latestWeather.WeatherIcon,
-		},
-		Time: time.Now().Format(time.RFC3339),
+		Daily:  nil, // Will be populated if available
+		Hourly: c.buildHourlyWeatherResponse(latestWeather),
+		Time:   time.Now().Format(time.RFC3339),
 	}
 
 	// Try to get daily weather data for this date
 	dailyEvents, err := c.DS.GetDailyEvents(date)
 	if err != nil {
 		// Log the error but continue with partial response
-		c.logger.Printf("WARN: [Weather API] Failed to get daily weather data for date %s: %v (endpoint=GetLatestWeather)",
-			date, err)
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Failed to get daily weather data for latest weather",
-				"date", date,
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logWarnIfEnabled("Failed to get daily weather data for latest weather",
+			logger.String("date", date),
+			logger.Error(err),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 	} else {
 		// Add daily data to response if available using the helper function
 		dailyResponse := c.buildDailyWeatherResponse(dailyEvents)
 		response.Daily = &dailyResponse
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved latest weather data",
-			"date", date,
-			"temperature", latestWeather.Temperature,
-			"has_daily", response.Daily != nil,
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Retrieved latest weather data",
+		logger.String("date", date),
+		logger.Float64("temperature", latestWeather.Temperature),
+		logger.Bool("has_daily", response.Daily != nil),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	return ctx.JSON(http.StatusOK, response)
 }
@@ -657,10 +521,10 @@ func (c *Controller) calculateTimeOfDay(detectionTime time.Time, sunEvents *sunc
 	sunsetTime := sunEvents.Sunset.Format("15:04:05")
 
 	// Define sunrise/sunset window (30 minutes before and after)
-	sunriseStart := sunEvents.Sunrise.Add(-30 * time.Minute).Format("15:04:05")
-	sunriseEnd := sunEvents.Sunrise.Add(30 * time.Minute).Format("15:04:05")
-	sunsetStart := sunEvents.Sunset.Add(-30 * time.Minute).Format("15:04:05")
-	sunsetEnd := sunEvents.Sunset.Add(30 * time.Minute).Format("15:04:05")
+	sunriseStart := sunEvents.Sunrise.Add(-weatherSunWindowMinute * time.Minute).Format("15:04:05")
+	sunriseEnd := sunEvents.Sunrise.Add(weatherSunWindowMinute * time.Minute).Format("15:04:05")
+	sunsetStart := sunEvents.Sunset.Add(-weatherSunWindowMinute * time.Minute).Format("15:04:05")
+	sunsetEnd := sunEvents.Sunset.Add(weatherSunWindowMinute * time.Minute).Format("15:04:05")
 
 	switch {
 	case detTime >= sunriseStart && detTime <= sunriseEnd:
@@ -670,7 +534,7 @@ func (c *Controller) calculateTimeOfDay(detectionTime time.Time, sunEvents *sunc
 	case detTime >= sunriseTime && detTime < sunsetTime:
 		return "Day"
 	default:
-		return "Night"
+		return timePeriodNight
 	}
 }
 
@@ -688,45 +552,37 @@ type SunTimesResponse struct {
 func (c *Controller) GetSunTimes(ctx echo.Context) error {
 	date := ctx.Param("date")
 	if date == "" {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Missing date parameter in sun times request",
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Missing date parameter in sun times request",
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return c.HandleError(ctx, echo.NewHTTPError(http.StatusBadRequest), "Date parameter is required", http.StatusBadRequest)
 	}
 
 	// Validate date format
 	parsedDate, err := time.Parse("2006-01-02", date)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Invalid date format in sun times request",
-				"date", date,
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Invalid date format in sun times request",
+			logger.String("date", date),
+			logger.Error(err),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return c.HandleError(ctx, err, "Invalid date format. Use YYYY-MM-DD", http.StatusBadRequest)
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Getting sun times",
-			"date", date,
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Getting sun times",
+		logger.String("date", date),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	// Check if SunCalc is available
 	if c.SunCalc == nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("SunCalc not initialized",
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("SunCalc not initialized",
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return c.HandleError(ctx, errors_pkg.New(errors.New("sun calculator not available")).
 			Component("weather_api").
 			Category(errors_pkg.CategoryConfiguration).
@@ -736,14 +592,12 @@ func (c *Controller) GetSunTimes(ctx echo.Context) error {
 	// Calculate sun times using SunCalc
 	sunTimes, err := c.SunCalc.GetSunEventTimes(parsedDate)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to calculate sun times",
-				"date", date,
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to calculate sun times",
+			logger.String("date", date),
+			logger.Error(err),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return c.HandleError(ctx, err, "Failed to calculate sun times", http.StatusInternalServerError)
 	}
 
@@ -756,15 +610,13 @@ func (c *Controller) GetSunTimes(ctx echo.Context) error {
 		CivilDusk: sunTimes.CivilDusk,
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Calculated sun times",
-			"date", date,
-			"sunrise", response.Sunrise.Format(time.RFC3339),
-			"sunset", response.Sunset.Format(time.RFC3339),
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Calculated sun times",
+		logger.String("date", date),
+		logger.String("sunrise", response.Sunrise.Format(time.RFC3339)),
+		logger.String("sunset", response.Sunset.Format(time.RFC3339)),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	return ctx.JSON(http.StatusOK, response)
 }

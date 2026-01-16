@@ -4,12 +4,15 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // BenchmarkValidateRelativePathWithoutCache benchmarks path validation without caching
 func BenchmarkValidateRelativePathWithoutCache(b *testing.B) {
 	b.ReportAllocs()
-	
+
 	// Create a temporary directory using Go 1.24 b.TempDir()
 	tempDir := b.TempDir()
 
@@ -40,7 +43,7 @@ func BenchmarkValidateRelativePathWithoutCache(b *testing.B) {
 // BenchmarkValidateRelativePathWithCache benchmarks path validation with caching
 func BenchmarkValidateRelativePathWithCache(b *testing.B) {
 	b.ReportAllocs()
-	
+
 	// Create a temporary directory using Go 1.24 b.TempDir()
 	tempDir := b.TempDir()
 
@@ -71,7 +74,7 @@ func BenchmarkValidateRelativePathWithCache(b *testing.B) {
 // BenchmarkIsPathWithinBaseWithoutCache benchmarks path checking without caching
 func BenchmarkIsPathWithinBaseWithoutCache(b *testing.B) {
 	b.ReportAllocs()
-	
+
 	// Create temporary directories using Go 1.24 b.TempDir()
 	tempDir := b.TempDir()
 
@@ -96,7 +99,7 @@ func BenchmarkIsPathWithinBaseWithoutCache(b *testing.B) {
 // BenchmarkIsPathWithinBaseWithCache benchmarks path checking with caching
 func BenchmarkIsPathWithinBaseWithCache(b *testing.B) {
 	b.ReportAllocs()
-	
+
 	// Create temporary directories using Go 1.24 b.TempDir()
 	tempDir := b.TempDir()
 
@@ -122,53 +125,43 @@ func BenchmarkIsPathWithinBaseWithCache(b *testing.B) {
 // TestCacheExpiration tests that cache entries expire correctly
 func TestCacheExpiration(t *testing.T) {
 	cache := NewPathCache()
-	
+
 	// Set very short TTL for testing
 	cache.validateTTL = 100 * time.Millisecond
-	
+
 	testPath := "test/file.txt"
-	
+
 	// First call should compute and cache
 	result1, err1 := cache.GetValidatePath(testPath, func(path string) (string, error) {
 		return filepath.Clean(path), nil
 	})
-	if err1 != nil {
-		t.Fatal(err1)
-	}
-	
+	require.NoError(t, err1)
+
 	// Second call should use cache
 	result2, err2 := cache.GetValidatePath(testPath, func(path string) (string, error) {
-		t.Fatal("Should not be called - should use cache")
+		require.Fail(t, "Should not be called - should use cache")
 		return "", nil
 	})
-	if err2 != nil {
-		t.Fatal(err2)
-	}
-	
-	if result1 != result2 {
-		t.Errorf("Expected cached result %s, got %s", result1, result2)
-	}
-	
+	require.NoError(t, err2)
+
+	assert.Equal(t, result1, result2, "Expected cached result to match")
+
 	// Wait for expiration
 	time.Sleep(150 * time.Millisecond)
-	
+
 	// Third call should recompute after expiration
 	result3, err3 := cache.GetValidatePath(testPath, func(path string) (string, error) {
 		return filepath.Clean(path), nil
 	})
-	if err3 != nil {
-		t.Fatal(err3)
-	}
-	
-	if result1 != result3 {
-		t.Errorf("Expected recomputed result %s, got %s", result1, result3)
-	}
+	require.NoError(t, err3)
+
+	assert.Equal(t, result1, result3, "Expected recomputed result to match")
 }
 
 // TestCacheStats tests that cache statistics are collected correctly
 func TestCacheStats(t *testing.T) {
 	cache := NewPathCache()
-	
+
 	// Add some entries
 	testPaths := []string{"file1.txt", "file2.mp3", "file3.png"}
 	for _, path := range testPaths {
@@ -176,9 +169,7 @@ func TestCacheStats(t *testing.T) {
 			return filepath.Clean(p), nil
 		})
 	}
-	
+
 	stats := cache.GetCacheStats()
-	if stats.ValidateTotal != 3 {
-		t.Errorf("Expected 3 validate cache entries, got %d", stats.ValidateTotal)
-	}
+	assert.Equal(t, 3, stats.ValidateTotal, "Expected 3 validate cache entries")
 }

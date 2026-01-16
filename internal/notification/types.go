@@ -5,6 +5,7 @@ package notification
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"sync"
@@ -155,6 +156,105 @@ func (n *Notification) MarkAsAcknowledged() {
 	n.Status = StatusAcknowledged
 }
 
+// Clone creates a deep copy of the notification, including the Metadata map.
+// This is used to safely broadcast notifications to multiple subscribers
+// without risk of concurrent map access if the original is modified.
+func (n *Notification) Clone() *Notification {
+	if n == nil {
+		return nil
+	}
+
+	clone := &Notification{
+		ID:        n.ID,
+		Type:      n.Type,
+		Priority:  n.Priority,
+		Status:    n.Status,
+		Title:     n.Title,
+		Message:   n.Message,
+		Component: n.Component,
+		Timestamp: n.Timestamp,
+	}
+
+	// Deep copy ExpiresAt
+	if n.ExpiresAt != nil {
+		expiresAt := *n.ExpiresAt
+		clone.ExpiresAt = &expiresAt
+	}
+
+	// Deep copy Metadata map to handle nested structures safely
+	if n.Metadata != nil {
+		clone.Metadata = deepCopyMetadata(n.Metadata)
+	}
+
+	return clone
+}
+
+// deepCopyMetadata creates a deep copy of the metadata map that preserves Go types.
+// This ensures nested maps/slices are fully copied, preventing concurrent access issues
+// when the original metadata is modified while being serialized.
+func deepCopyMetadata(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	return deepCopyValue(src).(map[string]any)
+}
+
+// deepCopyValue recursively deep copies a value using reflection to handle any
+// map or slice type generically. This ensures all nested collections are properly
+// deep-copied, preventing concurrent access issues regardless of the specific type.
+// Pointer types and custom structs are copied by reference (not dereferenced).
+func deepCopyValue(v any) any {
+	if v == nil {
+		return nil
+	}
+
+	original := reflect.ValueOf(v)
+
+	// We only need to handle maps and slices, as they are reference types
+	// that can cause concurrent access issues. Primitives are copied by value,
+	// and pointers/structs typically don't need deep copying for our SSE use case.
+	switch original.Kind() {
+	case reflect.Map:
+		// Create a new map of the same type
+		newMap := reflect.MakeMap(original.Type())
+		iter := original.MapRange()
+		for iter.Next() {
+			// Recursively copy the value
+			copiedValue := deepCopyValue(iter.Value().Interface())
+
+			// If copiedValue is nil, we need a zero value of the correct type
+			if copiedValue == nil {
+				newMap.SetMapIndex(iter.Key(), reflect.Zero(iter.Value().Type()))
+			} else {
+				newMap.SetMapIndex(iter.Key(), reflect.ValueOf(copiedValue))
+			}
+		}
+		return newMap.Interface()
+
+	case reflect.Slice:
+		// Create a new slice of the same type, length, and capacity
+		newSlice := reflect.MakeSlice(original.Type(), original.Len(), original.Cap())
+		for i := 0; i < original.Len(); i++ {
+			elem := original.Index(i)
+			// Recursively copy the element
+			copiedElem := deepCopyValue(elem.Interface())
+
+			if copiedElem == nil {
+				newSlice.Index(i).Set(reflect.Zero(elem.Type()))
+			} else {
+				newSlice.Index(i).Set(reflect.ValueOf(copiedElem))
+			}
+		}
+		return newSlice.Interface()
+
+	default:
+		// For primitive types, pointers, structs, etc., return the value as-is.
+		// Primitives are value types, and pointers/structs typically don't need
+		// deep copying for our SSE serialization use case.
+		return v
+	}
+}
+
 // NotificationStore interface defines methods for persisting notifications
 type NotificationStore interface {
 	// Save persists a notification
@@ -225,12 +325,12 @@ func (s *InMemoryStore) Save(notification *Notification) error {
 	}
 
 	s.notifications[notification.ID] = notification
-	
+
 	// Update unread count if this is a new unread notification
 	if notification.Status == StatusUnread {
 		s.unreadCount++
 	}
-	
+
 	return nil
 }
 
@@ -289,14 +389,14 @@ func (s *InMemoryStore) Update(notification *Notification) error {
 	if !exists {
 		return fmt.Errorf("notification not found: %s", notification.ID)
 	}
-	
+
 	// Update unread count if status changed
 	if oldNotif.Status == StatusUnread && notification.Status != StatusUnread {
 		s.unreadCount--
 	} else if oldNotif.Status != StatusUnread && notification.Status == StatusUnread {
 		s.unreadCount++
 	}
-	
+
 	s.notifications[notification.ID] = notification
 	return nil
 }
@@ -312,7 +412,7 @@ func (s *InMemoryStore) Delete(id string) error {
 			s.unreadCount--
 		}
 	}
-	
+
 	delete(s.notifications, id)
 	return nil
 }
@@ -366,34 +466,34 @@ func (s *InMemoryStore) matchesFilter(notif *Notification, filter *FilterOptions
 		return true
 	}
 
-	// Check type filter
+	return s.matchesAttributeFilters(notif, filter) && s.matchesTimeFilters(notif, filter)
+}
+
+// matchesAttributeFilters checks type, priority, status, and component filters.
+func (s *InMemoryStore) matchesAttributeFilters(notif *Notification, filter *FilterOptions) bool {
 	if len(filter.Types) > 0 && !slices.Contains(filter.Types, notif.Type) {
 		return false
 	}
-
-	// Check priority filter
 	if len(filter.Priorities) > 0 && !slices.Contains(filter.Priorities, notif.Priority) {
 		return false
 	}
-
-	// Check status filter
 	if len(filter.Status) > 0 && !slices.Contains(filter.Status, notif.Status) {
 		return false
 	}
-
-	// Check component filter
 	if filter.Component != "" && notif.Component != filter.Component {
 		return false
 	}
+	return true
+}
 
-	// Check time filters
+// matchesTimeFilters checks Since and Until time filters.
+func (s *InMemoryStore) matchesTimeFilters(notif *Notification, filter *FilterOptions) bool {
 	if filter.Since != nil && notif.Timestamp.Before(*filter.Since) {
 		return false
 	}
 	if filter.Until != nil && notif.Timestamp.After(*filter.Until) {
 		return false
 	}
-
 	return true
 }
 

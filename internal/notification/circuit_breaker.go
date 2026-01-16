@@ -3,16 +3,24 @@ package notification
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/observability/metrics"
 )
 
-// Telemetry debouncing configuration
+// Circuit breaker configuration defaults
 const (
+	// DefaultMaxFailures is the default number of consecutive failures before opening the circuit.
+	// 5 provides quick failure detection without being overly sensitive to transient network issues.
+	DefaultMaxFailures = 5
+
+	// DefaultCircuitBreakerTimeout is the default time to wait before transitioning from Open to Half-Open.
+	// 30 seconds balances recovery testing with API protection.
+	DefaultCircuitBreakerTimeout = 30 * time.Second
+
 	// MinTelemetryReportInterval prevents telemetry spam during rapid state changes.
 	// State transitions closer than this interval will be logged but not reported.
 	MinTelemetryReportInterval = 30 * time.Second
@@ -31,16 +39,17 @@ const (
 )
 
 // String returns the string representation of CircuitState.
+// Uses constants from constants.go for consistent state names.
 func (s CircuitState) String() string {
 	switch s {
 	case StateClosed:
-		return "closed"
+		return circuitStateClosed
 	case StateHalfOpen:
-		return "half-open"
+		return circuitStateHalfOpen
 	case StateOpen:
-		return "open"
+		return circuitStateOpen
 	default:
-		return "unknown"
+		return circuitStateUnknown
 	}
 }
 
@@ -70,14 +79,14 @@ type CircuitBreakerConfig struct {
 // DefaultCircuitBreakerConfig returns default circuit breaker configuration.
 func DefaultCircuitBreakerConfig() CircuitBreakerConfig {
 	return CircuitBreakerConfig{
-		// MaxFailures: 5 provides quick failure detection without being overly sensitive
+		// MaxFailures provides quick failure detection without being overly sensitive
 		// to transient network issues. Most services recover within 5 attempts.
-		MaxFailures: 5,
-		// Timeout: 30s balances recovery testing with API protection:
+		MaxFailures: DefaultMaxFailures,
+		// Timeout balances recovery testing with API protection:
 		// - Long enough for temporary network issues to resolve
 		// - Short enough to detect actual recovery promptly
 		// - Matches typical API timeout values (most APIs timeout at 20-60s)
-		Timeout: 30 * time.Second,
+		Timeout: DefaultCircuitBreakerTimeout,
 		// HalfOpenMaxRequests: 1 ensures conservative recovery testing
 		// Only one request is allowed to test if the service has recovered
 		HalfOpenMaxRequests: 1,
@@ -121,10 +130,10 @@ type PushCircuitBreaker struct {
 func NewPushCircuitBreaker(config CircuitBreakerConfig, notificationMetrics *metrics.NotificationMetrics, providerName string) *PushCircuitBreaker {
 	// Validate configuration and warn if invalid (but don't override for test flexibility)
 	if err := config.Validate(); err != nil {
-		slog.Warn("Circuit breaker config validation failed",
-			"provider", providerName,
-			"error", err,
-			"action", "proceeding with provided config")
+		GetLogger().Warn("circuit breaker config validation failed",
+			logger.String("provider", providerName),
+			logger.Error(err),
+			logger.String("action", "proceeding with provided config"))
 	}
 
 	cb := &PushCircuitBreaker{
@@ -280,12 +289,12 @@ func (cb *PushCircuitBreaker) setState(newState CircuitState) {
 	}
 
 	// Log state transitions for operational visibility
-	slog.Info("Circuit breaker state transition",
-		"provider", cb.providerName,
-		"old_state", oldState.String(),
-		"new_state", newState.String(),
-		"consecutive_failures", cb.failures,
-		"last_failure", cb.lastFailureTime.Format(time.RFC3339))
+	GetLogger().Info("circuit breaker state transition",
+		logger.String("provider", cb.providerName),
+		logger.String("old_state", oldState.String()),
+		logger.String("new_state", newState.String()),
+		logger.Int("consecutive_failures", cb.failures),
+		logger.String("last_failure", cb.lastFailureTime.Format(time.RFC3339)))
 
 	// Report telemetry for state transitions (with debouncing to prevent spam)
 	if cb.telemetry != nil {
@@ -314,11 +323,11 @@ func (cb *PushCircuitBreaker) setState(newState CircuitState) {
 			)
 			cb.lastTelemetryReport = now
 		} else {
-			slog.Debug("Telemetry report debounced (too soon since last report)",
-				"provider", cb.providerName,
-				"transition", fmt.Sprintf("%s → %s", oldState.String(), newState.String()),
-				"time_since_last_report", timeSinceLastReport,
-				"min_interval", MinTelemetryReportInterval)
+			GetLogger().Debug("telemetry report debounced (too soon since last report)",
+				logger.String("provider", cb.providerName),
+				logger.String("transition", fmt.Sprintf("%s → %s", oldState.String(), newState.String())),
+				logger.Duration("time_since_last_report", timeSinceLastReport),
+				logger.Duration("min_interval", MinTelemetryReportInterval))
 		}
 	}
 }
@@ -373,19 +382,19 @@ func (cb *PushCircuitBreaker) GetStats() CircuitBreakerStats {
 	defer cb.mu.RUnlock()
 
 	return CircuitBreakerStats{
-		State:              cb.state,
-		Failures:           cb.failures,
-		LastFailureTime:    cb.lastFailureTime,
-		LastStateChange:    cb.lastStateChange,
-		HalfOpenRequests:   cb.halfOpenRequests,
+		State:            cb.state,
+		Failures:         cb.failures,
+		LastFailureTime:  cb.lastFailureTime,
+		LastStateChange:  cb.lastStateChange,
+		HalfOpenRequests: cb.halfOpenRequests,
 	}
 }
 
 // CircuitBreakerStats contains statistics about a circuit breaker's state.
 type CircuitBreakerStats struct {
-	State              CircuitState
-	Failures           int
-	LastFailureTime    time.Time
-	LastStateChange    time.Time
-	HalfOpenRequests   int
+	State            CircuitState
+	Failures         int
+	LastFailureTime  time.Time
+	LastStateChange  time.Time
+	HalfOpenRequests int
 }

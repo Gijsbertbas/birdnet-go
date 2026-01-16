@@ -68,7 +68,7 @@ realtime:
 	require.NoError(t, err, "Failed to write initial config")
 
 	// Read and parse the config
-	configData, err := os.ReadFile(configPath)
+	configData, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is test fixture path
 	require.NoError(t, err, "Failed to read config")
 
 	var settings Settings
@@ -106,7 +106,7 @@ realtime:
 	require.NoError(t, err, "Failed to save modified config")
 
 	// Read the saved config back
-	savedData, err := os.ReadFile(configPath)
+	savedData, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is test fixture path
 	require.NoError(t, err, "Failed to read saved config")
 
 	// Parse the saved YAML to verify structure
@@ -139,7 +139,8 @@ realtime:
 		case int:
 			threshold = float64(v)
 		default:
-			t.Errorf("%s threshold should be numeric, got %T: %v", birdName, thresholdValue, thresholdValue)
+			assert.Fail(t, "threshold type mismatch",
+				"%s threshold should be numeric, got %T: %v", birdName, thresholdValue, thresholdValue)
 			continue
 		}
 
@@ -154,7 +155,8 @@ realtime:
 		case float64:
 			interval = int(v)
 		default:
-			t.Errorf("%s interval should be numeric, got %T: %v", birdName, intervalValue, intervalValue)
+			assert.Fail(t, "interval type mismatch",
+				"%s interval should be numeric, got %T: %v", birdName, intervalValue, intervalValue)
 			continue
 		}
 

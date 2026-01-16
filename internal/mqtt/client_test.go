@@ -18,7 +18,10 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/observability"
 )
 
@@ -29,6 +32,9 @@ const (
 	testTimeout            = 45 * time.Second
 	testTopic              = "birdnet-go/test"
 	connectionCheckTimeout = 2 * time.Second
+	// Test constants for goconst compliance
+	testExampleBroker = "tcp://test.example.com:1883"
+	testClientID      = "test-client"
 )
 
 // getBrokerAddress returns the MQTT broker address to use for testing
@@ -177,13 +183,9 @@ func testBasicFunctionality(t *testing.T) {
 	debugLog(t, "Attempting initial connection")
 	// Try to connect with shorter timeout for tests
 	err := mqttClient.Connect(ctx)
-	if err != nil {
-		t.Fatalf("Failed to connect to MQTT broker: %v", err)
-	}
+	require.NoError(t, err, "Failed to connect to MQTT broker")
 
-	if !mqttClient.IsConnected() {
-		t.Fatal("Client is not connected after successful connection")
-	}
+	require.True(t, mqttClient.IsConnected(), "Client is not connected after successful connection")
 	debugLog(t, "Successfully connected to broker")
 
 	// Try to publish
@@ -202,66 +204,50 @@ func testBasicFunctionality(t *testing.T) {
 	debugLog(t, "Disconnecting client")
 	mqttClient.Disconnect()
 
-	if mqttClient.IsConnected() {
-		t.Fatal("Client is still connected after disconnection")
-	}
+	assert.False(t, mqttClient.IsConnected(), "Client is still connected after disconnection")
 	debugLog(t, "Basic Functionality test completed")
 }
 
 // testIncorrectBrokerAddress checks the client's behavior when provided with invalid broker addresses.
-// It includes subtests for unresolvable hostnames and invalid IP addresses.
 func testIncorrectBrokerAddress(t *testing.T) {
 	t.Run("Unresolvable Hostname", func(t *testing.T) {
-		mqttClient, _ := createTestClient(t, "tcp://unresolvable.invalid:1883")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		err := mqttClient.Connect(ctx)
-
-		if err == nil {
-			t.Fatal("Expected connection to fail with invalid broker address")
-		}
-
-		var dnsErr *net.DNSError
-		if !errors.As(err, &dnsErr) {
-			t.Fatalf("Expected DNS resolution error, got: %v", err)
-		}
-
-		// Accept either "host not found" or "server misbehaving" errors
-		if !dnsErr.IsNotFound && !strings.Contains(dnsErr.Error(), "server misbehaving") {
-			t.Fatalf("Expected 'host not found' or 'server misbehaving' DNS error, got: %v", dnsErr)
-		}
-
-		if mqttClient.IsConnected() {
-			t.Fatal("Client reports connected status with invalid broker address")
-		}
+		testInvalidBrokerConnection(t, "tcp://unresolvable.invalid:1883", verifyDNSError)
 	})
 
 	t.Run("Invalid IP Address", func(t *testing.T) {
-		mqttClient, _ := createTestClient(t, "tcp://256.0.0.1:1883") // Invalid IP address
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		err := mqttClient.Connect(ctx)
-
-		if err == nil {
-			t.Fatal("Expected connection to fail with invalid IP address")
-		}
-
-		// The error could be either a DNS error or a connection error
-		var dnsErr *net.DNSError
-		var netErr net.Error
-
-		if !errors.As(err, &dnsErr) && !errors.As(err, &netErr) {
-			t.Fatalf("Expected either a DNS error or a net.Error, got: %v", err)
-		}
-
-		if mqttClient.IsConnected() {
-			t.Fatal("Client reports connected status with invalid IP address")
-		}
+		testInvalidBrokerConnection(t, "tcp://256.0.0.1:1883", verifyNetworkError)
 	})
+}
+
+// testInvalidBrokerConnection tests connection to an invalid broker and verifies the error
+func testInvalidBrokerConnection(t *testing.T, broker string, verifyErr func(*testing.T, error)) {
+	t.Helper()
+	mqttClient, _ := createTestClient(t, broker)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := mqttClient.Connect(ctx)
+	require.Error(t, err, "Expected connection to fail with invalid broker address")
+	verifyErr(t, err)
+	assert.False(t, mqttClient.IsConnected(), "Client reports connected status with invalid broker address")
+}
+
+// verifyDNSError verifies that the error is a DNS resolution error
+func verifyDNSError(t *testing.T, err error) {
+	t.Helper()
+	var dnsErr *net.DNSError
+	require.ErrorAs(t, err, &dnsErr, "Expected DNS resolution error")
+	assert.True(t, dnsErr.IsNotFound || strings.Contains(dnsErr.Error(), "server misbehaving"),
+		"Expected 'host not found' or 'server misbehaving' DNS error, got: %v", dnsErr)
+}
+
+// verifyNetworkError verifies that the error is either a DNS or net.Error
+func verifyNetworkError(t *testing.T, err error) {
+	t.Helper()
+	var dnsErr *net.DNSError
+	var netErr net.Error
+	assert.True(t, errors.As(err, &dnsErr) || errors.As(err, &netErr),
+		"Expected either a DNS error or a net.Error, got: %v", err)
 }
 
 // testConnectionLossBeforePublish simulates a scenario where the connection is lost before
@@ -281,9 +267,7 @@ func testConnectionLossBeforePublish(t *testing.T) {
 
 	debugLog(t, "Attempting initial connection")
 	err := mqttClient.Connect(ctx)
-	if err != nil {
-		t.Fatalf("Failed to connect to MQTT broker: %v", err)
-	}
+	require.NoError(t, err, "Failed to connect to MQTT broker")
 	debugLog(t, "Successfully connected to broker")
 
 	debugLog(t, "Simulating connection loss")
@@ -291,17 +275,13 @@ func testConnectionLossBeforePublish(t *testing.T) {
 
 	debugLog(t, "Attempting to publish after disconnect")
 	err = mqttClient.Publish(ctx, testTopic, "Hello after reconnect!")
-	if err == nil {
-		t.Fatal("Expected publish to fail after connection loss")
-	}
+	require.Error(t, err, "Expected publish to fail after connection loss")
 	debugLog(t, "Publish failed as expected with error: %v", err)
 
 	debugLog(t, "Waiting for potential reconnection attempts")
 	time.Sleep(5 * time.Second)
 
-	if mqttClient.IsConnected() {
-		t.Fatal("Client should not be connected after forced disconnection")
-	}
+	assert.False(t, mqttClient.IsConnected(), "Client should not be connected after forced disconnection")
 	debugLog(t, "Connection Loss Before Publish test completed")
 }
 
@@ -321,9 +301,7 @@ func testPublishWhileDisconnected(t *testing.T) {
 
 	debugLog(t, "Attempting to publish without connecting")
 	err := mqttClient.Publish(ctx, testTopic, "This should fail")
-	if err == nil {
-		t.Fatal("Expected publish to fail when not connected")
-	}
+	require.Error(t, err, "Expected publish to fail when not connected")
 	debugLog(t, "Publish failed as expected with error: %v", err)
 	debugLog(t, "Publish While Disconnected test completed")
 }
@@ -349,9 +327,7 @@ func testReconnectionWithBackoff(t *testing.T) {
 	connectCtx, connectCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer connectCancel()
 	err := mqttClient.Connect(connectCtx)
-	if err != nil {
-		t.Fatalf("Failed to connect to MQTT broker: %v", err)
-	}
+	require.NoError(t, err, "Failed to connect to MQTT broker")
 	debugLog(t, "Successfully connected to broker")
 
 	debugLog(t, "Simulating connection loss")
@@ -365,9 +341,7 @@ func testReconnectionWithBackoff(t *testing.T) {
 	failCtx, failCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer failCancel()
 	err = mqttClient.Connect(failCtx)
-	if err == nil {
-		t.Fatal("Expected reconnection to fail due to cooldown")
-	}
+	require.Error(t, err, "Expected reconnection to fail due to cooldown")
 	debugLog(t, "Immediate reconnection failed as expected with error: %v", err)
 
 	debugLog(t, "Waiting for cooldown period")
@@ -378,13 +352,9 @@ func testReconnectionWithBackoff(t *testing.T) {
 	reconnectCtx, reconnectCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer reconnectCancel()
 	err = mqttClient.Connect(reconnectCtx)
-	if err != nil {
-		t.Fatalf("Failed to reconnect after cooldown: %v", err)
-	}
+	require.NoError(t, err, "Failed to reconnect after cooldown")
 
-	if !mqttClient.IsConnected() {
-		t.Fatal("Client failed to reconnect after simulated connection loss")
-	}
+	require.True(t, mqttClient.IsConnected(), "Client failed to reconnect after simulated connection loss")
 	debugLog(t, "Successfully reconnected after cooldown")
 	debugLog(t, "Reconnection With Backoff test completed")
 }
@@ -408,9 +378,7 @@ func testMetricsCollection(t *testing.T) {
 	err := retryWithTimeout(15*time.Second, func() error {
 		return mqttClient.Connect(ctx)
 	})
-	if err != nil {
-		t.Fatalf("Failed to connect to MQTT broker after retries: %v", err)
-	}
+	require.NoError(t, err, "Failed to connect to MQTT broker after retries")
 
 	// Check initial connection status with retry
 	debugLog(t, "Checking initial connection status")
@@ -423,18 +391,14 @@ func testMetricsCollection(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Errorf("Initial connection status metric incorrect. Expected 1, got %v", connectionStatus)
-	}
+	require.NoError(t, err, "Initial connection status metric incorrect. Expected 1, got %v", connectionStatus)
 
 	// Publish with retries
 	debugLog(t, "Attempting to publish message")
 	err = retryWithTimeout(10*time.Second, func() error {
 		return mqttClient.Publish(ctx, testTopic, "Test message")
 	})
-	if err != nil {
-		t.Fatalf("Failed to publish message after retries: %v", err)
-	}
+	require.NoError(t, err, "Failed to publish message after retries")
 
 	debugLog(t, "Waiting for metrics to update")
 	time.Sleep(2 * time.Second)
@@ -442,24 +406,18 @@ func testMetricsCollection(t *testing.T) {
 	// Check metrics
 	messagesDelivered := getCounterValue(t, metrics.MQTT.MessagesDelivered)
 	debugLog(t, "Messages delivered metric: %v", messagesDelivered)
-	if messagesDelivered != 1 {
-		t.Errorf("Messages delivered metric incorrect. Expected 1, got %v", messagesDelivered)
-	}
+	assert.InDelta(t, 1.0, messagesDelivered, 0.0001, "Messages delivered metric incorrect")
 
 	// Check message size metric
 	messageSize := getHistogramValue(t, metrics.MQTT.MessageSize)
 	expectedSize := float64(len("Test message"))
-	if messageSize != expectedSize {
-		t.Errorf("Message size metric incorrect. Expected %v, got %v", expectedSize, messageSize)
-	}
+	assert.InDelta(t, expectedSize, messageSize, 0.0001, "Message size metric incorrect")
 
 	// Disconnect and check connection status
 	mqttClient.Disconnect()
 	time.Sleep(time.Second) // Allow time for metric to update
 	connectionStatus = getGaugeValue(t, metrics.MQTT.ConnectionStatus)
-	if connectionStatus != 0 {
-		t.Errorf("Connection status metric after disconnection incorrect. Expected 0, got %v", connectionStatus)
-	}
+	assert.InDelta(t, 0.0, connectionStatus, 0.0001, "Connection status metric after disconnection incorrect")
 
 	// Log other metrics for informational purposes
 	t.Logf("Error count: %v", getCounterVecValue(t, metrics.MQTT.Errors))
@@ -473,9 +431,7 @@ func getHistogramValue(t *testing.T, histogram prometheus.Histogram) float64 {
 	t.Helper()
 	var metric dto.Metric
 	err := histogram.Write(&metric)
-	if err != nil {
-		t.Fatalf("Failed to write metric: %v", err)
-	}
+	require.NoError(t, err, "Failed to write metric")
 	return metric.Histogram.GetSampleSum()
 }
 
@@ -484,9 +440,7 @@ func getGaugeValue(t *testing.T, gauge prometheus.Gauge) float64 {
 	t.Helper()
 	var metric dto.Metric
 	err := gauge.Write(&metric)
-	if err != nil {
-		t.Fatalf("Failed to write metric: %v", err)
-	}
+	require.NoError(t, err, "Failed to write metric")
 	return *metric.Gauge.Value
 }
 
@@ -495,9 +449,7 @@ func getCounterValue(t *testing.T, counter prometheus.Counter) float64 {
 	t.Helper()
 	var metric dto.Metric
 	err := counter.Write(&metric)
-	if err != nil {
-		t.Fatalf("Failed to write metric: %v", err)
-	}
+	require.NoError(t, err, "Failed to write metric")
 	return *metric.Counter.Value
 }
 
@@ -505,9 +457,7 @@ func getCounterVecValue(t *testing.T, counterVec *prometheus.CounterVec) float64
 	t.Helper()
 	// Get all metric families
 	metricFamilies, err := prometheus.DefaultGatherer.Gather()
-	if err != nil {
-		t.Fatalf("Failed to gather metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to gather metrics")
 
 	// Find the metric family for this counter vec
 	for _, mf := range metricFamilies {
@@ -523,87 +473,75 @@ func getCounterVecValue(t *testing.T, counterVec *prometheus.CounterVec) float64
 }
 
 // testContextCancellation verifies that the client properly handles context cancellation
-// during connection and publish operations
 func testContextCancellation(t *testing.T) {
-	t.Run("Connect Cancellation", func(t *testing.T) {
-		debugLog(t, "Starting Connect Cancellation test")
-		// Use a blackhole address to ensure Connect() blocks long enough for cancellation to occur.
-		// The client's internal connect timeout (e.g., 5s) should be longer than the cancellation (100ms).
-		mqttClient, _ := createTestClient(t, "tcp://10.255.255.1:1883")
+	t.Run("Connect Cancellation", testConnectCancellation)
+	t.Run("Publish Cancellation", testPublishCancellation)
+}
 
-		ctxConnect, cancelConnect := context.WithTimeout(context.Background(), 10*time.Second) // Overall test timeout
-		defer cancelConnect()
+// testConnectCancellation verifies that connection can be cancelled via context
+func testConnectCancellation(t *testing.T) {
+	debugLog(t, "Starting Connect Cancellation test")
+	mqttClient, _ := createTestClient(t, "tcp://10.255.255.1:1883")
 
-		ctxCancel, cancelFunc := context.WithCancel(ctxConnect)
-		defer cancelFunc() // Redundant due to cancelFunc() below, but good practice
+	ctxConnect, cancelConnect := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelConnect()
 
-		debugLog(t, "Created cancellation context")
-		connectErrChan := make(chan error, 1)
+	ctxCancel, cancelFunc := context.WithCancel(ctxConnect)
+	defer cancelFunc()
 
-		debugLog(t, "Starting connection attempt in goroutine")
-		go func() {
-			// This connect call should be interrupted by ctxCancel
-			connectErrChan <- mqttClient.Connect(ctxCancel)
-		}()
+	connectErrChan := make(chan error, 1)
+	go func() { connectErrChan <- mqttClient.Connect(ctxCancel) }()
 
-		debugLog(t, "Connection attempt started, waiting before cancellation")
-		time.Sleep(100 * time.Millisecond) // Wait a short period
+	time.Sleep(100 * time.Millisecond)
+	cancelFunc()
 
-		debugLog(t, "Cancelling context")
-		cancelFunc() // Cancel the context for Connect
+	err := waitForConnectError(t, connectErrChan, ctxConnect)
+	verifyContextCancellationError(t, err, mqttClient)
+	debugLog(t, "Connect Cancellation test completed")
+}
 
-		var err error
-		select {
-		case err = <-connectErrChan:
-			debugLog(t, "Received error from connection attempt: %v", err)
-		case <-ctxConnect.Done(): // Test timeout
-			t.Fatal("Test timed out waiting for connect to return after cancellation")
-		}
+// waitForConnectError waits for the connection error or test timeout
+func waitForConnectError(t *testing.T, errChan <-chan error, testCtx context.Context) error {
+	t.Helper()
+	select {
+	case err := <-errChan:
+		return err
+	case <-testCtx.Done():
+		require.Fail(t, "Test timed out waiting for connect to return after cancellation")
+		return nil
+	}
+}
 
-		if err == nil {
-			t.Fatal("Expected connection to fail due to context cancellation, but it succeeded")
-		}
+// verifyContextCancellationError verifies the error from a cancelled context
+func verifyContextCancellationError(t *testing.T, err error, client Client) {
+	t.Helper()
+	require.Error(t, err, "Expected connection to fail due to context cancellation, but it succeeded")
+	assert.True(t, errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+		"Expected context.Canceled or context.DeadlineExceeded, got: %v", err)
+	assert.False(t, client.IsConnected(), "Client should not be connected after cancellation")
+}
 
-		// Check if the error is context.Canceled or context.DeadlineExceeded (if parent ctx timed out first, less likely)
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("Expected context.Canceled or context.DeadlineExceeded, got: %v", err)
-		}
+// testPublishCancellation verifies that publish can be cancelled via context
+func testPublishCancellation(t *testing.T) {
+	broker := getBrokerAddress()
+	if broker == "" {
+		t.Skip("No MQTT broker available")
+		return
+	}
+	mqttClient, _ := createTestClient(t, broker)
 
-		if mqttClient.IsConnected() {
-			t.Error("Client should not be connected after cancellation")
-		}
-		debugLog(t, "Connect Cancellation test completed")
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
 
-	t.Run("Publish Cancellation", func(t *testing.T) {
-		broker := getBrokerAddress()
-		if broker == "" {
-			t.Skip("No MQTT broker available")
-			return
-		}
-		mqttClient, _ := createTestClient(t, broker)
+	err := mqttClient.Connect(ctx)
+	require.NoError(t, err, "Failed to connect to MQTT broker")
 
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
+	publishCtx, publishCancel := context.WithCancel(context.Background())
+	publishCancel() // Cancel immediately before publish
 
-		err := mqttClient.Connect(ctx)
-		if err != nil {
-			t.Fatalf("Failed to connect to MQTT broker: %v", err)
-		}
-
-		publishCtx, publishCancel := context.WithCancel(context.Background())
-
-		// Cancel the context immediately before publish
-		publishCancel()
-
-		err = mqttClient.Publish(publishCtx, testTopic, "This should fail")
-		if err == nil {
-			t.Fatal("Expected publish to fail due to context cancellation")
-		}
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Expected context.Canceled error, got: %v", err)
-		}
-	})
+	err = mqttClient.Publish(publishCtx, testTopic, "This should fail")
+	require.Error(t, err, "Expected publish to fail due to context cancellation")
+	assert.ErrorIs(t, err, context.Canceled, "Expected context.Canceled error")
 }
 
 // testTimeoutHandling verifies that the client properly handles various timeout scenarios
@@ -623,18 +561,13 @@ func testTimeoutHandling(t *testing.T) {
 
 		debugLog(t, "Connection attempt completed in %v with error: %v", duration, err)
 
-		if err == nil {
-			t.Fatal("Expected connection to fail due to timeout")
-		}
+		require.Error(t, err, "Expected connection to fail due to timeout")
 
-		if duration >= 5*time.Second {
-			t.Fatal("Connection attempt took too long, timeout not working properly")
-		}
+		assert.Less(t, duration, 5*time.Second, "Connection attempt took too long, timeout not working properly")
 
 		// Check if the error is timeout related
-		if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "timeout") {
-			t.Fatalf("Expected timeout error, got: %v", err)
-		}
+		assert.True(t, errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timeout"),
+			"Expected timeout error, got: %v", err)
 		debugLog(t, "Connect Timeout test completed")
 	})
 
@@ -650,9 +583,7 @@ func testTimeoutHandling(t *testing.T) {
 		defer cancel()
 
 		err := mqttClient.Connect(ctx)
-		if err != nil {
-			t.Fatalf("Failed to connect to MQTT broker: %v", err)
-		}
+		require.NoError(t, err, "Failed to connect to MQTT broker")
 
 		// Force disconnect to simulate network issues
 		mqttClient.Disconnect()
@@ -665,13 +596,9 @@ func testTimeoutHandling(t *testing.T) {
 		err = mqttClient.Publish(publishCtx, testTopic, "This should timeout")
 		duration := time.Since(start)
 
-		if err == nil {
-			t.Fatal("Expected publish to fail due to timeout")
-		}
+		require.Error(t, err, "Expected publish to fail due to timeout")
 
-		if duration >= 5*time.Second {
-			t.Fatal("Publish attempt took too long, timeout not working properly")
-		}
+		assert.Less(t, duration, 5*time.Second, "Publish attempt took too long, timeout not working properly")
 	})
 }
 
@@ -687,18 +614,12 @@ func testDNSResolutionForTest(t *testing.T) {
 		err := mqttClient.Connect(ctx)
 		duration := time.Since(start)
 
-		if err == nil {
-			t.Fatal("Expected connection to fail due to DNS resolution failure")
-		}
+		require.Error(t, err, "Expected connection to fail due to DNS resolution failure")
 
 		var dnsErr *net.DNSError
-		if !errors.As(err, &dnsErr) {
-			t.Fatalf("Expected DNS error, got: %v", err)
-		}
+		require.ErrorAs(t, err, &dnsErr, "Expected DNS error")
 
-		if duration >= 15*time.Second {
-			t.Fatal("DNS resolution took too long, timeout not working properly")
-		}
+		assert.Less(t, duration, 15*time.Second, "DNS resolution took too long, timeout not working properly")
 	})
 }
 
@@ -734,20 +655,10 @@ func createTestClient(t *testing.T, broker string) (Client, *observability.Metri
 	}
 	testSettings.Main.Name = clientID
 	metrics, err := observability.NewMetrics()
-	if err != nil {
-		if t != nil {
-			t.Fatalf("Failed to create metrics: %v", err)
-		}
-		return nil, nil
-	}
+	require.NoError(t, err, "Failed to create metrics")
 
 	client, err := NewClient(testSettings, metrics)
-	if err != nil {
-		if t != nil {
-			t.Fatalf("Failed to create MQTT client: %v", err)
-		}
-		return nil, nil
-	}
+	require.NoError(t, err, "Failed to create MQTT client")
 
 	return client, metrics
 }
@@ -795,9 +706,7 @@ func TestIsIPAddress(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := isIPAddress(tt.input)
-			if result != tt.expected {
-				t.Errorf("isIPAddress(%q) = %v; want %v", tt.input, result, tt.expected)
-			}
+			assert.Equal(t, tt.expected, result, "isIPAddress(%q) result mismatch", tt.input)
 		})
 	}
 }
@@ -852,7 +761,7 @@ func TestCheckConnectionCooldown(t *testing.T) {
 
 			// Create test client
 			config := DefaultConfig()
-			config.Broker = "tcp://test.example.com:1883"
+			config.Broker = testExampleBroker
 			config.ReconnectCooldown = tt.cooldownPeriod
 			metrics, _ := observability.NewMetrics()
 			c := &client{
@@ -863,24 +772,21 @@ func TestCheckConnectionCooldown(t *testing.T) {
 			}
 
 			// Create logger for test
-			logger := mqttLogger.With("broker", config.Broker, "client_id", config.ClientID)
+			testLog := GetLogger().With(
+				logger.String("broker", config.Broker),
+				logger.String("client_id", config.ClientID))
 
 			// Test the method - acquire read lock as required by the method
 			c.mu.RLock()
-			err := c.checkConnectionCooldownLocked(logger)
+			err := c.checkConnectionCooldownLocked(testLog)
 			c.mu.RUnlock()
 
 			// Verify results
 			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error but got nil")
-					return
-				}
-				if !strings.Contains(err.Error(), tt.expectedErrorSubstr) {
-					t.Errorf("Expected error to contain %q, got %q", tt.expectedErrorSubstr, err.Error())
-				}
-			} else if err != nil {
-				t.Errorf("Expected no error but got %v", err)
+				require.Error(t, err, "Expected error but got nil")
+				assert.Contains(t, err.Error(), tt.expectedErrorSubstr, "Error message mismatch")
+			} else {
+				assert.NoError(t, err, "Expected no error")
 			}
 		})
 	}
@@ -895,43 +801,25 @@ func TestConfigureClientOptions(t *testing.T) {
 		setupConfig func(*Config)
 		expectError bool
 		errorSubstr string
-		verifyOpts  func(*testing.T, paho.ClientOptions)
+		verifyOpts  func(*testing.T, *paho.ClientOptions)
 	}{
 		{
 			name: "Basic configuration",
 			setupConfig: func(c *Config) {
-				c.Broker = "tcp://test.example.com:1883"
-				c.ClientID = "test-client"
+				c.Broker = testExampleBroker
+				c.ClientID = testClientID
 				c.Username = "testuser"
 				c.Password = "testpass"
 				c.ConnectTimeout = 10 * time.Second
 			},
 			expectError: false,
-			verifyOpts: func(t *testing.T, opts paho.ClientOptions) {
-				t.Helper()
-				// Verify broker configuration by creating a client and checking behavior
-				// Note: paho ClientOptions doesn't expose direct getters, but we can verify functionality
-				client := paho.NewClient(&opts)
-				if client == nil {
-					t.Error("Expected client to be created successfully with configured options")
-					return
-				}
-
-				// Verify that options are properly configured by checking if client is not connected initially
-				// (this verifies AutoReconnect=false and ConnectRetry=false are working)
-				if client.IsConnected() {
-					t.Error("Expected client to not be connected initially (AutoReconnect should be disabled)")
-				}
-
-				// Clean up the client
-				client.Disconnect(250)
-			},
+			verifyOpts:  verifyClientNotConnected,
 		},
 		{
 			name: "TLS configuration enabled but invalid cert",
 			setupConfig: func(c *Config) {
 				c.Broker = "ssl://test.example.com:8883"
-				c.ClientID = "test-client"
+				c.ClientID = testClientID
 				c.TLS.Enabled = true
 				c.TLS.CACert = "/nonexistent/ca.crt"
 			},
@@ -942,74 +830,65 @@ func TestConfigureClientOptions(t *testing.T) {
 			name: "TLS configuration with InsecureSkipVerify",
 			setupConfig: func(c *Config) {
 				c.Broker = "ssl://test.example.com:8883"
-				c.ClientID = "test-client"
+				c.ClientID = testClientID
 				c.TLS.Enabled = true
 				c.TLS.InsecureSkipVerify = true
 			},
 			expectError: false,
-			verifyOpts: func(t *testing.T, opts paho.ClientOptions) {
-				t.Helper()
-				// Verify TLS-enabled options by creating a client and checking behavior
-				client := paho.NewClient(&opts)
-				if client == nil {
-					t.Error("Expected client to be created successfully with TLS-configured options")
-					return
-				}
-
-				// Verify that client is not connected initially (AutoReconnect=false)
-				if client.IsConnected() {
-					t.Error("Expected client to not be connected initially (AutoReconnect should be disabled)")
-				}
-
-				// Clean up the client
-				client.Disconnect(250)
-			},
+			verifyOpts:  verifyClientNotConnected,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
-			// Create test client with config
-			config := DefaultConfig()
-			tt.setupConfig(&config)
-			metrics, _ := observability.NewMetrics()
-			c := &client{
-				config:        config,
-				metrics:       metrics.MQTT,
-				reconnectStop: make(chan struct{}),
-			}
-
-			// Create logger for test
-			logger := mqttLogger.With("broker", config.Broker, "client_id", config.ClientID)
-
-			// Test the method
-			opts, err := c.configureClientOptions(logger)
-
-			// Verify results
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error but got nil")
-					return
-				}
-				if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.errorSubstr)) {
-					t.Errorf("Expected error to contain %q, got %q", tt.errorSubstr, err.Error())
-				}
-			} else {
-				if err != nil {
-					t.Errorf("Expected no error but got %v", err)
-					return
-				}
-				if opts == nil {
-					t.Errorf("Expected non-nil options")
-					return
-				}
-				if tt.verifyOpts != nil {
-					tt.verifyOpts(t, *opts)
-				}
-			}
+			runConfigureClientOptionsTest(t, tt.setupConfig, tt.expectError, tt.errorSubstr, tt.verifyOpts)
 		})
+	}
+}
+
+// verifyClientNotConnected verifies that a client created with options is not initially connected
+func verifyClientNotConnected(t *testing.T, opts *paho.ClientOptions) {
+	t.Helper()
+	client := paho.NewClient(opts)
+	require.NotNil(t, client, "Expected client to be created successfully")
+	assert.False(t, client.IsConnected(), "Expected client to not be connected initially (AutoReconnect should be disabled)")
+	client.Disconnect(250)
+}
+
+// runConfigureClientOptionsTest executes a single test case for configureClientOptions
+func runConfigureClientOptionsTest(t *testing.T, setupConfig func(*Config), expectError bool, errorSubstr string, verifyOpts func(*testing.T, *paho.ClientOptions)) {
+	t.Helper()
+	config := DefaultConfig()
+	setupConfig(&config)
+	metrics, _ := observability.NewMetrics()
+	c := &client{
+		config:        config,
+		metrics:       metrics.MQTT,
+		reconnectStop: make(chan struct{}),
+	}
+
+	testLog := GetLogger().With(
+		logger.String("broker", config.Broker),
+		logger.String("client_id", config.ClientID))
+	opts, err := c.configureClientOptions(testLog)
+
+	verifyConfigureClientOptionsResult(t, opts, err, expectError, errorSubstr, verifyOpts)
+}
+
+// verifyConfigureClientOptionsResult verifies the result of configureClientOptions
+func verifyConfigureClientOptionsResult(t *testing.T, opts *paho.ClientOptions, err error, expectError bool, errorSubstr string, verifyOpts func(*testing.T, *paho.ClientOptions)) {
+	t.Helper()
+	if expectError {
+		require.Error(t, err, "Expected error but got nil")
+		assert.Contains(t, strings.ToLower(err.Error()), strings.ToLower(errorSubstr), "Error message mismatch")
+		return
+	}
+
+	require.NoError(t, err, "Expected no error")
+	require.NotNil(t, opts, "Expected non-nil options")
+	if verifyOpts != nil {
+		verifyOpts(t, opts)
 	}
 }
 
@@ -1077,22 +956,19 @@ func TestPerformDNSResolution(t *testing.T) {
 			defer cancel()
 
 			// Create logger for test
-			logger := mqttLogger.With("broker", config.Broker, "client_id", config.ClientID)
+			testLog := GetLogger().With(
+				logger.String("broker", config.Broker),
+				logger.String("client_id", config.ClientID))
 
 			// Test the method
-			err := c.performDNSResolution(ctx, logger)
+			err := c.performDNSResolution(ctx, testLog)
 
 			// Verify results
 			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error but got nil")
-					return
-				}
-				if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.errorSubstr)) {
-					t.Errorf("Expected error to contain %q, got %q", tt.errorSubstr, err.Error())
-				}
-			} else if err != nil {
-				t.Errorf("Expected no error but got %v", err)
+				require.Error(t, err, "Expected error but got nil")
+				assert.Contains(t, strings.ToLower(err.Error()), strings.ToLower(tt.errorSubstr), "Error message mismatch")
+			} else {
+				assert.NoError(t, err, "Expected no error")
 			}
 		})
 	}
@@ -1111,7 +987,7 @@ func TestCalculateCancelTimeout(t *testing.T) {
 		{
 			name:              "Normal timeout calculation",
 			disconnectTimeout: 5 * time.Second,
-			expectedTimeout:   uint(CancelDisconnectTimeout.Milliseconds()), // min(1000, 5000/5) = min(1000, 1000) = 1000
+			expectedTimeout:   durationToMillisUint(CancelDisconnectTimeout), // min(1000, 5000/5) = min(1000, 1000) = 1000
 			description:       "Standard case with reasonable timeout",
 		},
 		{
@@ -1123,19 +999,19 @@ func TestCalculateCancelTimeout(t *testing.T) {
 		{
 			name:              "Very large timeout",
 			disconnectTimeout: 10 * time.Second,
-			expectedTimeout:   uint(CancelDisconnectTimeout.Milliseconds()), // min(1000, 10000/5) = min(1000, 2000) = 1000
+			expectedTimeout:   durationToMillisUint(CancelDisconnectTimeout), // min(1000, 10000/5) = min(1000, 2000) = 1000
 			description:       "Large timeout should be capped at minimum",
 		},
 		{
 			name:              "Zero timeout",
 			disconnectTimeout: 0,
-			expectedTimeout:   uint(CancelDisconnectTimeout.Milliseconds()), // Should use minimum
+			expectedTimeout:   durationToMillisUint(CancelDisconnectTimeout), // Should use minimum
 			description:       "Zero timeout should use minimum safe value",
 		},
 		{
 			name:              "Negative timeout",
 			disconnectTimeout: -5 * time.Second,
-			expectedTimeout:   uint(CancelDisconnectTimeout.Milliseconds()), // Should use minimum
+			expectedTimeout:   durationToMillisUint(CancelDisconnectTimeout), // Should use minimum
 			description:       "Negative timeout should use minimum safe value",
 		},
 	}
@@ -1158,20 +1034,14 @@ func TestCalculateCancelTimeout(t *testing.T) {
 			result := c.calculateCancelTimeout()
 
 			// Verify result
-			if result != tt.expectedTimeout {
-				t.Errorf("%s: expected %v, got %v", tt.description, tt.expectedTimeout, result)
-			}
+			assert.Equal(t, tt.expectedTimeout, result, tt.description)
 
 			// Verify the result is never zero
-			if result == 0 {
-				t.Errorf("Calculated timeout should never be zero, got %v", result)
-			}
+			assert.NotZero(t, result, "Calculated timeout should never be zero")
 
 			// Verify the result is reasonable (not more than minimum timeout)
-			maxTimeout := uint(CancelDisconnectTimeout.Milliseconds())
-			if result > maxTimeout {
-				t.Errorf("Calculated timeout should be at most %v ms, got %v ms", maxTimeout, result)
-			}
+			maxTimeout := durationToMillisUint(CancelDisconnectTimeout)
+			assert.LessOrEqual(t, result, maxTimeout, "Calculated timeout should be at most minimum timeout")
 		})
 	}
 }
@@ -1179,107 +1049,138 @@ func TestCalculateCancelTimeout(t *testing.T) {
 // TestPerformConnectionAttempt tests the connection attempt functionality
 func TestPerformConnectionAttempt(t *testing.T) {
 	// Network-heavy; avoid parallelism to reduce flakes
-
 	tests := []struct {
-		name        string
-		setupConfig func(*Config)
-		expectError bool
-		errorSubstr string
-		description string
+		name         string
+		setupConfig  func(*Config)
+		expectError  bool
+		errorSubstr  string
+		shortContext bool // Use short context timeout for cancellation test
 	}{
 		{
-			name: "Invalid broker URL",
-			setupConfig: func(config *Config) {
-				config.Broker = "invalid://malformed-url"
-			},
-			expectError: true,
-			errorSubstr: "network Error",
-			description: "Should fail with invalid broker URL",
+			name:        "Invalid broker URL",
+			setupConfig: func(config *Config) { config.Broker = "invalid://malformed-url" },
+			expectError: true, errorSubstr: "network Error",
 		},
 		{
 			name: "Connection timeout",
 			setupConfig: func(config *Config) {
-				config.Broker = "tcp://192.0.2.1:1883"         // TEST-NET-1 (unreachable)
-				config.ConnectTimeout = 100 * time.Millisecond // Very short timeout
+				config.Broker = "tcp://192.0.2.1:1883"
+				config.ConnectTimeout = 100 * time.Millisecond
 			},
-			expectError: true,
-			errorSubstr: "timeout",
-			description: "Should timeout on unreachable broker",
+			expectError: true, errorSubstr: "timeout",
 		},
 		{
 			name: "Context cancelled",
 			setupConfig: func(config *Config) {
-				config.Broker = "tcp://192.0.2.1:1883" // TEST-NET-1 (unreachable)
+				config.Broker = "tcp://192.0.2.1:1883"
 				config.ConnectTimeout = 5 * time.Second
 			},
-			expectError: true,
-			errorSubstr: "context",
-			description: "Should fail when context is cancelled",
+			expectError: true, errorSubstr: "context", shortContext: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create test client
-			config := DefaultConfig()
-			tt.setupConfig(&config)
-			metrics, _ := observability.NewMetrics()
-			c := &client{
-				config:        config,
-				metrics:       metrics.MQTT,
-				reconnectStop: make(chan struct{}),
-			}
-
-			// Create logger for test
-			logger := mqttLogger.With("broker", config.Broker, "client_id", config.ClientID)
-
-			// Create context with very short timeout for "context cancelled" test
-			var ctx context.Context
-			var cancel context.CancelFunc
-			if tt.name == "Context cancelled" {
-				ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
-				defer cancel()
-			} else {
-				ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-			}
-
-			// Create a MQTT client options first (needed for performConnectionAttempt)
-			opts, optsErr := c.configureClientOptions(logger)
-			if optsErr != nil {
-				if tt.expectError && tt.errorSubstr == "invalid broker URL" {
-					// This is expected for invalid URL tests
-					if !strings.Contains(optsErr.Error(), "invalid broker URL") {
-						t.Errorf("Expected 'invalid broker URL' error, got %v", optsErr)
-					}
-					return
-				}
-				t.Errorf("Unexpected error creating client options: %v", optsErr)
-				return
-			}
-
-			// Create MQTT client
-			clientToConnect := paho.NewClient(opts)
-
-			// Test the method
-			err := c.performConnectionAttempt(ctx, clientToConnect, logger)
-
-			// Verify results
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error but got nil")
-					return
-				}
-				if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.errorSubstr)) {
-					t.Errorf("Expected error to contain %q, got %q", tt.errorSubstr, err.Error())
-				}
-			} else if err != nil {
-				t.Errorf("Expected no error but got %v", err)
-			}
-
-			// Ensure client is properly cleaned up after test
-			c.Disconnect()
+			runPerformConnectionAttemptTest(t, tt.setupConfig, tt.expectError, tt.errorSubstr, tt.shortContext)
 		})
+	}
+}
+
+// runPerformConnectionAttemptTest executes a single test case for performConnectionAttempt
+func runPerformConnectionAttemptTest(t *testing.T, setupConfig func(*Config), expectError bool, errorSubstr string, shortContext bool) {
+	t.Helper()
+	config := DefaultConfig()
+	setupConfig(&config)
+	metrics, _ := observability.NewMetrics()
+	c := &client{config: config, metrics: metrics.MQTT, reconnectStop: make(chan struct{})}
+	defer c.Disconnect()
+
+	testLog := GetLogger().With(
+		logger.String("broker", config.Broker),
+		logger.String("client_id", config.ClientID))
+
+	timeout := 2 * time.Second
+	if shortContext {
+		timeout = 50 * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	opts, optsErr := c.configureClientOptions(testLog)
+	if optsErr != nil {
+		verifyConnectionAttemptError(t, optsErr, expectError, errorSubstr)
+		return
+	}
+
+	clientToConnect := paho.NewClient(opts)
+	err := c.performConnectionAttempt(ctx, clientToConnect, testLog)
+	verifyConnectionAttemptError(t, err, expectError, errorSubstr)
+}
+
+// verifyConnectionAttemptError verifies the error result of a connection attempt
+func verifyConnectionAttemptError(t *testing.T, err error, expectError bool, errorSubstr string) {
+	t.Helper()
+	if expectError {
+		require.Error(t, err, "Expected error but got nil")
+		assert.Contains(t, strings.ToLower(err.Error()), strings.ToLower(errorSubstr), "Error message mismatch")
+	} else {
+		assert.NoError(t, err, "Expected no error")
+	}
+}
+
+// connectWithOptionsTestCase defines a test case for TestConnectWithOptions
+type connectWithOptionsTestCase struct {
+	name            string
+	isAutoReconnect bool
+	lastAttempt     time.Duration
+	cooldownPeriod  time.Duration
+	expectError     bool
+	errorSubstr     string
+}
+
+// setupConnectWithOptionsClient creates a test client for connectWithOptions tests
+func setupConnectWithOptionsClient(broker string, cooldownPeriod, lastAttempt time.Duration) *client {
+	config := DefaultConfig()
+	config.Broker = broker
+	config.ReconnectCooldown = cooldownPeriod
+	config.ConnectTimeout = 2 * time.Second
+	metrics, _ := observability.NewMetrics()
+	return &client{
+		config:          config,
+		metrics:         metrics.MQTT,
+		lastConnAttempt: time.Now().Add(-lastAttempt),
+		reconnectStop:   make(chan struct{}),
+	}
+}
+
+// runConnectWithOptionsTest executes a single connectWithOptions test case
+func runConnectWithOptionsTest(t *testing.T, tc connectWithOptionsTestCase) {
+	t.Helper()
+
+	broker := getBrokerAddress()
+	if broker == "" {
+		t.Skip("No MQTT broker available")
+		return
+	}
+
+	c := setupConnectWithOptionsClient(broker, tc.cooldownPeriod, tc.lastAttempt)
+	defer c.Disconnect()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := c.connectWithOptions(ctx, tc.isAutoReconnect)
+	verifyConnectWithOptionsResult(t, err, tc.expectError, tc.errorSubstr)
+}
+
+// verifyConnectWithOptionsResult verifies the result of a connectWithOptions call
+func verifyConnectWithOptionsResult(t *testing.T, err error, expectError bool, errorSubstr string) {
+	t.Helper()
+	if expectError {
+		require.Error(t, err, "Expected error but got nil")
+		assert.Contains(t, err.Error(), errorSubstr, "Error message mismatch")
+	} else {
+		assert.NoError(t, err, "Expected no error")
 	}
 }
 
@@ -1288,14 +1189,7 @@ func TestPerformConnectionAttempt(t *testing.T) {
 func TestConnectWithOptions(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name            string
-		isAutoReconnect bool
-		lastAttempt     time.Duration // how long ago was last attempt
-		cooldownPeriod  time.Duration
-		expectError     bool
-		errorSubstr     string
-	}{
+	tests := []connectWithOptionsTestCase{
 		{
 			name:            "Manual connection respects cooldown",
 			isAutoReconnect: false,
@@ -1309,7 +1203,7 @@ func TestConnectWithOptions(t *testing.T) {
 			isAutoReconnect: true,
 			lastAttempt:     2 * time.Second,
 			cooldownPeriod:  5 * time.Second,
-			expectError:     false, // Should succeed despite cooldown
+			expectError:     false,
 		},
 		{
 			name:            "Manual connection after cooldown",
@@ -1330,48 +1224,7 @@ func TestConnectWithOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
-			// Skip tests that require actual broker connection
-			broker := getBrokerAddress()
-			if broker == "" {
-				t.Skip("No MQTT broker available")
-				return
-			}
-
-			// Create test client
-			config := DefaultConfig()
-			config.Broker = broker
-			config.ReconnectCooldown = tt.cooldownPeriod
-			config.ConnectTimeout = 2 * time.Second
-			metrics, _ := observability.NewMetrics()
-			c := &client{
-				config:          config,
-				metrics:         metrics.MQTT,
-				lastConnAttempt: time.Now().Add(-tt.lastAttempt),
-				reconnectStop:   make(chan struct{}),
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			// Test the connectWithOptions method
-			err := c.connectWithOptions(ctx, tt.isAutoReconnect)
-
-			// Clean up
-			defer c.Disconnect()
-
-			// Verify results
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error but got nil")
-					return
-				}
-				if !strings.Contains(err.Error(), tt.errorSubstr) {
-					t.Errorf("Expected error to contain %q, got %q", tt.errorSubstr, err.Error())
-				}
-			} else if err != nil {
-				t.Errorf("Expected no error but got %v", err)
-			}
+			runConnectWithOptionsTest(t, tt)
 		})
 	}
 }
@@ -1419,7 +1272,7 @@ func TestTimeRoundingEdgeCase(t *testing.T) {
 
 			// Create test client with cooldown that will trigger
 			config := DefaultConfig()
-			config.Broker = "tcp://test.example.com:1883"
+			config.Broker = testExampleBroker
 			config.ReconnectCooldown = 5 * time.Second
 			metrics, _ := observability.NewMetrics()
 			c := &client{
@@ -1429,24 +1282,21 @@ func TestTimeRoundingEdgeCase(t *testing.T) {
 				reconnectStop:   make(chan struct{}),
 			}
 
-			logger := mqttLogger.With("broker", config.Broker, "client_id", config.ClientID)
+			testLog := GetLogger().With(
+				logger.String("broker", config.Broker),
+				logger.String("client_id", config.ClientID))
 
 			// Test the checkConnectionCooldownLocked method
 			c.mu.RLock()
-			err := c.checkConnectionCooldownLocked(logger)
+			err := c.checkConnectionCooldownLocked(testLog)
 			c.mu.RUnlock()
 
 			// Should always error since we're within cooldown
-			if err == nil {
-				t.Errorf("Expected error but got nil")
-				return
-			}
+			require.Error(t, err, "Expected error but got nil")
 
 			// Check that the error message contains the expected rounded time
 			expectedMsg := fmt.Sprintf("last attempt was %s ago", tt.expectedDisplayTime)
-			if !strings.Contains(err.Error(), expectedMsg) {
-				t.Errorf("Expected error to contain %q, got %q", expectedMsg, err.Error())
-			}
+			assert.Contains(t, err.Error(), expectedMsg, "Error message should contain expected time")
 		})
 	}
 }

@@ -7,33 +7,79 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/observability"
 )
+
+// tlsFileTestCase defines a test case for TLS file existence checks
+type tlsFileTestCase struct {
+	name          string
+	tlsSettings   conf.MQTTTLSSettings
+	expectedError string
+}
+
+// createDummyFilesForTLSTest creates required dummy files for specific test cases
+func createDummyFilesForTLSTest(t *testing.T, testName, tempDir string) {
+	t.Helper()
+	switch testName {
+	case "Non-existent client key":
+		certPath := filepath.Join(tempDir, "client.crt")
+		err := os.WriteFile(certPath, []byte("dummy cert"), 0o600)
+		require.NoError(t, err, "Failed to create dummy cert file")
+	case "Non-existent client certificate":
+		keyPath := filepath.Join(tempDir, "client.key")
+		err := os.WriteFile(keyPath, []byte("dummy key"), 0o600)
+		require.NoError(t, err, "Failed to create dummy key file")
+	}
+}
+
+// runTLSFileExistenceTest executes a single TLS file existence test case
+func runTLSFileExistenceTest(t *testing.T, tc *tlsFileTestCase, tempDir string, metrics *observability.Metrics) {
+	t.Helper()
+
+	createDummyFilesForTLSTest(t, tc.name, tempDir)
+
+	settings := &conf.Settings{
+		Realtime: conf.RealtimeSettings{
+			MQTT: conf.MQTTSettings{
+				Enabled: true,
+				Broker:  "tls://localhost:8883",
+				Topic:   "birdnet-go/test",
+				TLS:     tc.tlsSettings,
+			},
+		},
+	}
+
+	client, err := NewClient(settings, metrics)
+	require.NoError(t, err, "Failed to create MQTT client")
+	defer client.Disconnect()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	err = client.Connect(ctx)
+	require.Error(t, err, "Expected connection to fail due to missing certificate files")
+
+	assert.Contains(t, err.Error(), tc.expectedError)
+}
 
 // TestTLSFileExistenceChecks verifies that the MQTT client provides helpful
 // error messages when TLS certificate files don't exist
 func TestTLSFileExistenceChecks(t *testing.T) {
 	t.Parallel()
-	// Skip if no broker is available
+
 	broker := getBrokerAddress()
 	if broker == "" {
 		t.Skip("No MQTT broker configured for testing")
 	}
 
-	// Create a temporary directory for non-existent certificate paths
 	tempDir := t.TempDir()
 
 	metrics, err := observability.NewMetrics()
-	if err != nil {
-		t.Fatalf("Failed to create metrics: %v", err)
-	}
+	require.NoError(t, err, "Failed to create metrics")
 
-	tests := []struct {
-		name          string
-		tlsSettings   conf.MQTTTLSSettings
-		expectedError string
-	}{
+	tests := []tlsFileTestCase{
 		{
 			name: "Non-existent CA certificate",
 			tlsSettings: conf.MQTTTLSSettings{
@@ -47,7 +93,7 @@ func TestTLSFileExistenceChecks(t *testing.T) {
 			tlsSettings: conf.MQTTTLSSettings{
 				Enabled:    true,
 				ClientCert: filepath.Join(tempDir, "non-existent-client.crt"),
-				ClientKey:  filepath.Join(tempDir, "client.key"), // Create this so we test cert check first
+				ClientKey:  filepath.Join(tempDir, "client.key"),
 			},
 			expectedError: "client certificate file does not exist",
 		},
@@ -55,7 +101,7 @@ func TestTLSFileExistenceChecks(t *testing.T) {
 			name: "Non-existent client key",
 			tlsSettings: conf.MQTTTLSSettings{
 				Enabled:    true,
-				ClientCert: filepath.Join(tempDir, "client.crt"), // Create this so we test key check
+				ClientCert: filepath.Join(tempDir, "client.crt"),
 				ClientKey:  filepath.Join(tempDir, "non-existent-client.key"),
 			},
 			expectedError: "client key file does not exist",
@@ -64,50 +110,7 @@ func TestTLSFileExistenceChecks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create any files that should exist for the test
-			switch tt.name {
-			case "Non-existent client key":
-				// Create a dummy client certificate file
-				certPath := filepath.Join(tempDir, "client.crt")
-				if err := os.WriteFile(certPath, []byte("dummy cert"), 0o600); err != nil {
-					t.Fatalf("Failed to create dummy cert file: %v", err)
-				}
-			case "Non-existent client certificate":
-				// Create a dummy key file
-				keyPath := filepath.Join(tempDir, "client.key")
-				if err := os.WriteFile(keyPath, []byte("dummy key"), 0o600); err != nil {
-					t.Fatalf("Failed to create dummy key file: %v", err)
-				}
-			}
-
-			settings := &conf.Settings{
-				Realtime: conf.RealtimeSettings{
-					MQTT: conf.MQTTSettings{
-						Enabled: true,
-						Broker:  "tls://localhost:8883", // Use TLS broker URL
-						Topic:   "birdnet-go/test",
-						TLS:     tt.tlsSettings,
-					},
-				},
-			}
-
-			client, err := NewClient(settings, metrics)
-			if err != nil {
-				t.Fatalf("Failed to create MQTT client: %v", err)
-			}
-			defer client.Disconnect()
-
-			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-			defer cancel()
-
-			// Attempt to connect - should fail with helpful error message
-			err = client.Connect(ctx)
-			if err == nil {
-				t.Fatal("Expected connection to fail due to missing certificate files")
-			}
-
-			// Check that the error message contains the expected text
-			assert.Contains(t, err.Error(), tt.expectedError)
+			runTLSFileExistenceTest(t, &tt, tempDir, metrics)
 		})
 	}
 }

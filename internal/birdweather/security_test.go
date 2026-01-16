@@ -2,10 +2,11 @@ package birdweather
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
@@ -20,13 +21,13 @@ func TestMaskURL(t *testing.T) {
 			name:          "masks BirdWeatherID in station URL",
 			birdweatherID: "12345abcdef",
 			inputURL:      "https://app.birdweather.com/api/v1/stations/12345abcdef/soundscapes",
-			expectedURL:   "https://app.birdweather.com/api/v1/stations/***/soundscapes",
+			expectedURL:   "https://app.birdweather.com/api/v1/stations/[BIRDWEATHER_ID]/soundscapes",
 		},
 		{
 			name:          "masks BirdWeatherID in detection URL",
 			birdweatherID: "xyz789",
 			inputURL:      "https://app.birdweather.com/api/v1/stations/xyz789/detections",
-			expectedURL:   "https://app.birdweather.com/api/v1/stations/***/detections",
+			expectedURL:   "https://app.birdweather.com/api/v1/stations/[BIRDWEATHER_ID]/detections",
 		},
 		{
 			name:          "handles empty BirdWeatherID",
@@ -38,7 +39,7 @@ func TestMaskURL(t *testing.T) {
 			name:          "masks multiple occurrences",
 			birdweatherID: "test123",
 			inputURL:      "https://app.birdweather.com/api/v1/stations/test123/soundscapes?id=test123",
-			expectedURL:   "https://app.birdweather.com/api/v1/stations/***/soundscapes?id=***",
+			expectedURL:   "https://app.birdweather.com/api/v1/stations/[BIRDWEATHER_ID]/soundscapes?id=[BIRDWEATHER_ID]",
 		},
 		{
 			name:          "handles URL without BirdWeatherID",
@@ -64,9 +65,7 @@ func TestMaskURL(t *testing.T) {
 			}
 
 			result := client.maskURL(tt.inputURL)
-			if result != tt.expectedURL {
-				t.Errorf("maskURL() = %v, want %v", result, tt.expectedURL)
-			}
+			assert.Equal(t, tt.expectedURL, result)
 		})
 	}
 }
@@ -101,9 +100,7 @@ func TestMaskURLForLogging(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := maskURLForLogging(tt.inputURL, tt.birdweatherID)
-			if result != tt.expectedURL {
-				t.Errorf("maskURLForLogging() = %v, want %v", result, tt.expectedURL)
-			}
+			assert.Equal(t, tt.expectedURL, result)
 		})
 	}
 }
@@ -128,9 +125,7 @@ func TestErrorContextScrubbing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Verify that the URL passed to handleNetworkError is already masked
-			if !strings.Contains(tt.url, tt.expectInURL) {
-				t.Errorf("URL should contain %v, but got %v", tt.expectInURL, tt.url)
-			}
+			assert.Contains(t, tt.url, tt.expectInURL)
 		})
 	}
 }
@@ -167,13 +162,8 @@ func TestDescriptiveErrorMessages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := handleNetworkError(tt.baseErr, "https://test.com", 30*time.Second, tt.operation)
 
-			if result == nil {
-				t.Fatal("Expected non-nil error")
-			}
-
-			if !strings.Contains(result.Error(), tt.expectedPrefix) {
-				t.Errorf("Expected error to contain %q, got %q", tt.expectedPrefix, result.Error())
-			}
+			require.NotNil(t, result, "Expected non-nil error")
+			assert.Contains(t, result.Error(), tt.expectedPrefix)
 		})
 	}
 }

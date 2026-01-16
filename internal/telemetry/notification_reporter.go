@@ -2,10 +2,8 @@
 package telemetry
 
 import (
-	"sync/atomic"
-
 	"github.com/getsentry/sentry-go"
-	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/notification"
 	"github.com/tphakala/birdnet-go/internal/privacy"
 )
@@ -65,16 +63,8 @@ func (r *SentryNotificationReporter) CaptureError(err error, component string) {
 
 // CaptureEvent reports a custom event with tags and contexts to Sentry
 func (r *SentryNotificationReporter) CaptureEvent(message, level string, tags map[string]string, contexts map[string]any) {
-	if !r.enabled {
+	if !r.enabled || shouldSkipTelemetry() {
 		return
-	}
-
-	// Skip settings check in test mode
-	if atomic.LoadInt32(&testMode) == 0 {
-		settings := conf.GetSettings()
-		if settings == nil || !settings.Sentry.Enabled {
-			return
-		}
 	}
 
 	// Scrub message for privacy
@@ -83,12 +73,12 @@ func (r *SentryNotificationReporter) CaptureEvent(message, level string, tags ma
 	// Convert string level to sentry.Level
 	sentryLevel := convertToSentryLevel(level)
 
+	log := GetLogger()
 	// Log the event being sent (privacy-safe)
-	logTelemetryDebug(nil, "sending notification event",
-		"event_type", "notification",
-		"level", level,
-		"tags", tags,
-	)
+	log.Debug("sending notification event",
+		logger.String("event_type", "notification"),
+		logger.String("level", level),
+		logger.Any("tags", tags))
 
 	sentry.WithScope(func(scope *sentry.Scope) {
 		scope.SetLevel(sentryLevel)
@@ -111,25 +101,14 @@ func (r *SentryNotificationReporter) CaptureEvent(message, level string, tags ma
 	})
 
 	// Log successful submission
-	logTelemetryDebug(nil, "notification event sent successfully",
-		"level", level,
-		"component", tags["component"],
-	)
+	log.Debug("notification event sent successfully",
+		logger.String("level", level),
+		logger.String("component", tags["component"]))
 }
 
 // IsEnabled returns whether telemetry reporting is enabled
 func (r *SentryNotificationReporter) IsEnabled() bool {
-	if !r.enabled {
-		return false
-	}
-
-	// Skip settings check in test mode
-	if atomic.LoadInt32(&testMode) == 0 {
-		settings := conf.GetSettings()
-		return settings != nil && settings.Sentry.Enabled
-	}
-
-	return true
+	return r.enabled && !shouldSkipTelemetry()
 }
 
 // convertToSentryLevel converts string level to sentry.Level

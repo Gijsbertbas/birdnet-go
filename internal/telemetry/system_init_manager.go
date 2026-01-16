@@ -2,18 +2,19 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
-	"github.com/tphakala/birdnet-go/internal/errors"
+	apperrors "github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/events"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/notification"
 )
 
-// Default configuration values for notification service
+// Default configuration values for notification and event bus
 const (
 	// DefaultMaxNotifications is the default maximum number of notifications to keep in memory
 	DefaultMaxNotifications = 1000
@@ -23,6 +24,17 @@ const (
 	DefaultRateLimitWindow = 1 * time.Minute
 	// DefaultRateLimitMaxEvents is the default maximum number of events per rate limit window
 	DefaultRateLimitMaxEvents = 100
+
+	// Event bus configuration
+	eventBusBufferSize       = 10000
+	eventBusWorkers          = 4
+	deduplicationTTL         = 5 * time.Minute
+	deduplicationMaxEntries  = 1000
+	deduplicationCleanupInt  = 1 * time.Minute
+
+	// Shutdown timeouts
+	eventBusShutdownTimeout   = 5 * time.Second
+	telemetryShutdownTimeout  = 2 * time.Second
 )
 
 // SystemInitManager manages initialization of all async subsystems
@@ -36,8 +48,8 @@ type SystemInitManager struct {
 	eventBusErr     error
 	workerErr       error
 	
-	mu     sync.RWMutex
-	logger *slog.Logger
+	mu       sync.RWMutex
+	sysLog   logger.Logger
 }
 
 var (
@@ -56,7 +68,7 @@ func GetSystemInitManager() *SystemInitManager {
 		
 		systemInitManager = &SystemInitManager{
 			telemetryCoordinator: coordinator,
-			logger:              getLoggerSafe("system-init"),
+			sysLog:               GetLogger().With(logger.String("component", "system-init")),
 		}
 	})
 	return systemInitManager
@@ -64,7 +76,7 @@ func GetSystemInitManager() *SystemInitManager {
 
 // InitializeCore initializes core services (telemetry and notification)
 func (m *SystemInitManager) InitializeCore(settings *conf.Settings) error {
-	m.logger.Info("starting core services initialization")
+	m.sysLog.Info("starting core services initialization")
 
 	// Phase 1: Initialize telemetry (synchronous error reporting)
 	if err := m.initializeTelemetry(settings); err != nil {
@@ -76,13 +88,13 @@ func (m *SystemInitManager) InitializeCore(settings *conf.Settings) error {
 		return fmt.Errorf("notification initialization failed: %w", err)
 	}
 
-	m.logger.Info("core services initialization completed")
+	m.sysLog.Info("core services initialization completed")
 	return nil
 }
 
 // InitializeAsyncServices initializes async services (event bus and workers)
 func (m *SystemInitManager) InitializeAsyncServices() error {
-	m.logger.Info("starting async services initialization")
+	m.sysLog.Info("starting async services initialization")
 
 	// Phase 1: Initialize event bus
 	if err := m.initializeEventBus(); err != nil {
@@ -92,16 +104,16 @@ func (m *SystemInitManager) InitializeAsyncServices() error {
 	// Phase 2: Initialize notification worker
 	if err := m.initializeNotificationWorker(); err != nil {
 		// Log but don't fail - notification worker is not critical
-		m.logger.Error("notification worker initialization failed", "error", err)
+		m.sysLog.Error("notification worker initialization failed", logger.Error(err))
 	}
 
 	// Phase 3: Initialize telemetry event bus integration
 	if err := m.initializeTelemetryEventBus(); err != nil {
 		// Log but don't fail - telemetry is not critical
-		m.logger.Error("telemetry event bus initialization failed", "error", err)
+		m.sysLog.Error("telemetry event bus initialization failed", logger.Error(err))
 	}
 
-	m.logger.Info("async services initialization completed")
+	m.sysLog.Info("async services initialization completed")
 	return nil
 }
 
@@ -118,19 +130,33 @@ func (m *SystemInitManager) initializeTelemetry(settings *conf.Settings) error {
 	return m.telemetryCoordinator.InitializeAll(settings)
 }
 
+// setupNotificationTelemetry configures telemetry integration for notification service
+func (m *SystemInitManager) setupNotificationTelemetry(settings *conf.Settings) {
+	if settings == nil || !settings.Sentry.Enabled {
+		return
+	}
+
+	m.sysLog.Debug("setting up notification telemetry integration")
+	reporter := NewNotificationReporter(settings.Sentry.Enabled)
+	telemetryConfig := notification.DefaultTelemetryConfig()
+	telemetryIntegration := notification.NewNotificationTelemetry(&telemetryConfig, reporter)
+
+	if service := notification.GetService(); service != nil {
+		service.SetTelemetry(telemetryIntegration)
+		m.sysLog.Info("notification telemetry integration enabled")
+	} else {
+		m.sysLog.Warn("notification service not available for telemetry integration")
+	}
+}
+
 // initializeNotification initializes the notification service
 func (m *SystemInitManager) initializeNotification() error {
 	m.notificationInitOnce.Do(func() {
-		m.logger.Debug("initializing notification service")
-		
-		// Get settings for debug flag
+		m.sysLog.Debug("initializing notification service")
+
 		settings := conf.GetSettings()
-		debug := false
-		if settings != nil {
-			debug = settings.Debug
-		}
-		
-		// Create notification service config
+		debug := settings != nil && settings.Debug
+
 		config := &notification.ServiceConfig{
 			Debug:              debug,
 			MaxNotifications:   DefaultMaxNotifications,
@@ -138,53 +164,32 @@ func (m *SystemInitManager) initializeNotification() error {
 			RateLimitWindow:    DefaultRateLimitWindow,
 			RateLimitMaxEvents: DefaultRateLimitMaxEvents,
 		}
-		
-		// Initialize with config
 		notification.Initialize(config)
 
-		// Set up telemetry integration for notification service
-		if settings != nil && settings.Sentry.Enabled {
-			m.logger.Debug("setting up notification telemetry integration")
-
-			// Create telemetry reporter
-			reporter := NewNotificationReporter(settings.Sentry.Enabled)
-
-			// Create telemetry config
-			telemetryConfig := notification.DefaultTelemetryConfig()
-			telemetryIntegration := notification.NewNotificationTelemetry(&telemetryConfig, reporter)
-
-			// Inject into service
-			if service := notification.GetService(); service != nil {
-				service.SetTelemetry(telemetryIntegration)
-				m.logger.Info("notification telemetry integration enabled")
-			} else {
-				m.logger.Warn("notification service not available for telemetry integration")
-			}
-		}
+		m.setupNotificationTelemetry(settings)
 
 		// Initialize push notifications from config (non-fatal on error)
 		if settings != nil {
 			if err := notification.InitializePushFromConfig(settings); err != nil {
-				m.logger.Error("push notification init failed", "error", err)
+				m.sysLog.Error("push notification init failed", logger.Error(err))
 			}
 		}
 
-		// Verify initialization
 		if !notification.IsInitialized() {
 			m.notificationErr = fmt.Errorf("notification service initialization failed")
 			return
 		}
 
-		m.logger.Info("notification service initialized successfully", "debug", debug)
+		m.sysLog.Info("notification service initialized successfully", logger.Bool("debug", debug))
 	})
-	
+
 	return m.notificationErr
 }
 
 // initializeEventBus initializes the event bus
 func (m *SystemInitManager) initializeEventBus() error {
 	m.eventBusInitOnce.Do(func() {
-		m.logger.Debug("initializing event bus")
+		m.sysLog.Debug("initializing event bus")
 		
 		// Get settings for debug flag
 		settings := conf.GetSettings()
@@ -195,16 +200,16 @@ func (m *SystemInitManager) initializeEventBus() error {
 		
 		// Initialize event bus for async error processing
 		eventBusConfig := &events.Config{
-			BufferSize: 10000,
-			Workers:    4,
+			BufferSize: eventBusBufferSize,
+			Workers:    eventBusWorkers,
 			Enabled:    true,
 			Debug:      debug,
 			Deduplication: &events.DeduplicationConfig{
 				Enabled:         true,
 				Debug:           debug,
-				TTL:             5 * time.Minute,
-				MaxEntries:      1000,
-				CleanupInterval: 1 * time.Minute,
+				TTL:             deduplicationTTL,
+				MaxEntries:      deduplicationMaxEntries,
+				CleanupInterval: deduplicationCleanupInt,
 			},
 		}
 		
@@ -212,7 +217,7 @@ func (m *SystemInitManager) initializeEventBus() error {
 		if err != nil {
 			// Handle disabled event bus as non-error
 			if errors.Is(err, events.ErrEventBusDisabled) {
-				m.logger.Debug("Event bus disabled, skipping initialization")
+				m.sysLog.Debug("Event bus disabled, skipping initialization")
 				return
 			}
 			m.eventBusErr = fmt.Errorf("event bus initialization failed: %w", err)
@@ -226,11 +231,11 @@ func (m *SystemInitManager) initializeEventBus() error {
 		}
 		
 		adapter := events.NewEventPublisherAdapter(eventBus)
-		errors.SetEventPublisher(adapter)
+		apperrors.SetEventPublisher(adapter)
 		
-		m.logger.Info("event bus initialized successfully",
-			"buffer_size", eventBusConfig.BufferSize,
-			"workers", eventBusConfig.Workers)
+		m.sysLog.Info("event bus initialized successfully",
+			logger.Int("buffer_size", eventBusConfig.BufferSize),
+			logger.Int("workers", eventBusConfig.Workers))
 	})
 	
 	return m.eventBusErr
@@ -239,7 +244,7 @@ func (m *SystemInitManager) initializeEventBus() error {
 // initializeNotificationWorker initializes the notification worker
 func (m *SystemInitManager) initializeNotificationWorker() error {
 	m.notificationWorkerOnce.Do(func() {
-		m.logger.Debug("initializing notification worker")
+		m.sysLog.Debug("initializing notification worker")
 		
 		// Check prerequisites
 		if !notification.IsInitialized() {
@@ -258,7 +263,7 @@ func (m *SystemInitManager) initializeNotificationWorker() error {
 			return
 		}
 		
-		m.logger.Info("notification worker initialized successfully")
+		m.sysLog.Info("notification worker initialized successfully")
 	})
 	
 	return m.workerErr
@@ -337,97 +342,106 @@ func (m *SystemInitManager) HealthCheck() SystemHealthStatus {
 	return status
 }
 
+// cappedTimeout returns the remaining time from context, capped at maxTimeout.
+// Returns 0 if context deadline has passed, or maxTimeout if no deadline is set.
+func cappedTimeout(ctx context.Context, maxTimeout time.Duration) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return maxTimeout
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining > maxTimeout {
+		return maxTimeout
+	}
+	return remaining
+}
+
+// shutdownNotification stops the notification service
+func (m *SystemInitManager) shutdownNotification() {
+	if !notification.IsInitialized() {
+		return
+	}
+	if service := notification.GetService(); service != nil {
+		m.sysLog.Info("stopping notification service")
+		service.Stop()
+	}
+}
+
+// shutdownEventBus stops the event bus and returns any error
+func (m *SystemInitManager) shutdownEventBus(ctx context.Context) error {
+	if !events.IsInitialized() {
+		return nil
+	}
+	eventBus := events.GetEventBus()
+	if eventBus == nil {
+		return nil
+	}
+
+	m.sysLog.Info("stopping event bus")
+	timeout := cappedTimeout(ctx, eventBusShutdownTimeout)
+	if timeout == 0 {
+		return ctx.Err()
+	}
+	return eventBus.Shutdown(timeout)
+}
+
+// shutdownTelemetry stops the telemetry coordinator and returns any error
+func (m *SystemInitManager) shutdownTelemetry(ctx context.Context) error {
+	if m.telemetryCoordinator == nil {
+		return nil
+	}
+
+	m.sysLog.Info("stopping telemetry")
+	timeout := cappedTimeout(ctx, telemetryShutdownTimeout)
+	if timeout == 0 {
+		return ctx.Err()
+	}
+	return m.telemetryCoordinator.Shutdown(timeout)
+}
+
 // Shutdown performs graceful shutdown of all systems
 func (m *SystemInitManager) Shutdown(ctx context.Context) error {
-	m.logger.Info("starting system shutdown")
-
-	var shutdownErrors []error
+	m.sysLog.Info("starting system shutdown")
 
 	// Check if context is already cancelled
-	select {
-	case <-ctx.Done():
+	if ctx.Err() != nil {
 		return ctx.Err()
-	default:
 	}
 
-	// Shutdown notification service
-	if notification.IsInitialized() {
-		if service := notification.GetService(); service != nil {
-			m.logger.Info("stopping notification service")
-			service.Stop()
-		}
-	}
+	var shutdownErrs []error
 
-	// Check context again after notification shutdown
-	select {
-	case <-ctx.Done():
+	// Shutdown notification service (no error returned)
+	m.shutdownNotification()
+
+	if ctx.Err() != nil {
 		return ctx.Err()
-	default:
 	}
 
 	// Shutdown event bus
-	if events.IsInitialized() {
-		if eventBus := events.GetEventBus(); eventBus != nil {
-			m.logger.Info("stopping event bus")
-			
-			// Use remaining time from context
-			deadline, ok := ctx.Deadline()
-			timeout := 5 * time.Second
-			if ok {
-				timeout = time.Until(deadline)
-				if timeout <= 0 {
-					return ctx.Err()
-				}
-				// Cap timeout at 5 seconds
-				if timeout > 5*time.Second {
-					timeout = 5 * time.Second
-				}
-			}
-			
-			if err := eventBus.Shutdown(timeout); err != nil {
-				shutdownErrors = append(shutdownErrors, fmt.Errorf("event bus shutdown error: %w", err))
-			}
-		}
+	if err := m.shutdownEventBus(ctx); err != nil {
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("event bus: %w", err))
 	}
 
-	// Check context again
-	select {
-	case <-ctx.Done():
-		if len(shutdownErrors) > 0 {
-			return fmt.Errorf("shutdown cancelled: %w (previous errors: %v)", ctx.Err(), shutdownErrors)
+	if ctx.Err() != nil {
+		if len(shutdownErrs) > 0 {
+			return errors.Join(append(shutdownErrs, ctx.Err())...)
 		}
 		return ctx.Err()
-	default:
 	}
 
 	// Shutdown telemetry
-	if m.telemetryCoordinator != nil {
-		m.logger.Info("stopping telemetry")
-		
-		// Use remaining time from context
-		deadline, ok := ctx.Deadline()
-		timeout := 2 * time.Second
-		if ok {
-			timeout = time.Until(deadline)
-			if timeout <= 0 {
-				return ctx.Err()
-			}
-			// Cap timeout at 2 seconds
-			if timeout > 2*time.Second {
-				timeout = 2 * time.Second
-			}
-		}
-		
-		if err := m.telemetryCoordinator.Shutdown(timeout); err != nil {
-			shutdownErrors = append(shutdownErrors, fmt.Errorf("telemetry shutdown error: %w", err))
-		}
+	if err := m.shutdownTelemetry(ctx); err != nil {
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("telemetry: %w", err))
 	}
 
-	if len(shutdownErrors) > 0 {
-		return fmt.Errorf("shutdown errors: %v", shutdownErrors)
+	if len(shutdownErrs) > 0 {
+		return errors.Join(shutdownErrs...)
 	}
 
-	m.logger.Info("system shutdown completed")
+	m.sysLog.Info("system shutdown completed")
 	return nil
 }
 

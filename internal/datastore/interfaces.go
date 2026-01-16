@@ -15,8 +15,6 @@ package datastore
 import (
 	"context"
 	"fmt"
-	"log"
-	"log/slog"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -26,15 +24,33 @@ import (
 	"github.com/google/uuid"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/observability/metrics"
 	"github.com/tphakala/birdnet-go/internal/suncalc" // Import suncalc
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // sunriseSetWindowMinutes defines the time window (in minutes) around sunrise and sunset
 const sunriseSetWindowMinutes = 30
+
+// Database dialect constants.
+const (
+	DialectUnknown = "unknown"
+	DialectSQLite  = "sqlite"
+	DialectMySQL   = "mysql"
+)
+
+// Time-of-day filter constants for detection queries.
+const (
+	TimeOfDayAny     = "any"
+	TimeOfDayDay     = "day"
+	TimeOfDayNight   = "night"
+	TimeOfDaySunrise = "sunrise"
+	TimeOfDaySunset  = "sunset"
+	TimeOfDayUnknown = "unknown"
+)
 
 // Sentinel errors for not found cases
 var (
@@ -46,6 +62,8 @@ var (
 	ErrImageCacheNotFound = errors.Newf("image cache not found").Component("datastore").Category(errors.CategoryNotFound).Build()
 	// ErrNotificationHistoryNotFound indicates no notification history record exists for the given species and type.
 	ErrNotificationHistoryNotFound = errors.Newf("notification history not found").Component("datastore").Category(errors.CategoryNotFound).Build()
+	// ErrDBNotConnected indicates the database is not connected, but partial stats may be available.
+	ErrDBNotConnected = errors.Newf("database not connected").Component("datastore").Category(errors.CategorySystem).Build()
 )
 
 // StoreInterface abstracts the underlying database implementation and defines the interface for database operations.
@@ -116,6 +134,14 @@ type Interface interface {
 	DeleteExpiredDynamicThresholds(before time.Time) (int64, error) // Returns count deleted
 	UpdateDynamicThresholdExpiry(speciesName string, expiresAt time.Time) error
 	BatchSaveDynamicThresholds(thresholds []DynamicThreshold) error
+	DeleteAllDynamicThresholds() (int64, error) // BG-59: Reset all thresholds
+	GetDynamicThresholdStats() (totalCount, activeCount, atMinimumCount int64, levelDistribution map[int]int64, err error)
+	// Threshold Event methods (BG-59: Threshold change history)
+	SaveThresholdEvent(event *ThresholdEvent) error
+	GetThresholdEvents(speciesName string, limit int) ([]ThresholdEvent, error)
+	GetRecentThresholdEvents(limit int) ([]ThresholdEvent, error)
+	DeleteThresholdEvents(speciesName string) error
+	DeleteAllThresholdEvents() (int64, error)
 	// Notification History methods
 	// TODO(BG-17): Add context.Context as first parameter for cancellation/timeout support:
 	//   SaveNotificationHistory(ctx context.Context, history *NotificationHistory) error
@@ -127,6 +153,17 @@ type Interface interface {
 	GetNotificationHistory(scientificName string, notificationType string) (*NotificationHistory, error)
 	GetActiveNotificationHistory(after time.Time) ([]NotificationHistory, error)
 	DeleteExpiredNotificationHistory(before time.Time) (int64, error) // Returns count deleted
+	// Database stats method for runtime statistics
+	GetDatabaseStats() (*DatabaseStats, error)
+}
+
+// DatabaseStats contains basic runtime statistics about the database
+type DatabaseStats struct {
+	Type            string `json:"type"`             // "sqlite" or "mysql"
+	SizeBytes       int64  `json:"size_bytes"`       // Database size in bytes
+	TotalDetections int64  `json:"total_detections"` // Total number of detection records
+	Connected       bool   `json:"connected"`        // Whether database is connected
+	Location        string `json:"location"`         // File path for SQLite, host:port/database for MySQL
 }
 
 // DataStore implements StoreInterface using a GORM database.
@@ -195,11 +232,13 @@ func (ds *DataStore) Save(note *Note, results []Results) error {
 	// Generate a unique transaction ID (first 8 chars of UUID)
 	txID := fmt.Sprintf("tx-%s", uuid.New().String()[:8])
 	txStart := time.Now()
-	txLogger := getLogger().With("tx_id", txID, "operation", "save_note")
+	txLogger := GetLogger()
 
 	txLogger.Debug("Starting transaction",
-		"note_scientific_name", note.ScientificName,
-		"results_count", len(results))
+		logger.String("tx_id", txID),
+		logger.String("operation", "save_note"),
+		logger.String("note_scientific_name", note.ScientificName),
+		logger.Int("results_count", len(results)))
 
 	// Retry configuration
 	maxRetries := 5
@@ -217,8 +256,10 @@ func (ds *DataStore) Save(note *Note, results []Results) error {
 				"table", "notes")
 
 			txLogger.Error("Failed to begin transaction",
-				"error", lastErr,
-				"attempt", attempt+1)
+				logger.String("tx_id", txID),
+				logger.String("operation", "save_note"),
+				logger.Error(lastErr),
+				logger.Int("attempt", attempt+1))
 
 			continue
 		}
@@ -465,9 +506,9 @@ func (ds *DataStore) GetHourFormat() string {
 
 	// Handling for supported databases: SQLite and MySQL
 	switch strings.ToLower(dialector.Name()) {
-	case "sqlite":
+	case DialectSQLite:
 		return "strftime('%H', time)"
-	case "mysql":
+	case DialectMySQL:
 		return "TIME_FORMAT(time, '%H')"
 	default:
 		// Log or handle unsupported database types
@@ -492,9 +533,9 @@ func (ds *DataStore) GetDateTimeExpr(dateCol, timeCol string) string {
 
 	// Handling for supported databases: SQLite and MySQL
 	switch strings.ToLower(dialector.Name()) {
-	case "sqlite":
+	case DialectSQLite:
 		return fmt.Sprintf("datetime(%s || ' ' || %s)", dateCol, timeCol)
-	case "mysql":
+	case DialectMySQL:
 		return fmt.Sprintf("STR_TO_DATE(CONCAT(%s, ' ', %s), '%%Y-%%m-%%d %%H:%%i:%%s')", dateCol, timeCol)
 	default:
 		// Log or handle unsupported database types
@@ -531,9 +572,9 @@ func (ds *DataStore) GetDateFormat(columnName string) string {
 
 	// Handling for supported databases: SQLite and MySQL
 	switch strings.ToLower(dialector.Name()) {
-	case "sqlite":
+	case DialectSQLite:
 		return fmt.Sprintf("date(%s)", columnName)
-	case "mysql":
+	case DialectMySQL:
 		return fmt.Sprintf("DATE(%s)", columnName)
 	default:
 		// Log or handle unsupported database types
@@ -637,7 +678,9 @@ func (ds *DataStore) GetLastDetections(numDetections int) ([]Note, error) {
 	}
 
 	elapsed := time.Since(now)
-	log.Printf("Retrieved %d detections in %v", numDetections, elapsed)
+	GetLogger().Debug("Retrieved detections",
+		logger.Int("count", numDetections),
+		logger.Duration("elapsed", elapsed))
 
 	return notes, nil
 }
@@ -757,26 +800,54 @@ func (ds *DataStore) SaveHourlyWeather(hourlyWeather *HourlyWeather) error {
 }
 
 // GetHourlyWeather retrieves hourly weather data by date from the database.
+// The date parameter should be in local timezone format (YYYY-MM-DD).
+// This function converts UTC timestamps to local time before matching dates,
+// ensuring weather data is retrieved correctly across timezone boundaries.
 func (ds *DataStore) GetHourlyWeather(date string) ([]HourlyWeather, error) {
-	var hourlyWeather []HourlyWeather
+	return ds.GetHourlyWeatherInLocation(date, time.Local)
+}
 
-	// Get database-specific date format
-	dateFormat := ds.GetDateFormat("time")
-	if dateFormat == "" {
-		// Safely get database type for error context
-		dialectName := "unknown"
-		if d := ds.Dialector(); d != nil {
-			dialectName = d.Name()
-		}
-		return nil, errors.Newf("unsupported database type for date formatting").
+// GetHourlyWeatherInLocation retrieves hourly weather data by date using a specific timezone.
+// This is primarily used for testing timezone behavior. In production, use GetHourlyWeather
+// which automatically uses the system's local timezone.
+func (ds *DataStore) GetHourlyWeatherInLocation(date string, loc *time.Location) ([]HourlyWeather, error) {
+	if loc == nil {
+		return nil, errors.Newf("location cannot be nil for GetHourlyWeatherInLocation").
 			Component("datastore").
-			Category(errors.CategoryConfiguration).
-			Context("operation", "get_hourly_weather").
-			Context("database_type", dialectName).
+			Category(errors.CategoryValidation).
+			Context("operation", "get_hourly_weather_in_location").
 			Build()
 	}
 
-	err := ds.DB.Where(dateFormat+" = ?", date).
+	var hourlyWeather []HourlyWeather
+
+	// Parse the requested date to get the day boundaries in the specified timezone
+	localDate, err := time.ParseInLocation("2006-01-02", date, loc)
+	if err != nil {
+		return nil, errors.New(err).
+			Component("datastore").
+			Category(errors.CategoryValidation).
+			Context("operation", "get_hourly_weather_in_location").
+			Context("date", date).
+			Build()
+	}
+
+	// Calculate the start and end of the day in the specified timezone
+	// Use AddDate instead of Add(24*time.Hour) to correctly handle DST transitions
+	// where days can be 23 hours (spring forward) or 25 hours (fall back)
+	dayStart := localDate
+	dayEnd := localDate.AddDate(0, 0, 1)
+
+	// Convert local time boundaries to UTC for database query
+	// Weather records are stored in UTC, so we need to query the UTC range
+	// that corresponds to the local date
+	utcStart := dayStart.UTC()
+	utcEnd := dayEnd.UTC()
+
+	// Query using time range instead of date string extraction
+	// This ensures we get all weather records that fall within the local date,
+	// regardless of timezone differences between storage and display
+	err = ds.DB.Where("time >= ? AND time < ?", utcStart, utcEnd).
 		Order("time ASC").
 		Find(&hourlyWeather).Error
 
@@ -786,6 +857,8 @@ func (ds *DataStore) GetHourlyWeather(date string) ([]HourlyWeather, error) {
 			Category(errors.CategoryDatabase).
 			Context("operation", "get_hourly_weather").
 			Context("date", date).
+			Context("utc_start", utcStart.Format(time.RFC3339)).
+			Context("utc_end", utcEnd.Format(time.RFC3339)).
 			Build()
 	}
 
@@ -959,7 +1032,7 @@ func (ds *DataStore) GetNoteReview(noteID string) (*NoteReview, error) {
 
 	// Use Session to temporarily modify logger config for this query
 	err = ds.DB.Session(&gorm.Session{
-		Logger: ds.DB.Logger.LogMode(logger.Silent),
+		Logger: ds.DB.Logger.LogMode(gormlogger.Silent),
 	}).Where("note_id = ?", id).First(&review).Error
 
 	if err != nil {
@@ -1240,9 +1313,14 @@ func (ds *DataStore) LockNote(noteID string) error {
 			if strings.Contains(strings.ToLower(result.Error.Error()), "database is locked") {
 				// Calculate exponential backoff with jitter
 				baseBackoff := baseDelay * time.Duration(attempt+1)
-				jitter := time.Duration(rand.Float64() * 0.25 * float64(baseBackoff))
+				jitter := time.Duration(rand.Float64() * 0.25 * float64(baseBackoff)) //nolint:gosec // G404: math/rand is fine for jitter, not security-critical
 				delay := baseBackoff + jitter
-				log.Printf("[%s] Database locked, retrying in %v (attempt %d/%d, jitter %v)", txID, delay, attempt+1, maxRetries, jitter)
+				GetLogger().Debug("Database locked, retrying",
+					logger.String("tx_id", txID),
+					logger.Duration("delay", delay),
+					logger.Int("attempt", attempt+1),
+					logger.Int("max_retries", maxRetries),
+					logger.Duration("jitter", jitter))
 				time.Sleep(delay)
 				lastErr = result.Error
 				continue
@@ -1254,7 +1332,9 @@ func (ds *DataStore) LockNote(noteID string) error {
 
 		// If we get here, the transaction was successful
 		if attempt > 0 {
-			log.Printf("[%s] Database transaction successful after %d attempts", txID, attempt+1)
+			GetLogger().Info("Database transaction successful after retries",
+				logger.String("tx_id", txID),
+				logger.Int("attempts", attempt+1))
 		}
 		return nil
 	}
@@ -1302,9 +1382,14 @@ func (ds *DataStore) UnlockNote(noteID string) error {
 			if strings.Contains(strings.ToLower(result.Error.Error()), "database is locked") {
 				// Calculate exponential backoff with jitter
 				baseBackoff := baseDelay * time.Duration(attempt+1)
-				jitter := time.Duration(rand.Float64() * 0.25 * float64(baseBackoff))
+				jitter := time.Duration(rand.Float64() * 0.25 * float64(baseBackoff)) //nolint:gosec // G404: math/rand is fine for jitter, not security-critical
 				delay := baseBackoff + jitter
-				log.Printf("[%s] Database locked, retrying in %v (attempt %d/%d, jitter %v)", txID, delay, attempt+1, maxRetries, jitter)
+				GetLogger().Debug("Database locked, retrying",
+					logger.String("tx_id", txID),
+					logger.Duration("delay", delay),
+					logger.Int("attempt", attempt+1),
+					logger.Int("max_retries", maxRetries),
+					logger.Duration("jitter", jitter))
 				time.Sleep(delay)
 				lastErr = result.Error
 				continue
@@ -1319,7 +1404,9 @@ func (ds *DataStore) UnlockNote(noteID string) error {
 
 		// If we get here, the transaction was successful
 		if attempt > 0 {
-			log.Printf("[%s] Database transaction successful after %d attempts", txID, attempt+1)
+			GetLogger().Info("Database transaction successful after retries",
+				logger.String("tx_id", txID),
+				logger.Int("attempts", attempt+1))
 		}
 		return nil
 	}
@@ -1345,7 +1432,7 @@ func (ds *DataStore) GetImageCache(query ImageCacheQuery) (*ImageCache, error) {
 			Build()
 	}
 	// Use Session to disable logging for this query
-	if err := ds.DB.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).
+	if err := ds.DB.Session(&gorm.Session{Logger: gormlogger.Default.LogMode(gormlogger.Silent)}).
 		Where("scientific_name = ? AND provider_name = ?", query.ScientificName, query.ProviderName).First(&cache).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrImageCacheNotFound
@@ -1367,12 +1454,12 @@ func (ds *DataStore) SaveImageCache(cache *ImageCache) error {
 
 	if cache.ProviderName == "" {
 		err := validationError("provider name cannot be empty", "provider_name", "")
-		getLogger().Error("Invalid image cache data: empty provider name", "error", err)
+		GetLogger().Error("Invalid image cache data: empty provider name", logger.Error(err))
 		return err
 	}
 	if cache.ScientificName == "" {
 		err := validationError("scientific name cannot be empty", "scientific_name", "")
-		getLogger().Error("Invalid image cache data: empty scientific name", "error", err)
+		GetLogger().Error("Invalid image cache data: empty scientific name", logger.Error(err))
 		return err
 	}
 
@@ -1385,9 +1472,9 @@ func (ds *DataStore) SaveImageCache(cache *ImageCache) error {
 		// Detect constraint violations
 		if isConstraintViolation(err) {
 			// This is expected with UPSERT, log at debug level
-			getLogger().Debug("Image cache UPSERT handled constraint",
-				"scientific_name", cache.ScientificName,
-				"provider", cache.ProviderName)
+			GetLogger().Debug("Image cache UPSERT handled constraint",
+				logger.String("scientific_name", cache.ScientificName),
+				logger.String("provider", cache.ProviderName))
 		} else {
 			enhancedErr := dbError(err, "save_image_cache", errors.PriorityMedium,
 				"table", "image_caches",
@@ -1395,8 +1482,8 @@ func (ds *DataStore) SaveImageCache(cache *ImageCache) error {
 				"provider", cache.ProviderName,
 				"action", "cache_species_thumbnail")
 
-			getLogger().Error("Failed to save image cache",
-				"error", enhancedErr)
+			GetLogger().Error("Failed to save image cache",
+				logger.Error(enhancedErr))
 
 			// Record error metric
 			ds.metricsMu.RLock()
@@ -1426,7 +1513,7 @@ func (ds *DataStore) SaveImageCache(cache *ImageCache) error {
 // GetAllImageCaches retrieves all image cache entries for a specific provider
 func (ds *DataStore) GetAllImageCaches(providerName string) ([]ImageCache, error) {
 	var caches []ImageCache
-	if err := ds.DB.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).
+	if err := ds.DB.Session(&gorm.Session{Logger: gormlogger.Default.LogMode(gormlogger.Silent)}).
 		Where("provider_name = ?", providerName).Find(&caches).Error; err != nil {
 		return nil, errors.New(err).
 			Component("datastore").
@@ -1455,12 +1542,14 @@ func (ds *DataStore) GetImageCacheBatch(providerName string, scientificNames []s
 	// Debug logging (controlled by thumbnails debug setting)
 	settings := conf.Setting()
 	if settings.Realtime.Dashboard.Thumbnails.Debug {
-		log.Printf("GetImageCacheBatch: Querying for provider=%s, species=%v", providerName, scientificNames)
+		GetLogger().Debug("GetImageCacheBatch: Querying",
+			logger.String("provider", providerName),
+			logger.Any("species", scientificNames))
 	}
 
 	var caches []ImageCache
 	// Use Session to disable logging for this query and use IN clause for batch lookup
-	if err := ds.DB.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).
+	if err := ds.DB.Session(&gorm.Session{Logger: gormlogger.Default.LogMode(gormlogger.Silent)}).
 		Where("provider_name = ? AND scientific_name IN ?", providerName, scientificNames).
 		Find(&caches).Error; err != nil {
 		return nil, errors.New(err).
@@ -1473,7 +1562,9 @@ func (ds *DataStore) GetImageCacheBatch(providerName string, scientificNames []s
 	}
 
 	if settings.Realtime.Dashboard.Thumbnails.Debug {
-		log.Printf("GetImageCacheBatch: Found %d entries for provider %s", len(caches), providerName)
+		GetLogger().Debug("GetImageCacheBatch: Found entries",
+			logger.Int("count", len(caches)),
+			logger.String("provider", providerName))
 	}
 
 	// Convert to map for easy lookup
@@ -1590,7 +1681,7 @@ func (f *SearchFilters) sanitise() error {
 	}
 	// Validate TimeOfDay
 	switch f.TimeOfDay {
-	case "", "any", "day", "night", "sunrise", "sunset": // Add sunrise/sunset
+	case "", TimeOfDayAny, TimeOfDayDay, TimeOfDayNight, TimeOfDaySunrise, TimeOfDaySunset:
 		// Valid values
 	default:
 		return errors.Newf("invalid time_of_day value, must be 'any', 'day', 'night', 'sunrise', or 'sunset'").
@@ -1638,28 +1729,36 @@ func applyCommonFilters(query *gorm.DB, filters *SearchFilters, ds *DataStore) *
 	}
 
 	// Debug logging for TimeOfDay filter
-	log.Printf("DEBUG: TimeOfDay filter value: '%s', SunCalc is nil: %v, DB is nil: %v",
-		filters.TimeOfDay, ds.SunCalc == nil, ds.DB == nil)
+	GetLogger().Debug("TimeOfDay filter check",
+		logger.String("filter_value", filters.TimeOfDay),
+		logger.Bool("suncalc_nil", ds.SunCalc == nil),
+		logger.Bool("db_nil", ds.DB == nil))
 
 	// --- Dynamic TimeOfDay Filter ---
-	if (filters.TimeOfDay == "day" || filters.TimeOfDay == "night" || filters.TimeOfDay == "sunrise" || filters.TimeOfDay == "sunset") && ds.SunCalc != nil && ds.DB != nil { // Include sunrise/sunset
+	if (filters.TimeOfDay == TimeOfDayDay || filters.TimeOfDay == TimeOfDayNight || filters.TimeOfDay == TimeOfDaySunrise || filters.TimeOfDay == TimeOfDaySunset) && ds.SunCalc != nil && ds.DB != nil { // Include sunrise/sunset
 		dateConditions, err := buildTimeOfDayConditions(filters, ds.SunCalc, ds.DB)
 		switch {
 		case err != nil:
-			log.Printf("WARN: Failed to build TimeOfDay conditions: %v. Skipping filter.", err)
+			GetLogger().Warn("Failed to build TimeOfDay conditions, skipping filter",
+				logger.Error(err))
 		case len(dateConditions) > 0:
-			log.Printf("DEBUG: Successfully built %d TimeOfDay conditions for filter: '%s'", len(dateConditions), filters.TimeOfDay)
+			GetLogger().Debug("Successfully built TimeOfDay conditions",
+				logger.Int("condition_count", len(dateConditions)),
+				logger.String("filter", filters.TimeOfDay))
 			combinedCondition := ds.DB.Where(dateConditions[0])
 			for i := 1; i < len(dateConditions); i++ {
 				combinedCondition = combinedCondition.Or(dateConditions[i])
 			}
 			query = query.Where(combinedCondition)
 		default:
-			log.Printf("DEBUG: No TimeOfDay conditions were generated for filter: '%s'", filters.TimeOfDay)
+			GetLogger().Debug("No TimeOfDay conditions were generated",
+				logger.String("filter", filters.TimeOfDay))
 		}
 	} else {
-		log.Printf("DEBUG: Skipping TimeOfDay filter: filters.TimeOfDay=%s, SunCalc==nil=%v, DB==nil=%v",
-			filters.TimeOfDay, ds.SunCalc == nil, ds.DB == nil)
+		GetLogger().Debug("Skipping TimeOfDay filter",
+			logger.String("filter_value", filters.TimeOfDay),
+			logger.Bool("suncalc_nil", ds.SunCalc == nil),
+			logger.Bool("db_nil", ds.DB == nil))
 	} // --- End Dynamic TimeOfDay Filter ---
 
 	if filters.Device != "" {
@@ -1681,8 +1780,9 @@ func buildTimeOfDayConditions(filters *SearchFilters, sc *suncalc.SunCalc, db *g
 		today := time.Now()
 		endDateStr = today.Format("2006-01-02")
 		startDateStr = today.AddDate(-1, 0, 0).Format("2006-01-02") // 1 year ago
-		log.Printf("INFO: TimeOfDay filter applied without date range, defaulting to last year (%s to %s)",
-			startDateStr, endDateStr)
+		GetLogger().Info("TimeOfDay filter applied without date range, defaulting to last year",
+			logger.String("start_date", startDateStr),
+			logger.String("end_date", endDateStr))
 	case startDateStr == "":
 		// If only end date is provided, use 1 year before that date as start
 		endDate, err := time.Parse("2006-01-02", endDateStr)
@@ -1787,8 +1887,10 @@ func buildTimeOfDayConditions(filters *SearchFilters, sc *suncalc.SunCalc, db *g
 		representativeDay := weekData.dateRange[len(weekData.dateRange)/2]
 		sunTimes, err := sc.GetSunEventTimes(representativeDay)
 		if err != nil {
-			log.Printf("WARN: Could not get sun times for week %d-%d: %v. Skipping week for TimeOfDay filter.",
-				weekData.year, weekData.week, err)
+			GetLogger().Warn("Could not get sun times for week, skipping for TimeOfDay filter",
+				logger.Int("year", weekData.year),
+				logger.Int("week", weekData.week),
+				logger.Error(err))
 			continue
 		}
 		weekData.sunTimes = sunTimes
@@ -1803,32 +1905,33 @@ func buildTimeOfDayConditions(filters *SearchFilters, sc *suncalc.SunCalc, db *g
 		// Get the sun times for this week
 		weekData, exists := weeklySunCache[key]
 		if !exists || weekData == nil {
-			log.Printf("WARN: No sun times found for week %d-%d. Skipping date %s for TimeOfDay filter.",
-				year, week, dateStr)
+			GetLogger().Warn("No sun times found for week, skipping date for TimeOfDay filter",
+				logger.Int("year", year),
+				logger.Int("week", week),
+				logger.String("date", dateStr))
 			continue
 		}
 
 		sunTimes := weekData.sunTimes
-		sunriseStr := sunTimes.Sunrise.Format("15:04:05")
-		sunsetStr := sunTimes.Sunset.Format("15:04:05")
+
+		// Calculate all time boundaries once before the switch statement
+		// This reduces code duplication and makes maintenance easier
+		sunriseStart := sunTimes.Sunrise.Add(-window).Format("15:04:05")
+		sunriseEnd := sunTimes.Sunrise.Add(window).Format("15:04:05")
+		sunsetStart := sunTimes.Sunset.Add(-window).Format("15:04:05")
+		sunsetEnd := sunTimes.Sunset.Add(window).Format("15:04:05")
 
 		var condition *gorm.DB
 		switch filters.TimeOfDay {
-		case "day":
-			// Exclude the sunrise and sunset windows (30 minutes before and after)
-			sunriseEnd := sunTimes.Sunrise.Add(window).Format("15:04:05")
-			sunsetStart := sunTimes.Sunset.Add(-window).Format("15:04:05")
+		case TimeOfDayDay:
 			// Time should be after sunrise window but before sunset window
 			condition = db.Where("notes.date = ? AND notes.time > ? AND notes.time < ?", dateStr, sunriseEnd, sunsetStart)
-		case "night":
-			condition = db.Where("notes.date = ? AND (notes.time < ? OR notes.time > ?)", dateStr, sunriseStr, sunsetStr)
-		case "sunrise":
-			sunriseStart := sunTimes.Sunrise.Add(-window).Format("15:04:05")
-			sunriseEnd := sunTimes.Sunrise.Add(window).Format("15:04:05")
+		case TimeOfDayNight:
+			// Time should be before sunrise window or after sunset window
+			condition = db.Where("notes.date = ? AND (notes.time < ? OR notes.time > ?)", dateStr, sunriseStart, sunsetEnd)
+		case TimeOfDaySunrise:
 			condition = db.Where("notes.date = ? AND notes.time >= ? AND notes.time <= ?", dateStr, sunriseStart, sunriseEnd)
-		case "sunset":
-			sunsetStart := sunTimes.Sunset.Add(-window).Format("15:04:05")
-			sunsetEnd := sunTimes.Sunset.Add(window).Format("15:04:05")
+		case TimeOfDaySunset:
 			condition = db.Where("notes.date = ? AND notes.time >= ? AND notes.time <= ?", dateStr, sunsetStart, sunsetEnd)
 		default:
 			// Should not happen due to sanitise, but skip if it does
@@ -1838,8 +1941,9 @@ func buildTimeOfDayConditions(filters *SearchFilters, sc *suncalc.SunCalc, db *g
 	}
 
 	// Log summary of how many conditions were created
-	log.Printf("INFO: Created %d date-specific conditions for TimeOfDay filter over a %d day range",
-		len(conditions), int(endDate.Sub(startDate).Hours()/24)+1)
+	GetLogger().Info("Created date-specific conditions for TimeOfDay filter",
+		logger.Int("condition_count", len(conditions)),
+		logger.Int("day_range", int(endDate.Sub(startDate).Hours()/24)+1))
 
 	return conditions, nil
 }
@@ -1952,7 +2056,11 @@ func (ds *DataStore) SearchDetections(filters *SearchFilters) ([]DetectionRecord
 		// consistent timezone handling across all database time parsing operations
 		timestamp, err := time.ParseInLocation("2006-01-02 15:04:05", scanned.Date+" "+scanned.Time, time.Local)
 		if err != nil {
-			log.Printf("Warning: Failed to parse timestamp '%s %s' for note ID %d: %v. Using current time.", scanned.Date, scanned.Time, scanned.ID, err)
+			GetLogger().Warn("Failed to parse timestamp, using current time",
+				logger.String("date", scanned.Date),
+				logger.String("time", scanned.Time),
+				logger.Uint64("note_id", uint64(scanned.ID)),
+				logger.Error(err))
 			timestamp = time.Now() // Fallback
 		}
 
@@ -1963,7 +2071,7 @@ func (ds *DataStore) SearchDetections(filters *SearchFilters) ([]DetectionRecord
 		}
 
 		// Calculate time of day
-		timeOfDay := "unknown"
+		timeOfDay := TimeOfDayUnknown
 		if ds.SunCalc != nil {
 			// Get date string for cache key
 			dateStr := scanned.Date
@@ -1985,13 +2093,13 @@ func (ds *DataStore) SearchDetections(filters *SearchFilters) ([]DetectionRecord
 
 				switch {
 				case detTime >= sunriseStart && detTime <= sunriseEnd:
-					timeOfDay = "sunrise"
+					timeOfDay = TimeOfDaySunrise
 				case detTime >= sunsetStart && detTime <= sunsetEnd:
-					timeOfDay = "sunset"
+					timeOfDay = TimeOfDaySunset
 				case detTime >= sunriseTime && detTime < sunsetTime:
-					timeOfDay = "day"
+					timeOfDay = TimeOfDayDay
 				default:
-					timeOfDay = "night"
+					timeOfDay = TimeOfDayNight
 				}
 			}
 		}
@@ -2062,7 +2170,7 @@ func (ds *DataStore) cacheSunTimes(dateStr string, sunTimes *suncalc.SunEventTim
 // Helper functions for Save method to reduce cognitive complexity
 
 // saveNoteInTransaction saves a note within a transaction
-func (ds *DataStore) saveNoteInTransaction(tx *gorm.DB, note *Note, txID string, attempt int, txLogger *slog.Logger) error {
+func (ds *DataStore) saveNoteInTransaction(tx *gorm.DB, note *Note, txID string, attempt int, txLogger logger.Logger) error {
 	if err := tx.Create(note).Error; err != nil {
 		enhancedErr := errors.New(err).
 			Component("datastore").
@@ -2075,9 +2183,9 @@ func (ds *DataStore) saveNoteInTransaction(tx *gorm.DB, note *Note, txID string,
 			Build()
 
 		txLogger.Error("Failed to save note",
-			"error", enhancedErr,
-			"note_id", note.ID,
-			"scientific_name", note.ScientificName)
+			logger.Error(enhancedErr),
+			logger.Any("note_id", note.ID),
+			logger.String("scientific_name", note.ScientificName))
 
 		// Record error metric
 		ds.metricsMu.RLock()
@@ -2103,7 +2211,7 @@ func (ds *DataStore) saveNoteInTransaction(tx *gorm.DB, note *Note, txID string,
 }
 
 // saveResultsInTransaction saves results within a transaction
-func (ds *DataStore) saveResultsInTransaction(tx *gorm.DB, results []Results, noteID uint, txID string, attempt int, txLogger *slog.Logger) error {
+func (ds *DataStore) saveResultsInTransaction(tx *gorm.DB, results []Results, noteID uint, txID string, attempt int, txLogger logger.Logger) error {
 	for i, result := range results {
 		result.NoteID = noteID
 		if err := tx.Create(&result).Error; err != nil {
@@ -2118,9 +2226,9 @@ func (ds *DataStore) saveResultsInTransaction(tx *gorm.DB, results []Results, no
 				Build()
 
 			txLogger.Error("Failed to save result",
-				"error", enhancedErr,
-				"note_id", noteID,
-				"result_index", i)
+				logger.Error(enhancedErr),
+				logger.Any("note_id", noteID),
+				logger.Int("result_index", i))
 
 			ds.metricsMu.RLock()
 			metricsInstance := ds.metrics
@@ -2136,7 +2244,7 @@ func (ds *DataStore) saveResultsInTransaction(tx *gorm.DB, results []Results, no
 }
 
 // commitTransactionWithMetrics commits a transaction and records metrics
-func (ds *DataStore) commitTransactionWithMetrics(tx *gorm.DB, txID string, attempt int, txLogger *slog.Logger) error {
+func (ds *DataStore) commitTransactionWithMetrics(tx *gorm.DB, txID string, attempt int, txLogger logger.Logger) error {
 	if err := tx.Commit().Error; err != nil {
 		// Commit failures are critical as they can lead to data loss
 		priority := errors.PriorityHigh
@@ -2150,7 +2258,7 @@ func (ds *DataStore) commitTransactionWithMetrics(tx *gorm.DB, txID string, atte
 			"action", "finalize_detection_save")
 
 		txLogger.Error("Failed to commit transaction",
-			"error", enhancedErr)
+			logger.Error(enhancedErr))
 
 		ds.metricsMu.RLock()
 		metricsInstance := ds.metrics
@@ -2175,18 +2283,18 @@ func (ds *DataStore) commitTransactionWithMetrics(tx *gorm.DB, txID string, atte
 }
 
 // handleDatabaseLockError handles database lock errors with backoff
-func (ds *DataStore) handleDatabaseLockError(attempt, maxRetries int, baseDelay time.Duration, txLogger *slog.Logger) {
+func (ds *DataStore) handleDatabaseLockError(attempt, maxRetries int, baseDelay time.Duration, txLogger logger.Logger) {
 	// Calculate exponential backoff with jitter to avoid thundering herd
 	baseBackoff := baseDelay * time.Duration(attempt+1)
 	// Add 0-25% jitter to the base backoff
-	jitter := time.Duration(rand.Float64() * 0.25 * float64(baseBackoff))
+	jitter := time.Duration(rand.Float64() * 0.25 * float64(baseBackoff)) //nolint:gosec // G404: math/rand is fine for jitter, not security-critical
 	delay := baseBackoff + jitter
 
 	txLogger.Warn("Database locked, scheduling retry",
-		"attempt", attempt+1,
-		"max_attempts", maxRetries,
-		"backoff_ms", delay.Milliseconds(),
-		"jitter_ms", jitter.Milliseconds())
+		logger.Int("attempt", attempt+1),
+		logger.Int("max_attempts", maxRetries),
+		logger.Int64("backoff_ms", delay.Milliseconds()),
+		logger.Int64("jitter_ms", jitter.Milliseconds()))
 
 	// Record retry metric
 	ds.metricsMu.RLock()
@@ -2200,7 +2308,7 @@ func (ds *DataStore) handleDatabaseLockError(attempt, maxRetries int, baseDelay 
 }
 
 // executeTransaction executes the save operations within a transaction
-func (ds *DataStore) executeTransaction(tx *gorm.DB, note *Note, results []Results, txID string, attempt int, txLogger *slog.Logger) error {
+func (ds *DataStore) executeTransaction(tx *gorm.DB, note *Note, results []Results, txID string, attempt int, txLogger logger.Logger) error {
 	// Set up panic recovery with rollback
 	defer func() {
 		if r := recover(); r != nil {
@@ -2238,12 +2346,12 @@ func (ds *DataStore) executeTransaction(tx *gorm.DB, note *Note, results []Resul
 }
 
 // recordTransactionSuccess records success metrics for a transaction
-func (ds *DataStore) recordTransactionSuccess(txStart time.Time, attempts, resultsCount int, txLogger *slog.Logger) {
+func (ds *DataStore) recordTransactionSuccess(txStart time.Time, attempts, resultsCount int, txLogger logger.Logger) {
 	duration := time.Since(txStart)
 	txLogger.Info("Transaction completed",
-		"duration", duration,
-		"attempts", attempts,
-		"rows_affected", 1+resultsCount)
+		logger.Duration("duration", duration),
+		logger.Int("attempts", attempts),
+		logger.Int("rows_affected", 1+resultsCount))
 
 	// Record success metrics
 	ds.metricsMu.RLock()
@@ -2258,7 +2366,7 @@ func (ds *DataStore) recordTransactionSuccess(txStart time.Time, attempts, resul
 }
 
 // handleMaxRetriesExhausted handles the case when all retries are exhausted
-func (ds *DataStore) handleMaxRetriesExhausted(lastErr error, txID string, txStart time.Time, txLogger *slog.Logger) error {
+func (ds *DataStore) handleMaxRetriesExhausted(lastErr error, txID string, txStart time.Time, txLogger logger.Logger) error {
 	enhancedErr := stateError(lastErr, "save_transaction", "transaction_retry_exhausted",
 		"tx_id", txID,
 		"max_retries_exhausted", "true",
@@ -2266,8 +2374,8 @@ func (ds *DataStore) handleMaxRetriesExhausted(lastErr error, txID string, txSta
 		"total_duration_ms", time.Since(txStart).Milliseconds())
 
 	txLogger.Error("Transaction failed after max retries",
-		"error", enhancedErr,
-		"total_duration", time.Since(txStart))
+		logger.Error(enhancedErr),
+		logger.Duration("total_duration", time.Since(txStart)))
 
 	// Record failure metrics
 	ds.metricsMu.RLock()

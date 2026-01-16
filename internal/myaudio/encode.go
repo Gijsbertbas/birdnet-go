@@ -3,7 +3,6 @@ package myaudio
 import (
 	"bytes"
 	"encoding/binary"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/go-audio/wav"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // seekableBuffer extends bytes.Buffer to add a Seek method, making it compatible with io.WriteSeeker.
@@ -41,6 +41,7 @@ func recordFileOperationErrorWithValidation(operation, format, errorType, valida
 
 // SavePCMDataToWAV saves the given PCM data as a WAV file at the specified filePath.
 func SavePCMDataToWAV(filePath string, pcmData []byte) error {
+	log := GetLogger()
 	start := time.Now()
 
 	// Validate inputs
@@ -81,7 +82,7 @@ func SavePCMDataToWAV(filePath string, pcmData []byte) error {
 	}
 
 	// Create the directory structure if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
 		enhancedErr := errors.New(err).
 			Component("myaudio").
 			Category(errors.CategoryFileIO).
@@ -93,7 +94,7 @@ func SavePCMDataToWAV(filePath string, pcmData []byte) error {
 	}
 
 	// Open a new file for writing
-	outFile, err := os.Create(filePath)
+	outFile, err := os.Create(filePath) //nolint:gosec // G304: filePath is programmatically constructed from settings
 	if err != nil {
 		enhancedErr := errors.New(err).
 			Component("myaudio").
@@ -106,7 +107,9 @@ func SavePCMDataToWAV(filePath string, pcmData []byte) error {
 	}
 	defer func() {
 		if err := outFile.Close(); err != nil {
-			log.Printf("Failed to close WAV file: %v", err)
+			log.Warn("failed to close WAV file",
+				logger.Error(err),
+				logger.String("file_path", filePath))
 		}
 	}()
 

@@ -177,11 +177,11 @@ describe('LoginModal', () => {
       loginModalTest.render({
         isOpen: true,
         onClose: vi.fn(),
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: '' } });
 
@@ -198,10 +198,10 @@ describe('LoginModal', () => {
       loginModalTest.render({
         isOpen: true,
         onClose: vi.fn(),
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
+      const passwordInput = screen.getByLabelText('auth.password');
 
       // Test with null byte (ASCII 0) which won't be trimmed
       const passwordWithNull = `password${String.fromCharCode(0)}test`;
@@ -210,7 +210,7 @@ describe('LoginModal', () => {
       await fireEvent.input(passwordInput, { target: { value: passwordWithNull } });
 
       // Attempt to submit
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
       await fireEvent.click(loginButton);
 
       // Add a small delay to let any async operations complete
@@ -229,10 +229,10 @@ describe('LoginModal', () => {
       loginModalTest.render({
         isOpen: true,
         onClose: vi.fn(),
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
+      const passwordInput = screen.getByLabelText('auth.password');
       await fireEvent.input(passwordInput, { target: { value: `password\t` } });
 
       expect(passwordInput).toBeDefined();
@@ -242,10 +242,10 @@ describe('LoginModal', () => {
       loginModalTest.render({
         isOpen: true,
         onClose: vi.fn(),
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
+      const passwordInput = screen.getByLabelText('auth.password');
       const longPassword = 'a'.repeat(513); // Exceeds MAX_PASSWORD_LENGTH (512)
 
       await fireEvent.input(passwordInput, { target: { value: longPassword } });
@@ -263,13 +263,12 @@ describe('LoginModal', () => {
         onClose: vi.fn(),
         authConfig: {
           basicEnabled: false,
-          googleEnabled: true,
-          githubEnabled: true,
+          enabledProviders: ['google', 'github'],
         },
       });
 
-      const googleButton = screen.getByRole('button', { name: /login with google/i });
-      const githubButton = screen.getByRole('button', { name: /login with github/i });
+      const googleButton = screen.getByRole('button', { name: /continueWithGoogle/i });
+      const githubButton = screen.getByRole('button', { name: /continueWithGithub/i });
 
       expect(googleButton).toBeDefined();
       expect(githubButton).toBeDefined();
@@ -281,17 +280,16 @@ describe('LoginModal', () => {
         onClose: vi.fn(),
         authConfig: {
           basicEnabled: false,
-          googleEnabled: true,
-          githubEnabled: true,
+          enabledProviders: ['google', 'github'],
           endpoints: {
-            google: '/api/v1/auth/custom-google',
-            github: '/api/v1/auth/custom-github',
+            google: '/api/v2/auth/custom-google',
+            github: '/api/v2/auth/custom-github',
           },
         },
       });
 
-      const googleButton = screen.getByRole('button', { name: /login with google/i });
-      const githubButton = screen.getByRole('button', { name: /login with github/i });
+      const googleButton = screen.getByRole('button', { name: /continueWithGoogle/i });
+      const githubButton = screen.getByRole('button', { name: /continueWithGithub/i });
 
       expect(googleButton).toBeDefined();
       expect(githubButton).toBeDefined();
@@ -305,15 +303,14 @@ describe('LoginModal', () => {
         onClose: vi.fn(),
         authConfig: {
           basicEnabled: false,
-          googleEnabled: true,
-          githubEnabled: false,
+          enabledProviders: ['google'],
           endpoints: {
             google: '/malicious/endpoint',
           },
         },
       });
 
-      const googleButton = screen.getByRole('button', { name: /login with google/i });
+      const googleButton = screen.getByRole('button', { name: /continueWithGoogle/i });
 
       // Click the button
       await fireEvent.click(googleButton);
@@ -344,7 +341,7 @@ describe('LoginModal', () => {
         onClose: vi.fn(),
       });
 
-      const title = screen.getByText('Login to BirdNET-Go');
+      const title = screen.getByText('auth.loginTitle');
       expect(title).toHaveAttribute('id', 'modal-title');
     });
 
@@ -398,11 +395,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/ui/dashboard', // Full path with base
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -431,11 +428,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/ui/analytics/species',
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -462,11 +459,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/ui/settings/main',
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -493,11 +490,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/custom/path', // Different from base path
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -524,11 +521,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/ui/', // Exactly matches base path
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -555,11 +552,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/app/settings',
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -588,11 +585,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/ui/dashboard',
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -624,11 +621,11 @@ describe('LoginModal', () => {
       loginModalTest.render({
         isOpen: true,
         onClose: vi.fn(),
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
       // Submit form by clicking the submit button since form role may not be recognized
-      const submitButton = screen.getByRole('button', { name: /login with password/i });
+      const submitButton = screen.getByRole('button', { name: /continue with password/i });
       await fireEvent.click(submitButton);
 
       // Should not call API with empty password
@@ -641,7 +638,7 @@ describe('LoginModal', () => {
       postSpy.mockResolvedValue({
         success: true,
         message: 'Login successful',
-        redirectUrl: '/api/v1/oauth2/callback?code=123&redirect=/ui/',
+        redirectUrl: '/api/v2/auth/callback?code=123&redirect=/ui/',
       });
 
       mockWindowLocation();
@@ -649,11 +646,11 @@ describe('LoginModal', () => {
       loginModalTest.render({
         isOpen: true,
         onClose: vi.fn(),
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -677,11 +674,11 @@ describe('LoginModal', () => {
       loginModalTest.render({
         isOpen: true,
         onClose: vi.fn(),
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'wrong-password' } });
       await fireEvent.click(loginButton);
@@ -710,11 +707,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: onCloseMock,
         redirectUrl: '/ui/analytics/species', // User was on analytics/species page
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       // Perform login
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
@@ -752,18 +749,18 @@ describe('LoginModal', () => {
       postSpy.mockResolvedValue({
         success: true,
         message: 'Login successful',
-        redirectUrl: '/api/v1/oauth2/callback?code=123&state=settings%2Fmain', // OAuth callback
+        redirectUrl: '/api/v2/auth/callback?code=123&state=settings%2Fmain', // OAuth callback
       });
 
       loginModalTest.render({
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/ui/settings/main', // User was on settings page
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       // Perform login
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
@@ -781,7 +778,7 @@ describe('LoginModal', () => {
       });
 
       // Verify OAuth redirect happens immediately
-      expect(mockLocation.href).toBe('/api/v1/oauth2/callback?code=123&state=settings%2Fmain');
+      expect(mockLocation.href).toBe('/api/v2/auth/callback?code=123&state=settings%2Fmain');
     });
 
     it('should handle edge case of user on root path', async () => {
@@ -795,11 +792,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/ui/', // User on root UI path
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -826,11 +823,11 @@ describe('LoginModal', () => {
         isOpen: true,
         onClose: vi.fn(),
         redirectUrl: '/ui/detections/12345', // Detection detail page
-        authConfig: { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+        authConfig: { basicEnabled: true, enabledProviders: [] },
       });
 
-      const passwordInput = screen.getByLabelText('Password');
-      const loginButton = screen.getByRole('button', { name: /login with password/i });
+      const passwordInput = screen.getByLabelText('auth.password');
+      const loginButton = screen.getByRole('button', { name: /continue with password/i });
 
       await fireEvent.input(passwordInput, { target: { value: 'valid-password' } });
       await fireEvent.click(loginButton);
@@ -855,7 +852,7 @@ describe('LoginModal', () => {
       });
 
       // Should render with default auth config (basic auth enabled)
-      expect(screen.getByLabelText('Password')).toBeInTheDocument();
+      expect(screen.getByLabelText('auth.password')).toBeInTheDocument();
     });
 
     it('should respect custom redirectUrl prop', () => {
@@ -875,14 +872,13 @@ describe('LoginModal', () => {
         onClose: vi.fn(),
         authConfig: {
           basicEnabled: false,
-          googleEnabled: true,
-          githubEnabled: false,
+          enabledProviders: ['google'],
         },
       });
 
-      expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /login with google/i })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: /login with github/i })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('auth.password')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /continueWithGoogle/i })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /continueWithGithub/i })).not.toBeInTheDocument();
     });
   });
 });

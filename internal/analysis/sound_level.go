@@ -4,24 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
-	"log/slog"
 	"math"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
-	api "github.com/tphakala/birdnet-go/internal/api/v2"
+	apiv2 "github.com/tphakala/birdnet-go/internal/api/v2"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/errors"
-	"github.com/tphakala/birdnet-go/internal/httpcontroller"
-	"github.com/tphakala/birdnet-go/internal/logging"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observability"
-	"github.com/tphakala/birdnet-go/internal/observability/metrics"
 	"github.com/tphakala/birdnet-go/internal/privacy"
 )
 
@@ -39,60 +34,10 @@ const (
 	errMsgNoOctaveBandData = "no octave band data"
 )
 
-// Package-level logger for sound level monitoring
-var (
-	soundLevelLogger    *slog.Logger
-	soundLoggerOnce     sync.Once
-	serviceLevelVar     = new(slog.LevelVar) // Dynamic level control
-	soundLevelCloseFunc func() error
-)
-
-// getSoundLevelLogger returns the sound level logger, initializing it if necessary
-func getSoundLevelLogger() *slog.Logger {
-	soundLoggerOnce.Do(func() {
-		var err error
-		// Define log file path relative to working directory
-		logFilePath := filepath.Join("logs", "soundlevel.log")
-		// Set initial level based on debug flag
-		initialLevel := slog.LevelInfo
-		if conf.Setting().Realtime.Audio.SoundLevel.Debug {
-			initialLevel = slog.LevelDebug
-		}
-		serviceLevelVar.Set(initialLevel)
-
-		// Initialize the service-specific file logger
-		soundLevelLogger, soundLevelCloseFunc, err = logging.NewFileLogger(logFilePath, "analysis.soundlevel", serviceLevelVar)
-		if err != nil {
-			// Fallback: Use main analysis logger and log the issue
-			mainLogger := GetLogger() // Get the main analysis logger
-			if mainLogger != nil {
-				soundLevelLogger = mainLogger.With("subsystem", "sound-level")
-				soundLevelLogger.Warn("Failed to initialize sound level file logger, using fallback",
-					"error", err,
-					"log_path", logFilePath,
-					"service", "analysis.soundlevel")
-			} else {
-				// Ultimate fallback to default logger if even the main logger isn't available
-				soundLevelLogger = slog.Default().With("service", "analysis.soundlevel")
-			}
-			soundLevelCloseFunc = func() error { return nil } // No-op closer
-		}
-	})
-	return soundLevelLogger
-}
-
-// getSoundLevelServiceLevelVar returns the service level var for dynamic log level control
-func getSoundLevelServiceLevelVar() *slog.LevelVar {
-	return serviceLevelVar
-}
-
-// CloseSoundLevelLogger closes the sound level file logger and releases resources
-// This should be called during component shutdown to ensure proper cleanup of file handles
-func CloseSoundLevelLogger() error {
-	if soundLevelCloseFunc != nil {
-		return soundLevelCloseFunc()
-	}
-	return nil
+// getSoundLevelLogger returns the sound level logger.
+// Fetched dynamically to ensure it uses the current centralized logger.
+func getSoundLevelLogger() logger.Logger {
+	return logger.Global().Module("analysis").Module("soundlevel")
 }
 
 // sanitizeSoundLevelData replaces non-finite float values (Inf, -Inf, NaN) with valid placeholders
@@ -102,8 +47,8 @@ func sanitizeSoundLevelData(data myaudio.SoundLevelData) myaudio.SoundLevelData 
 	// Create a copy to avoid modifying the original
 	sanitized := myaudio.SoundLevelData{
 		Timestamp:   data.Timestamp,
-		Source:      sanitizeString(data.Source, "unknown"),
-		Name:        sanitizeString(data.Name, "unknown"),
+		Source:      stringOrDefault(data.Source, "unknown"),
+		Name:        stringOrDefault(data.Name, "unknown"),
 		Duration:    data.Duration,
 		OctaveBands: make(map[string]myaudio.OctaveBandData),
 	}
@@ -140,18 +85,17 @@ func sanitizeSoundLevelData(data myaudio.SoundLevelData) myaudio.SoundLevelData 
 		if conf.Setting().Realtime.Audio.SoundLevel.Debug && conf.Setting().Realtime.Audio.SoundLevel.DebugRealtimeLogging {
 			if band.Min != sanitizedBand.Min || band.Max != sanitizedBand.Max ||
 				band.Mean != sanitizedBand.Mean || key != normalizedKey {
-				if logger := getSoundLevelLogger(); logger != nil {
-					logger.Debug("sanitized and polished octave band data",
-						"original_band", key,
-						"normalized_band", normalizedKey,
-						"center_freq", band.CenterFreq,
-						"original_min", band.Min,
-						"original_max", band.Max,
-						"original_mean", band.Mean,
-						"sanitized_min", sanitizedBand.Min,
-						"sanitized_max", sanitizedBand.Max,
-						"sanitized_mean", sanitizedBand.Mean)
-				}
+				lg := getSoundLevelLogger()
+				lg.Debug("sanitized and polished octave band data",
+					logger.String("original_band", key),
+					logger.String("normalized_band", normalizedKey),
+					logger.Float64("center_freq", band.CenterFreq),
+					logger.Float64("original_min", band.Min),
+					logger.Float64("original_max", band.Max),
+					logger.Float64("original_mean", band.Mean),
+					logger.Float64("sanitized_min", sanitizedBand.Min),
+					logger.Float64("sanitized_max", sanitizedBand.Max),
+					logger.Float64("sanitized_mean", sanitizedBand.Mean))
 			}
 		}
 	}
@@ -174,8 +118,9 @@ func sanitizeFloat64(value, defaultValue float64) float64 {
 	return value
 }
 
-// sanitizeString ensures a string is not empty
-func sanitizeString(value, defaultValue string) string {
+// stringOrDefault returns the value if non-empty, otherwise returns the default.
+// This is a simple helper for providing fallback values, not for security sanitization.
+func stringOrDefault(value, defaultValue string) string {
 	if value == "" {
 		return defaultValue
 	}
@@ -376,21 +321,20 @@ func startSoundLevelMQTTPublisher(wg *sync.WaitGroup, quitChan <-chan struct{}, 
 				// Log received sound level data if debug is enabled
 				// This is logged at interval rate, not realtime
 				if conf.Setting().Realtime.Audio.SoundLevel.Debug {
-					if logger := getSoundLevelLogger(); logger != nil {
-						logger.Debug("received sound level data",
-							"source", soundData.Source,
-							"name", soundData.Name,
-							"timestamp", soundData.Timestamp,
-							"duration", soundData.Duration,
-							"bands_count", len(soundData.OctaveBands))
-					}
+					lg := getSoundLevelLogger()
+					lg.Debug("received sound level data",
+						logger.String("source", soundData.Source),
+						logger.String("name", soundData.Name),
+						logger.Time("timestamp", soundData.Timestamp),
+						logger.Int("duration", soundData.Duration),
+						logger.Int("bands_count", len(soundData.OctaveBands)))
 				}
 				// Publish sound level data to MQTT
 				if err := publishSoundLevelToMQTT(soundData, proc); err != nil {
 					getSoundLevelLogger().Error("Failed to publish sound level data to MQTT",
-						"error", err,
-						"source", soundData.Source,
-						"name", soundData.Name)
+						logger.Error(err),
+						logger.String("source", soundData.Source),
+						logger.String("name", soundData.Name))
 				}
 			}
 		}
@@ -409,11 +353,10 @@ func publishSoundLevelToMQTT(soundData myaudio.SoundLevelData, proc *processor.P
 	if err := validateSoundLevelData(&soundData); err != nil {
 		// Log validation error if debug enabled
 		if settings.Realtime.Audio.SoundLevel.Debug {
-			if logger := getSoundLevelLogger(); logger != nil {
-				logger.Debug("sound level data validation failed",
-					"source", soundData.Source,
-					"error", err)
-			}
+			lg := getSoundLevelLogger()
+			lg.Debug("sound level data validation failed",
+				logger.String("source", soundData.Source),
+				logger.Error(err))
 		}
 		return err
 	}
@@ -478,29 +421,28 @@ func publishSoundLevelToMQTT(soundData myaudio.SoundLevelData, proc *processor.P
 	// Log detailed sound level data if debug is enabled
 	// These logs are for publishing events, not realtime processing
 	if settings.Realtime.Audio.SoundLevel.Debug {
-		if logger := getSoundLevelLogger(); logger != nil {
-			logger.Debug("published sound level data to MQTT",
-				"topic", topic,
-				"source", soundData.Source,
-				"name", soundData.Name,
-				"json_size", len(jsonData),
-				"octave_bands", len(soundData.OctaveBands),
-				"component", "analysis.soundlevel",
-				"operation", "publish_mqtt")
+		lg := getSoundLevelLogger()
+		lg.Debug("published sound level data to MQTT",
+			logger.String("topic", topic),
+			logger.String("source", soundData.Source),
+			logger.String("name", soundData.Name),
+			logger.Int("json_size", len(jsonData)),
+			logger.Int("octave_bands", len(soundData.OctaveBands)),
+			logger.String("component", "analysis.soundlevel"),
+			logger.String("operation", "publish_mqtt"))
 
-			// Log each octave band's values only if realtime logging is enabled
-			if settings.Realtime.Audio.SoundLevel.DebugRealtimeLogging {
-				for band, data := range sanitizedData.OctaveBands {
-					logger.Debug("octave band values",
-						"band", band,
-						"center_freq", data.CenterFreq,
-						"min_db", data.Min,
-						"max_db", data.Max,
-						"mean_db", data.Mean,
-						"sample_count", data.SampleCount,
-						"component", "analysis.soundlevel",
-						"operation", "log_octave_bands")
-				}
+		// Log each octave band's values only if realtime logging is enabled
+		if settings.Realtime.Audio.SoundLevel.DebugRealtimeLogging {
+			for band, data := range sanitizedData.OctaveBands {
+				lg.Debug("octave band values",
+					logger.String("band", band),
+					logger.Float64("center_freq", data.CenterFreq),
+					logger.Float64("min_db", data.Min),
+					logger.Float64("max_db", data.Max),
+					logger.Float64("mean_db", data.Mean),
+					logger.Int("sample_count", data.SampleCount),
+					logger.String("component", "analysis.soundlevel"),
+					logger.String("operation", "log_octave_bands"))
 			}
 		}
 	}
@@ -509,7 +451,7 @@ func publishSoundLevelToMQTT(soundData myaudio.SoundLevelData, proc *processor.P
 }
 
 // startSoundLevelPublishers starts all sound level publishers with the given done channel
-func startSoundLevelPublishers(wg *sync.WaitGroup, doneChan chan struct{}, proc *processor.Processor, soundLevelChan chan myaudio.SoundLevelData, httpServer *httpcontroller.Server) {
+func startSoundLevelPublishers(wg *sync.WaitGroup, doneChan chan struct{}, proc *processor.Processor, soundLevelChan chan myaudio.SoundLevelData, apiController *apiv2.Controller) {
 	settings := conf.Setting()
 
 	// Create a merged quit channel that responds to both the done channel and global quit
@@ -525,8 +467,8 @@ func startSoundLevelPublishers(wg *sync.WaitGroup, doneChan chan struct{}, proc 
 	}
 
 	// Start SSE publisher if API is available
-	if httpServer != nil && httpServer.APIV2 != nil {
-		startSoundLevelSSEPublisherWithDone(wg, mergedQuitChan, httpServer.APIV2, soundLevelChan)
+	if apiController != nil {
+		startSoundLevelSSEPublisherWithDone(wg, mergedQuitChan, apiController, soundLevelChan)
 	}
 
 	// Start metrics publisher
@@ -553,19 +495,18 @@ func startSoundLevelMQTTPublisherWithDone(wg *sync.WaitGroup, doneChan <-chan st
 				}
 				// Log received sound level data if debug is enabled
 				if conf.Setting().Realtime.Audio.SoundLevel.Debug {
-					if logger := getSoundLevelLogger(); logger != nil {
-						logger.Debug("MQTT publisher received sound level data",
-							"source", soundData.Source,
-							"name", soundData.Name,
-							"timestamp", soundData.Timestamp)
-					}
+					lg := getSoundLevelLogger()
+					lg.Debug("MQTT publisher received sound level data",
+						logger.String("source", soundData.Source),
+						logger.String("name", soundData.Name),
+						logger.Time("timestamp", soundData.Timestamp))
 				}
 				if err := publishSoundLevelToMQTT(soundData, proc); err != nil {
 					// Log with enhanced error (error already has telemetry context from publishSoundLevelToMQTT)
 					getSoundLevelLogger().Error("Failed to publish sound level data to MQTT",
-						"error", err,
-						"source", soundData.Source,
-						"name", soundData.Name)
+						logger.Error(err),
+						logger.String("source", soundData.Source),
+						logger.String("name", soundData.Name))
 				}
 			}
 		}
@@ -574,7 +515,7 @@ func startSoundLevelMQTTPublisherWithDone(wg *sync.WaitGroup, doneChan <-chan st
 
 // startSoundLevelSSEPublisherWithDone starts SSE publisher with a custom done channel
 // This is a compatibility wrapper that converts done channel to context for the refactored function
-func startSoundLevelSSEPublisherWithDone(wg *sync.WaitGroup, doneChan chan struct{}, apiController *api.Controller, soundLevelChan chan myaudio.SoundLevelData) {
+func startSoundLevelSSEPublisherWithDone(wg *sync.WaitGroup, doneChan chan struct{}, apiController *apiv2.Controller, soundLevelChan chan myaudio.SoundLevelData) {
 	// Create context that gets canceled when done channel is closed
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -592,16 +533,15 @@ func startSoundLevelSSEPublisherWithDone(wg *sync.WaitGroup, doneChan chan struc
 }
 
 // broadcastSoundLevelSSE broadcasts sound level data via SSE with error handling and metrics
-func broadcastSoundLevelSSE(apiController *api.Controller, soundData myaudio.SoundLevelData) error {
+func broadcastSoundLevelSSE(apiController *apiv2.Controller, soundData myaudio.SoundLevelData) error {
 	// Validate data before broadcasting
 	if err := validateSoundLevelData(&soundData); err != nil {
 		// Log validation error if debug enabled
 		if conf.Setting().Realtime.Audio.SoundLevel.Debug {
-			if logger := getSoundLevelLogger(); logger != nil {
-				logger.Debug("sound level data validation failed for SSE",
-					"source", soundData.Source,
-					"error", err)
-			}
+			lg := getSoundLevelLogger()
+			lg.Debug("sound level data validation failed for SSE",
+				logger.String("source", soundData.Source),
+				logger.Error(err))
 		}
 		return err
 	}
@@ -611,7 +551,7 @@ func broadcastSoundLevelSSE(apiController *api.Controller, soundData myaudio.Sou
 
 	if err := apiController.BroadcastSoundLevel(&sanitizedData); err != nil {
 		// Record error metric
-		if m := getSoundLevelMetricsFromAPI(apiController); m != nil {
+		if m := getSoundLevelMetrics(apiController); m != nil {
 			m.RecordSoundLevelPublishingError(soundData.Source, soundData.Name, "sse", "broadcast_error")
 			m.RecordSoundLevelPublishing(soundData.Source, soundData.Name, "sse", "error")
 		}
@@ -628,51 +568,41 @@ func broadcastSoundLevelSSE(apiController *api.Controller, soundData myaudio.Sou
 	}
 
 	// Record success metric
-	if m := getSoundLevelMetricsFromAPI(apiController); m != nil {
+	if m := getSoundLevelMetrics(apiController); m != nil {
 		m.RecordSoundLevelPublishing(soundData.Source, soundData.Name, "sse", "success")
 	}
 
 	// Log successful broadcast if debug is enabled
 	if conf.Setting().Realtime.Audio.SoundLevel.Debug {
-		if logger := getSoundLevelLogger(); logger != nil {
-			logger.Debug("successfully broadcast sound level data via SSE",
-				"source", soundData.Source,
-				"name", soundData.Name,
-				"bands_count", len(soundData.OctaveBands))
-		}
+		lg := getSoundLevelLogger()
+		lg.Debug("successfully broadcast sound level data via SSE",
+			logger.String("source", soundData.Source),
+			logger.String("name", soundData.Name),
+			logger.Int("bands_count", len(soundData.OctaveBands)))
 	}
 
 	return nil
 }
 
-// getSoundLevelMetricsFromAPI safely retrieves sound level metrics from API controller
-func getSoundLevelMetricsFromAPI(apiController *api.Controller) *metrics.SoundLevelMetrics {
-	if apiController == nil || apiController.Processor == nil ||
-		apiController.Processor.Metrics == nil || apiController.Processor.Metrics.SoundLevel == nil {
-		return nil
-	}
-	return apiController.Processor.Metrics.SoundLevel
-}
-
 // startSoundLevelMetricsPublisherWithDone starts metrics publisher with a custom done channel
 func startSoundLevelMetricsPublisherWithDone(wg *sync.WaitGroup, doneChan chan struct{}, metricsInstance *observability.Metrics, soundLevelChan chan myaudio.SoundLevelData) {
+	lg := getSoundLevelLogger()
 	wg.Go(func() {
-		log.Println("📊 Started sound level metrics publisher")
+		lg.Info("started sound level metrics publisher")
 
 		for {
 			select {
 			case <-doneChan:
-				log.Println("🔌 Stopping sound level metrics publisher")
+				lg.Info("stopping sound level metrics publisher")
 				return
 			case soundData := <-soundLevelChan:
 				// Log received sound level data if debug is enabled
 				if conf.Setting().Realtime.Audio.SoundLevel.Debug {
-					if logger := getSoundLevelLogger(); logger != nil {
-						logger.Debug("metrics publisher received sound level data",
-							"source", soundData.Source,
-							"name", soundData.Name,
-							"timestamp", soundData.Timestamp)
-					}
+					lg := getSoundLevelLogger()
+					lg.Debug("metrics publisher received sound level data",
+						logger.String("source", soundData.Source),
+						logger.String("name", soundData.Name),
+						logger.Time("timestamp", soundData.Timestamp))
 				}
 				// Update Prometheus metrics
 				if metricsInstance != nil && metricsInstance.SoundLevel != nil {
@@ -720,25 +650,26 @@ func registerSoundLevelProcessorsForActiveSources(settings *conf.Settings) error
 	}
 
 	// Get actually running RTSP streams to ensure we only register for active streams
-	activeStreams := myaudio.GetRTSPStreamHealth()
+	activeStreams := myaudio.GetStreamHealth()
 
 	// Register for each configured RTSP source, but prioritize actually running streams
 	configuredURLs := make(map[string]bool)
-	for _, url := range settings.Realtime.RTSP.URLs {
-		configuredURLs[url] = true
+	for _, stream := range settings.Realtime.RTSP.Streams {
+		configuredURLs[stream.URL] = true
 		totalSources++
 
-		// Get or create the RTSP source in the registry
+		// Get or create the stream source in the registry
 		registry := myaudio.GetRegistry()
-		audioSource := registry.GetOrCreateSource(url, myaudio.SourceTypeRTSP)
+		audioSource := registry.GetOrCreateSource(stream.URL, myaudio.StreamTypeToSourceType(stream.Type))
 		if audioSource == nil {
-			errs = append(errs, errors.Newf("failed to get/create RTSP source").
+			errs = append(errs, errors.Newf("failed to get/create stream source").
 				Component("realtime-analysis").
 				Category(errors.CategorySystem).
-				Context("operation", "get_or_create_rtsp_source").
-				Context("url", privacy.SanitizeRTSPUrl(url)).
+				Context("operation", "get_or_create_stream_source").
+				Context("stream_name", stream.Name).
+				Context("url", privacy.SanitizeStreamUrl(stream.URL)).
 				Build())
-			LogSoundLevelProcessorRegistrationFailed(privacy.SanitizeRTSPUrl(url), "rtsp", "analysis.soundlevel", fmt.Errorf("failed to get/create RTSP source"))
+			LogSoundLevelProcessorRegistrationFailed(stream.Name, stream.Type, "analysis.soundlevel", fmt.Errorf("failed to get/create stream source"))
 			continue
 		}
 
@@ -746,7 +677,7 @@ func registerSoundLevelProcessorsForActiveSources(settings *conf.Settings) error
 			// Safely check stream health status
 			var streamRunning bool
 			var streamExists bool
-			if streamHealth, exists := activeStreams[url]; exists {
+			if streamHealth, exists := activeStreams[stream.URL]; exists {
 				streamRunning = streamHealth.IsHealthy
 				streamExists = true
 			}
@@ -755,20 +686,20 @@ func registerSoundLevelProcessorsForActiveSources(settings *conf.Settings) error
 				Component("realtime-analysis").
 				Category(errors.CategorySystem).
 				Context("operation", "register_sound_level_processor").
-				Context("source_type", "rtsp").
+				Context("source_type", string(audioSource.Type)).
 				Context("source_id", audioSource.ID).
 				Context("display_name", audioSource.DisplayName).
-				Context("source_url", url).
+				Context("source_url", stream.URL).
 				Context("stream_running", streamRunning).
 				Context("stream_exists", streamExists). // indicates if stream was found in health map
 				Build())
-			LogSoundLevelProcessorRegistrationFailed(audioSource.DisplayName, "rtsp_stream", "analysis.soundlevel", err)
+			LogSoundLevelProcessorRegistrationFailed(audioSource.DisplayName, string(audioSource.Type)+"_stream", "analysis.soundlevel", err)
 		} else {
 			successCount++
-			if _, isActive := activeStreams[url]; isActive {
-				LogSoundLevelProcessorRegistered(audioSource.DisplayName, "rtsp_active", "analysis.soundlevel")
+			if _, isActive := activeStreams[stream.URL]; isActive {
+				LogSoundLevelProcessorRegistered(audioSource.DisplayName, string(audioSource.Type)+"_active", "analysis.soundlevel")
 			} else {
-				LogSoundLevelProcessorRegistered(audioSource.DisplayName, "rtsp_configured", "analysis.soundlevel")
+				LogSoundLevelProcessorRegistered(audioSource.DisplayName, string(audioSource.Type)+"_configured", "analysis.soundlevel")
 			}
 		}
 	}
@@ -776,7 +707,7 @@ func registerSoundLevelProcessorsForActiveSources(settings *conf.Settings) error
 	// Warn about active streams that aren't configured (shouldn't normally happen)
 	for url := range activeStreams {
 		if !configuredURLs[url] {
-			LogSoundLevelActiveStreamNotInConfig(privacy.SanitizeRTSPUrl(url))
+			LogSoundLevelActiveStreamNotInConfig(privacy.SanitizeStreamUrl(url))
 		}
 	}
 
@@ -798,20 +729,26 @@ func unregisterAllSoundLevelProcessors(settings *conf.Settings) {
 		// Get the audio source from registry instead of hardcoded "malgo"
 		registry := myaudio.GetRegistry()
 		if registry != nil {
-			if audioSource := registry.GetOrCreateSource(settings.Realtime.Audio.Source, myaudio.SourceTypeAudioCard); audioSource != nil {
+			if audioSource, exists := registry.GetSourceByConnection(settings.Realtime.Audio.Source); exists {
 				myaudio.UnregisterSoundLevelProcessor(audioSource.ID)
 				LogSoundLevelProcessorUnregistered(audioSource.DisplayName, "audio_device", "analysis.soundlevel")
-			} else {
-				log.Printf("⚠️ Failed to get audio source from registry during sound level processor unregistration")
 			}
+			// If source doesn't exist, nothing to unregister - this is expected during teardown
 		} else {
-			log.Printf("⚠️ Registry not available during sound level processor unregistration")
+			GetLogger().Warn("registry not available during sound level processor unregistration")
 		}
 	}
 
-	// Unregister all RTSP sources
-	for _, url := range settings.Realtime.RTSP.URLs {
-		myaudio.UnregisterSoundLevelProcessor(url)
-		LogSoundLevelProcessorUnregistered(privacy.SanitizeRTSPUrl(url), "rtsp_stream", "analysis.soundlevel")
+	// Unregister all stream sources
+	for _, stream := range settings.Realtime.RTSP.Streams {
+		// Get the source from registry to retrieve its ID
+		registry := myaudio.GetRegistry()
+		if registry != nil {
+			if audioSource, exists := registry.GetSourceByConnection(stream.URL); exists {
+				myaudio.UnregisterSoundLevelProcessor(audioSource.ID)
+				LogSoundLevelProcessorUnregistered(stream.Name, "stream", "analysis.soundlevel")
+			}
+			// If source doesn't exist, nothing to unregister - this is expected during teardown
+		}
 	}
 }

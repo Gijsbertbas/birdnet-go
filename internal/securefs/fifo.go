@@ -4,14 +4,18 @@ import (
 	"context"
 	"fmt"
 	"hash/crc32"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
+
+// OS name constant for runtime.GOOS comparisons.
+const osWindows = "windows"
 
 // CreateFIFO creates a FIFO (named pipe) at the specified path with platform-specific implementation
 func (sfs *SecureFS) CreateFIFO(path string) error {
@@ -34,7 +38,7 @@ func (sfs *SecureFS) CreateFIFO(path string) error {
 // GetFIFOPath returns the platform-specific path to use for the FIFO
 // On Windows, this returns a named pipe path, on Unix it returns the original path
 func GetFIFOPath(path string) string {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		// Convert Unix-style path to Windows named pipe path
 		// Format: \\.\pipe\[path]
 		baseName := filepath.Base(path)
@@ -61,7 +65,7 @@ func (sfs *SecureFS) OpenFIFO(ctx context.Context, path string) (*os.File, error
 	var err error
 
 	// Perform platform-specific fifo opening
-	if runtime.GOOS == "windows" && sfs.pipeName != "" {
+	if runtime.GOOS == osWindows && sfs.pipeName != "" {
 		// Use a pipe path from CreateFIFO
 		fifo, err = sfs.OpenNamedPipe(sfs.pipeName)
 	} else {
@@ -90,41 +94,47 @@ func (sfs *SecureFS) OpenNamedPipe(pipePath string) (*os.File, error) {
 
 // getPlatformOpenFlags returns OS-specific open flags for the FIFO
 func getPlatformOpenFlags() int {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		return os.O_WRONLY // Windows uses writeable flag without O_NONBLOCK
 	}
 	// Unix systems use non-blocking flag to prevent indefinite blocking if reader crashes
 	return os.O_WRONLY | syscall.O_NONBLOCK
 }
 
+// waitWithContext waits for the specified duration or until context is canceled
+func waitWithContext(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
 // openFIFOWithRetries attempts to open the FIFO with multiple retries
 func openFIFOWithRetries(ctx context.Context, fifoPath, pipePath string, openFlags int, sfs *SecureFS) (*os.File, error) {
-	maxRetries := 30
-	retryInterval := 200 * time.Millisecond
+	const maxRetries = 30
+	const retryInterval = 200 * time.Millisecond
 
 	for i := range maxRetries {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return nil, fmt.Errorf("context canceled while opening FIFO")
-		default:
-			// Attempt to open the FIFO with platform-specific approach
-			fifo, openErr := openPlatformSpecificFIFO(pipePath, fifoPath, openFlags, sfs)
-			if openErr == nil {
-				return fifo, nil
-			}
+		}
 
-			if i == 0 || (i+1)%5 == 0 {
-				// Use structured logging with proper context instead of fmt.Printf
-				log.Printf("FIFO %s: writer waiting (attempt %d): %v", fifoPath, i+1, openErr)
-			}
+		fifo, openErr := openPlatformSpecificFIFO(pipePath, fifoPath, openFlags, sfs)
+		if openErr == nil {
+			return fifo, nil
+		}
 
-			// Sleep before retrying
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("context canceled during retry delay")
-			case <-time.After(retryInterval):
-				// Continue to next attempt
-			}
+		if i == 0 || (i+1)%5 == 0 {
+			GetLogger().Debug("FIFO writer waiting",
+				logger.String("path", fifoPath),
+				logger.Int("attempt", i+1),
+				logger.Error(openErr))
+		}
+
+		if err := waitWithContext(ctx, retryInterval); err != nil {
+			return nil, fmt.Errorf("context canceled during retry delay")
 		}
 	}
 
@@ -133,14 +143,14 @@ func openFIFOWithRetries(ctx context.Context, fifoPath, pipePath string, openFla
 
 // openPlatformSpecificFIFO opens the FIFO using OS-specific approach
 func openPlatformSpecificFIFO(pipePath, fifoPath string, openFlags int, sfs *SecureFS) (*os.File, error) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		// Validate Windows pipe path to ensure it's a valid named pipe path
 		if !strings.HasPrefix(pipePath, `\\.\pipe\`) {
 			return nil, fmt.Errorf("security error: Windows pipe path must start with \\\\.\\pipe\\")
 		}
 		// For Windows, open the named pipe directly
 		// Named pipes on Windows have their own security model independent of file permissions
-		return os.OpenFile(pipePath, openFlags, 0o600)
+		return os.OpenFile(pipePath, openFlags, 0o600) //nolint:gosec // G304: pipePath validated to start with \\.\pipe\
 	}
 
 	// For Unix systems, use SecureFS to maintain security

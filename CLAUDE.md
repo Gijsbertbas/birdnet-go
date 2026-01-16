@@ -9,12 +9,14 @@ BirdNET-Go: Go implementation of BirdNET for real-time bird sound identification
 - **Frontend**: See `frontend/CLAUDE.md` for Svelte 5, TypeScript, UI
 - **Backend**: See `internal/CLAUDE.md` for Go standards, testing
 - **API v2**: See `internal/api/v2/CLAUDE.md` for endpoints
+- **Testing**: See `TESTING.md` for test patterns, testify usage, shared helpers
 
 **IMPORTANT**: Always read the relevant CLAUDE.md file before working on code:
 
 - Working on Go code? Read `internal/CLAUDE.md` first
 - Working on frontend? Read `frontend/CLAUDE.md` first
 - Working on API v2? Read `internal/api/v2/CLAUDE.md` first
+- Writing tests? Read `TESTING.md` first - all tests MUST use testify
 
 ## Universal Rules
 
@@ -23,6 +25,7 @@ BirdNET-Go: Go implementation of BirdNET for real-time bird sound identification
 - **NEVER expand API v1** - All new endpoints in `internal/api/v2/`
 - **Always lint before commit**: `golangci-lint run -v` (Go), `npm run check:all` (Frontend)
 - **Branch from updated main**: `git pull origin main && git checkout -b feature-name`
+- **No magic numbers/strings** - Use named constants with descriptive names
 
 ### Project Structure
 
@@ -92,3 +95,32 @@ ast-grep --pattern "export let $PROP" --rewrite "let { $PROP } = \$props()" --la
 3. Check open PRs to avoid conflicts
 4. Format markdown with prettier
 5. Document all exports
+
+## PR Review Workflow
+
+After pushing updates to a PR, request automated reviews:
+
+```bash
+# Request Gemini review
+gh pr comment <PR_NUMBER> --body "/gemini review"
+
+# Or from current branch
+gh pr comment $(gh pr view --json number -q .number) --body "/gemini review"
+```
+
+This triggers automated code review that checks for bugs, security issues, and best practices.
+
+### Handling PR Review Comments
+
+When fetching and addressing code review comments from a PR, use the receiving-code-review skill:
+
+```text
+/superpowers:receiving-code-review
+```
+
+This skill ensures:
+
+- Technical verification before implementing suggestions
+- Appropriate pushback on incorrect feedback
+- No performative agreement - just fix and move on
+- Clarification of unclear items before partial implementation

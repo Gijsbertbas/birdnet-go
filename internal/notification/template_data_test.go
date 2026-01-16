@@ -1,3 +1,4 @@
+//nolint:gocognit // Table-driven tests have expected complexity
 package notification
 
 import (
@@ -5,22 +6,21 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // setEnv is a test helper that sets an environment variable and fails the test if it errors
 func setEnv(t *testing.T, key, value string) {
 	t.Helper()
-	if err := os.Setenv(key, value); err != nil {
-		t.Fatalf("Failed to set environment variable %s: %v", key, err)
-	}
+	err := os.Setenv(key, value)
+	require.NoError(t, err, "Failed to set environment variable %s", key)
 }
 
 // unsetEnv is a test helper that unsets an environment variable and fails the test if it errors
 func unsetEnv(t *testing.T, key string) {
 	t.Helper()
-	if err := os.Unsetenv(key); err != nil {
-		t.Fatalf("Failed to unset environment variable %s: %v", key, err)
-	}
+	err := os.Unsetenv(key)
+	require.NoError(t, err, "Failed to unset environment variable %s", key)
 }
 
 func TestBuildBaseURL(t *testing.T) {
@@ -114,28 +114,12 @@ func TestBuildBaseURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Note: Can't use t.Parallel() here because we're modifying environment variables
-
-			// Set environment variable if specified
+			// t.Setenv automatically restores original value and prevents t.Parallel()
 			if tt.envVar != "" {
-				oldEnv := os.Getenv("BIRDNET_HOST")
-				setEnv(t, "BIRDNET_HOST", tt.envVar)
-				defer func() {
-					if oldEnv != "" {
-						setEnv(t, "BIRDNET_HOST", oldEnv)
-					} else {
-						unsetEnv(t, "BIRDNET_HOST")
-					}
-				}()
+				t.Setenv("BIRDNET_HOST", tt.envVar)
 			} else {
-				// Ensure env var is not set
-				oldEnv := os.Getenv("BIRDNET_HOST")
-				unsetEnv(t, "BIRDNET_HOST")
-				defer func() {
-					if oldEnv != "" {
-						setEnv(t, "BIRDNET_HOST", oldEnv)
-					}
-				}()
+				// Ensure env var is not set by setting to empty
+				t.Setenv("BIRDNET_HOST", "")
 			}
 
 			result := BuildBaseURL(tt.host, tt.port, tt.autoTLS)

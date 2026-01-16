@@ -28,6 +28,7 @@
   - 02-04: Various cloud conditions
   - 09-10: Rain conditions
   - 11: Thunderstorm
+  - 12: Sleet
   - 13: Snow
   - 50: Mist/fog
 -->
@@ -53,22 +54,21 @@
     '09': { day: '🌧️', night: '🌧️', description: 'Shower rain' },
     '10': { day: '🌦️', night: '🌧️', description: 'Rain' },
     '11': { day: '⛈️', night: '⛈️', description: 'Thunderstorm' },
+    '12': { day: '🌨️', night: '🌨️', description: 'Sleet' },
     '13': { day: '❄️', night: '❄️', description: 'Snow' },
     '50': { day: '🌫️', night: '🌫️', description: 'Mist' },
   };
 
   // Extract icon code from weatherIcon string (e.g., "01d" -> "01") with validation
-  const iconCode = $derived(
-    (() => {
-      if (!weatherIcon || typeof weatherIcon !== 'string') {
-        return '';
-      }
+  const iconCode = $derived.by(() => {
+    if (!weatherIcon || typeof weatherIcon !== 'string') {
+      return '';
+    }
 
-      // Use regex to safely extract two-digit code from the beginning
-      const match = weatherIcon.match(/^(\d{2})[dn]?$/);
-      return match ? match[1] : '';
-    })()
-  );
+    // Use regex to safely extract two-digit code from the beginning
+    const match = weatherIcon.match(/^(\d{2})[dn]?$/);
+    return match ? match[1] : '';
+  });
   const isNight = $derived(timeOfDay === 'night' || weatherIcon?.endsWith('n'));
 
   const iconData = $derived(

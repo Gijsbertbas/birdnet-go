@@ -15,8 +15,20 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	auth "github.com/tphakala/birdnet-go/internal/api/v2/auth"
+	"github.com/tphakala/birdnet-go/internal/api/auth"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/security"
+)
+
+// Auth constants (file-local)
+const (
+	authExtendedTimeout = 15  // Extended timeout for slower operations
+	maxBasePathLength   = 128 // Maximum length for base path validation
+	authRateLimitRate   = 5   // Login attempts per rate limit window
+	authRateLimitBurst  = 5   // Burst allowance for rate limiting
+	authRateLimitWindow = 15  // Rate limit window in minutes
+	authDelayMinMs      = 50  // Minimum random delay in ms for timing attack mitigation
+	authDelayMaxMs      = 150 // Maximum random delay in ms for timing attack mitigation
 )
 
 // Compiled regex for path validation (moved outside function for performance)
@@ -60,9 +72,9 @@ func (c *Controller) initAuthRoutes() {
 		Skipper: middleware.DefaultSkipper,
 		Store: middleware.NewRateLimiterMemoryStoreWithConfig(
 			middleware.RateLimiterMemoryStoreConfig{
-				Rate:      5,                // 5 requests
-				Burst:     5,                // Allow burst up to the rate
-				ExpiresIn: 15 * time.Minute, // Per 15 minutes
+				Rate:      authRateLimitRate,                 // 5 requests
+				Burst:     authRateLimitBurst,                // Allow burst up to the rate
+				ExpiresIn: authRateLimitWindow * time.Minute, // Per 15 minutes
 			},
 		),
 		IdentifierExtractor: func(ctx echo.Context) (string, error) {
@@ -71,26 +83,22 @@ func (c *Controller) initAuthRoutes() {
 		},
 		ErrorHandler: func(ctx echo.Context, err error) error {
 			// Return a user-friendly error message when rate limit is exceeded
-			if c.apiLogger != nil {
-				c.apiLogger.Warn("Login rate limit exceeded",
-					"ip", ctx.RealIP(),
-					"path", ctx.Request().URL.Path,
-					"user_agent", ctx.Request().Header.Get("User-Agent"),
-				)
-			}
+			c.logWarnIfEnabled("Login rate limit exceeded",
+				logger.String("ip", ctx.RealIP()),
+				logger.String("path", ctx.Request().URL.Path),
+				logger.String("user_agent", ctx.Request().Header.Get("User-Agent")),
+			)
 			return ctx.JSON(http.StatusTooManyRequests, map[string]string{
 				"error": "Too many login attempts. Please try again in 15 minutes.",
 			})
 		},
 		DenyHandler: func(ctx echo.Context, identifier string, err error) error {
 			// This is called when the rate limit is exceeded
-			if c.apiLogger != nil {
-				c.apiLogger.Warn("Login attempt denied due to rate limit",
-					"identifier", identifier,
-					"ip", ctx.RealIP(),
-					"path", ctx.Request().URL.Path,
-				)
-			}
+			c.logWarnIfEnabled("Login attempt denied due to rate limit",
+				logger.String("identifier", identifier),
+				logger.String("ip", ctx.RealIP()),
+				logger.String("path", ctx.Request().URL.Path),
+			)
 			return ctx.JSON(http.StatusTooManyRequests, map[string]string{
 				"error": "Too many login attempts. Please try again in 15 minutes.",
 			})
@@ -100,8 +108,12 @@ func (c *Controller) initAuthRoutes() {
 	// Routes that don't require authentication (but are rate limited)
 	authGroup.POST("/login", c.Login, loginRateLimiter)
 
+	// OAuth callback endpoint - public, completes the OAuth flow
+	// This is the V2 replacement for /api/v1/oauth2/callback
+	authGroup.GET("/callback", c.OAuthCallback)
+
 	// Routes that require authentication
-	protectedGroup := authGroup.Group("", c.AuthMiddleware)
+	protectedGroup := authGroup.Group("", c.authMiddleware)
 	protectedGroup.POST("/logout", c.Logout)
 	protectedGroup.GET("/status", c.GetAuthStatus)
 }
@@ -111,26 +123,22 @@ func (c *Controller) Login(ctx echo.Context) error {
 	// Parse login request
 	var req AuthRequest
 	if err := ctx.Bind(&req); err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Invalid login request",
-				"error", err.Error(),
-				"ip", ctx.RealIP(),
-				"path", ctx.Request().URL.Path,
-			)
-		}
+		c.logErrorIfEnabled("Invalid login request",
+			logger.Error(err),
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+		)
 		return c.HandleError(ctx, err, "Invalid login request", http.StatusBadRequest)
 	}
 
 	// Use the stored auth service instance
-	authService := c.AuthService
+	authService := c.authService
 	if authService == nil {
 		// Handle case where auth might not be configured but login endpoint is hit
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Login attempt but AuthService is nil (auth not configured?)",
-				"ip", ctx.RealIP(),
-				"path", ctx.Request().URL.Path,
-			)
-		}
+		c.logErrorIfEnabled("Login attempt but AuthService is nil (auth not configured?)",
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+		)
 		// Return a generic error, perhaps indicating auth isn't enabled
 		return c.HandleError(ctx, errors.New("authentication not configured"),
 			"Authentication service unavailable", http.StatusInternalServerError)
@@ -138,13 +146,11 @@ func (c *Controller) Login(ctx echo.Context) error {
 
 	// If authentication is not required, act as if the login was successful
 	if !authService.IsAuthRequired(ctx) {
-		if c.apiLogger != nil {
-			c.apiLogger.Info("Authentication not required",
-				"username", req.Username,
-				"ip", ctx.RealIP(),
-				"path", ctx.Request().URL.Path,
-			)
-		}
+		c.logInfoIfEnabled("Authentication not required",
+			logger.Username(req.Username),
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+		)
 		return ctx.JSON(http.StatusOK, AuthResponse{
 			Success:   true,
 			Message:   "Authentication is not required on this server",
@@ -156,16 +162,14 @@ func (c *Controller) Login(ctx echo.Context) error {
 	// Check for empty credentials before calling the auth service
 	if req.Username == "" || req.Password == "" {
 		// Add a short, randomized delay to mitigate timing attacks on username enumeration
-		randomDelay(ctx.Request().Context(), 50, 150)
+		randomDelay(ctx.Request().Context(), authDelayMinMs, authDelayMaxMs)
 
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Login attempt with missing credentials",
-				"username_present", req.Username != "",
-				"password_present", req.Password != "",
-				"ip", ctx.RealIP(),
-				"path", ctx.Request().URL.Path,
-			)
-		}
+		c.logWarnIfEnabled("Login attempt with missing credentials",
+			logger.Bool("username_present", req.Username != ""),
+			logger.Bool("password_present", req.Password != ""),
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+		)
 
 		return ctx.JSON(http.StatusBadRequest, AuthResponse{
 			Success:   false,
@@ -179,16 +183,14 @@ func (c *Controller) Login(ctx echo.Context) error {
 
 	if authErr != nil {
 		// Add a short, randomized delay to mitigate brute force/timing attacks
-		randomDelay(ctx.Request().Context(), 50, 150)
+		randomDelay(ctx.Request().Context(), authDelayMinMs, authDelayMaxMs)
 
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Failed login attempt",
-				"username", req.Username,
-				"ip", ctx.RealIP(),
-				"path", ctx.Request().URL.Path,
-				"error", authErr.Error(), // Use the error from the service
-			)
-		}
+		c.logWarnIfEnabled("Failed login attempt",
+			logger.Username(req.Username),
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.Error(authErr),
+		)
 
 		// Use the error message from the sentinel error if appropriate
 		message := "Invalid credentials"
@@ -204,18 +206,16 @@ func (c *Controller) Login(ctx echo.Context) error {
 	}
 
 	// Successful login - auth code has been generated directly (V1 pattern)
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Successful login with auth code",
-			"username", req.Username,
-			"ip", ctx.RealIP(),
-			"path", ctx.Request().URL.Path,
-			"auth_code_length", len(authCode),
-		)
-	}
+	c.logInfoIfEnabled("Successful login with auth code",
+		logger.Username(req.Username),
+		logger.String("ip", ctx.RealIP()),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.Bool("auth_code_generated", authCode != ""),
+	)
 
 	// Extract the base path dynamically
 	basePath := c.extractBasePath(ctx, req)
-	
+
 	// Validate and sanitize the redirect URL from the request
 	finalRedirect := basePath // Default to detected base path
 	if req.RedirectURL != "" {
@@ -223,38 +223,35 @@ func (c *Controller) Login(ctx echo.Context) error {
 		if security.IsValidRedirect(req.RedirectURL) {
 			// Ensure the redirect stays within the detected base path
 			finalRedirect = ensurePathWithinBase(req.RedirectURL, basePath)
-			
+
 			// Log if redirect was adjusted
 			if finalRedirect != req.RedirectURL {
-				if c.apiLogger != nil {
-					c.apiLogger.Debug("Adjusted redirect URL to stay within base path",
-						"requested", req.RedirectURL,
-						"basePath", basePath,
-						"final", finalRedirect,
-					)
-				}
+				c.logDebugIfEnabled("Adjusted redirect URL to stay within base path",
+					logger.String("requested", req.RedirectURL),
+					logger.String("basePath", basePath),
+					logger.String("final", finalRedirect),
+				)
 			}
-		} else if c.apiLogger != nil {
+		} else {
 			// Invalid redirect - log and use default
-			c.apiLogger.Warn("Invalid redirect URL provided, using base path",
-				"requested", req.RedirectURL,
-				"basePath", basePath,
-				"default", finalRedirect,
+			c.logWarnIfEnabled("Invalid redirect URL provided, using base path",
+				logger.String("requested", req.RedirectURL),
+				logger.String("basePath", basePath),
+				logger.String("default", finalRedirect),
 			)
 		}
 	}
-	
-	// Construct the OAuth callback URL with the validated redirect
-	redirectURL := fmt.Sprintf("/api/v1/oauth2/callback?code=%s&redirect=%s", authCode, finalRedirect)
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Returning successful login response with redirect",
-			"username", req.Username,
-			"redirect_url", redirectURL,
-			"final_redirect", finalRedirect,
-			"auth_code_length", len(authCode),
-		)
-	}
+	// Construct the V2 OAuth callback URL with the validated redirect
+	// URL-encode both code and redirect to prevent parameter injection and handle special characters
+	redirectURL := fmt.Sprintf("/api/v2/auth/callback?code=%s&redirect=%s", url.QueryEscape(authCode), url.QueryEscape(finalRedirect))
+
+	c.logInfoIfEnabled("Returning successful login response with redirect",
+		logger.Username(req.Username),
+		logger.String("redirect_url", redirectURL),
+		logger.String("final_redirect", finalRedirect),
+		logger.Bool("auth_code_generated", authCode != ""),
+	)
 
 	return ctx.JSON(http.StatusOK, AuthResponse{
 		Success:     true,
@@ -268,14 +265,12 @@ func (c *Controller) Login(ctx echo.Context) error {
 // Logout handles POST /api/v2/auth/logout
 func (c *Controller) Logout(ctx echo.Context) error {
 	// Use the stored auth service instance
-	authService := c.AuthService
+	authService := c.authService
 	if authService == nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Logout requested but AuthService is nil (auth not configured?)",
-				"ip", ctx.RealIP(),
-				"path", ctx.Request().URL.Path,
-			)
-		}
+		c.logWarnIfEnabled("Logout requested but AuthService is nil (auth not configured?)",
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+		)
 		// Return success even if service isn't available, as logout intent is met.
 		return ctx.JSON(http.StatusOK, AuthResponse{
 			Success:   true,
@@ -286,22 +281,18 @@ func (c *Controller) Logout(ctx echo.Context) error {
 
 	// Try to perform logout via auth service
 	if err := authService.Logout(ctx); err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Logout failed",
-				"error", err.Error(),
-				"ip", ctx.RealIP(),
-				"path", ctx.Request().URL.Path,
-			)
-		}
+		c.logErrorIfEnabled("Logout failed",
+			logger.Error(err),
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+		)
 		return c.HandleError(ctx, err, "Logout failed", http.StatusInternalServerError)
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("User logged out",
-			"ip", ctx.RealIP(),
-			"path", ctx.Request().URL.Path,
-		)
-	}
+	c.logInfoIfEnabled("User logged out",
+		logger.String("ip", ctx.RealIP()),
+		logger.String("path", ctx.Request().URL.Path),
+	)
 
 	return ctx.JSON(http.StatusOK, AuthResponse{
 		Success:   true,
@@ -313,13 +304,14 @@ func (c *Controller) Logout(ctx echo.Context) error {
 // GetAuthStatus handles GET /api/v2/auth/status
 func (c *Controller) GetAuthStatus(ctx echo.Context) error {
 	// Read authentication status details set by the AuthMiddleware in the context.
-	isAuthenticated := boolFromCtx(ctx, "isAuthenticated", false)
-	username := stringFromCtx(ctx, "username", "")
+	// Use the auth.CtxKey* constants to ensure consistency with the middleware.
+	isAuthenticated := boolFromCtx(ctx, auth.CtxKeyIsAuthenticated, false)
+	username := stringFromCtx(ctx, auth.CtxKeyUsername, "")
 	// Read the method as a string from context for now.
 	// Downstream consumers comparing this value might need updates if they
 	// relied on specific string literals. The middleware now sets the context
 	// value using the string representation of the new AuthMethod constants.
-	authMethod := stringFromCtx(ctx, "authMethod", auth.AuthMethodUnknown.String())
+	authMethod := stringFromCtx(ctx, auth.CtxKeyAuthMethod, auth.AuthMethodUnknown.String())
 
 	// Construct the response based on context values
 	status := AuthStatus{
@@ -328,16 +320,14 @@ func (c *Controller) GetAuthStatus(ctx echo.Context) error {
 		Method:        authMethod,
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Auth status check",
-			"authenticated", status.Authenticated,
-			"username", status.Username,
-			"method", status.Method,
-			"ip", ctx.RealIP(),
-			"path", ctx.Request().URL.Path,
-			"user_agent", ctx.Request().Header.Get("User-Agent"),
-		)
-	}
+	c.logInfoIfEnabled("Auth status check",
+		logger.Bool("authenticated", status.Authenticated),
+		logger.Username(status.Username),
+		logger.String("method", status.Method),
+		logger.String("ip", ctx.RealIP()),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("user_agent", ctx.Request().Header.Get("User-Agent")),
+	)
 
 	return ctx.JSON(http.StatusOK, status)
 }
@@ -390,12 +380,10 @@ func stringFromCtx(ctx echo.Context, key, defaultValue string) string {
 func (c *Controller) extractBasePath(ctx echo.Context, req AuthRequest) string {
 	// 1. If explicitly provided and valid, use it
 	if req.BasePath != "" && isValidBasePath(req.BasePath) {
-		if c.apiLogger != nil {
-			c.apiLogger.Debug("Using explicit base path from request",
-				"basePath", req.BasePath,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logDebugIfEnabled("Using explicit base path from request",
+			logger.String("basePath", req.BasePath),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return req.BasePath
 	}
 
@@ -403,13 +391,11 @@ func (c *Controller) extractBasePath(ctx echo.Context, req AuthRequest) string {
 	referer := ctx.Request().Header.Get("Referer")
 	if referer != "" {
 		if basePath := extractBasePathFromReferer(referer); basePath != "" {
-			if c.apiLogger != nil {
-				c.apiLogger.Debug("Extracted base path from Referer",
-					"basePath", basePath,
-					"referer", referer,
-					"ip", ctx.RealIP(),
-				)
-			}
+			c.logDebugIfEnabled("Extracted base path from Referer",
+				logger.String("basePath", basePath),
+				logger.String("referer", referer),
+				logger.String("ip", ctx.RealIP()),
+			)
 			return basePath
 		}
 	}
@@ -417,12 +403,10 @@ func (c *Controller) extractBasePath(ctx echo.Context, req AuthRequest) string {
 	// 3. Default fallback - try to detect common patterns
 	// Check if request is coming from /ui/* path based on API versioning
 	defaultBasePath := "/ui/"
-	if c.apiLogger != nil {
-		c.apiLogger.Debug("Using default base path",
-			"basePath", defaultBasePath,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logDebugIfEnabled("Using default base path",
+		logger.String("basePath", defaultBasePath),
+		logger.String("ip", ctx.RealIP()),
+	)
 	return defaultBasePath
 }
 
@@ -435,16 +419,16 @@ func isValidBasePath(basePath string) bool {
 
 	// Must not contain dangerous patterns
 	dangerousPatterns := []string{
-		"..",           // Directory traversal
-		"//",           // Protocol-relative URL
-		"\\",           // Backslash
-		"<",            // HTML injection
-		">",            // HTML injection
-		"javascript:",  // XSS
-		"data:",        // Data URLs
-		"\n",           // Newline injection
-		"\r",           // Carriage return injection
-		"\x00",         // Null byte
+		"..",          // Directory traversal
+		"//",          // Protocol-relative URL
+		"\\",          // Backslash
+		"<",           // HTML injection
+		">",           // HTML injection
+		"javascript:", // XSS
+		"data:",       // Data URLs
+		"\n",          // Newline injection
+		"\r",          // Carriage return injection
+		"\x00",        // Null byte
 	}
 
 	lowerPath := strings.ToLower(basePath)
@@ -455,7 +439,7 @@ func isValidBasePath(basePath string) bool {
 	}
 
 	// Length check
-	if len(basePath) > 128 {
+	if len(basePath) > maxBasePathLength {
 		return false
 	}
 
@@ -518,6 +502,134 @@ func ensurePathWithinBase(redirectPath, basePath string) string {
 
 	// Otherwise, just use the base path
 	return basePath
+}
+
+// OAuthCallback handles GET /api/v2/auth/callback
+// Completes the OAuth flow by exchanging auth code for access token and establishing session.
+// This endpoint is the V2 equivalent of /api/v1/oauth2/callback.
+func (c *Controller) OAuthCallback(ctx echo.Context) error {
+	code := ctx.QueryParam("code")
+	redirect := ctx.QueryParam("redirect")
+
+	c.logInfoIfEnabled("Handling V2 OAuth callback",
+		logger.String("redirect", redirect),
+		logger.String("ip", ctx.RealIP()),
+		logger.String("path", ctx.Request().URL.Path),
+	)
+
+	// 1. Validate code parameter
+	if code == "" {
+		c.logWarnIfEnabled("Missing authorization code in callback",
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+		)
+		return ctx.String(http.StatusBadRequest, "Missing authorization code")
+	}
+
+	// 2. Defensive check: ensure AuthService is available
+	if c.authService == nil {
+		c.logErrorIfEnabled("AuthService is nil in OAuthCallback - server misconfiguration",
+			logger.String("ip", ctx.RealIP()),
+			logger.String("path", ctx.Request().URL.Path),
+		)
+		return ctx.String(http.StatusServiceUnavailable, "Authentication service unavailable. Please try again later.")
+	}
+
+	// 3. Exchange auth code for access token (with 15s timeout)
+	exchangeCtx, cancel := context.WithTimeout(ctx.Request().Context(), authExtendedTimeout*time.Second)
+	defer cancel()
+
+	accessToken, err := c.authService.ExchangeAuthCode(exchangeCtx, code)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			c.logWarnIfEnabled("Timeout exchanging authorization code",
+				logger.Error(err),
+				logger.String("ip", ctx.RealIP()),
+			)
+			return ctx.String(http.StatusGatewayTimeout, "Login timed out. Please try again.")
+		}
+		c.logWarnIfEnabled("Failed to exchange authorization code",
+			logger.Error(err),
+			logger.String("ip", ctx.RealIP()),
+		)
+		return ctx.String(http.StatusUnauthorized, "Unable to complete login at this time. Please try again.")
+	}
+
+	c.logInfoIfEnabled("Successfully exchanged authorization code for access token",
+		logger.String("ip", ctx.RealIP()),
+	)
+
+	// 4. Establish session (handles session fixation mitigation)
+	if err := c.authService.EstablishSession(ctx, accessToken); err != nil {
+		c.logErrorIfEnabled("Failed to establish session",
+			logger.Error(err),
+			logger.String("ip", ctx.RealIP()),
+		)
+		return ctx.String(http.StatusInternalServerError, "Session error during login. Please try again.")
+	}
+
+	// 5. Validate redirect path (prevent open redirects)
+	safeRedirect := validateAndSanitizeRedirect(redirect)
+
+	c.logInfoIfEnabled("Redirecting user to final destination",
+		logger.String("destination", safeRedirect),
+		logger.String("ip", ctx.RealIP()),
+	)
+
+	// 6. Redirect to final destination
+	return ctx.Redirect(http.StatusFound, safeRedirect)
+}
+
+// containsCRLFCharacters checks if a string contains CR/LF injection characters.
+func containsCRLFCharacters(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.ContainsAny(s, "\r\n") ||
+		strings.Contains(lower, "%0d") ||
+		strings.Contains(lower, "%0a")
+}
+
+// isValidRelativePath checks if the parsed URL represents a safe relative path.
+func isValidRelativePath(parsedURL *url.URL) bool {
+	// Must have no scheme (not http://, https://, etc.)
+	// Must have no host (not //evil.com)
+	// Must start with a single '/' (valid relative path)
+	// Must NOT start with '//' or '/\' (protocol-relative URLs)
+	if parsedURL.Scheme != "" || parsedURL.Host != "" {
+		return false
+	}
+	if !strings.HasPrefix(parsedURL.Path, "/") {
+		return false
+	}
+	if len(parsedURL.Path) > 1 && (parsedURL.Path[1] == '/' || parsedURL.Path[1] == '\\') {
+		return false
+	}
+	return true
+}
+
+// validateAndSanitizeRedirect validates and sanitizes a redirect path to prevent open redirects.
+// Returns "/" if the path is invalid, otherwise returns the sanitized path.
+func validateAndSanitizeRedirect(redirect string) string {
+	if redirect == "" {
+		return "/"
+	}
+
+	// Replace ALL backslashes with forward slashes for robust normalization
+	cleanedRedirect := strings.ReplaceAll(redirect, "\\", "/")
+	parsedURL, err := url.Parse(cleanedRedirect)
+	if err != nil || !isValidRelativePath(parsedURL) {
+		return "/"
+	}
+
+	// Check for CR/LF injection in path and query
+	if containsCRLFCharacters(parsedURL.Path) || containsCRLFCharacters(parsedURL.RawQuery) {
+		return "/"
+	}
+
+	// Passed all checks, construct safe redirect preserving path and query
+	if parsedURL.RawQuery != "" {
+		return parsedURL.Path + "?" + parsedURL.RawQuery
+	}
+	return parsedURL.Path
 }
 
 // randomDelay introduces a random sleep duration within the specified range [minMs, maxMs).

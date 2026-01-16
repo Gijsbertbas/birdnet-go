@@ -1,6 +1,6 @@
-<!-- 
+<!--
   SECURITY-HARDENED LoginModal Component
-  
+
   Security improvements implemented:
   - Input validation and sanitization
   - Redirect URL validation
@@ -13,6 +13,10 @@
   import { safeGet, safeArrayAccess, safeElementAccess } from '$lib/utils/security';
   import { extractRelativePath } from '$lib/utils/urlHelpers';
   import { loggers } from '$lib/utils/logger';
+  import { t } from '$lib/i18n';
+  import { X, ShieldCheck, KeyRound } from '@lucide/svelte';
+  import { getEnabledProviders, getProvider } from '$lib/auth';
+  import type { AuthConfig } from '../../../../app.d';
 
   // SECURITY: Define maximum password length to prevent DoS
   const MAX_PASSWORD_LENGTH = 512; // Reasonable limit for security
@@ -21,20 +25,8 @@
   // Logger for authentication debugging
   const logger = loggers.auth;
 
-  // Loading state type for single state management
-  type LoadingState = 'idle' | 'password' | 'google' | 'github';
-
-  interface AuthEndpoints {
-    google?: string;
-    github?: string;
-  }
-
-  interface AuthConfig {
-    basicEnabled: boolean;
-    googleEnabled: boolean;
-    githubEnabled: boolean;
-    endpoints?: AuthEndpoints;
-  }
+  // Loading state: 'idle', 'password', or a provider ID (e.g., 'google')
+  type LoadingState = 'idle' | 'password' | string;
 
   interface Props {
     isOpen: boolean;
@@ -47,7 +39,10 @@
     isOpen = false,
     onClose,
     redirectUrl = '/ui/',
-    authConfig = { basicEnabled: true, googleEnabled: false, githubEnabled: false },
+    authConfig = {
+      basicEnabled: true,
+      enabledProviders: [],
+    },
   }: Props = $props();
 
   let password = $state('');
@@ -59,10 +54,12 @@
     redirectUrl && validateRedirectUrl(redirectUrl) ? redirectUrl : detectBasePath()
   );
 
+  // Get enabled OAuth providers from registry
+  let enabledProviders = $derived(getEnabledProviders(authConfig.enabledProviders));
+  let hasOAuthProviders = $derived(enabledProviders.length > 0);
+
   // Computed loading states for UI
   let isSubmitting = $derived(loadingState === 'password');
-  let googleLoading = $derived(loadingState === 'google');
-  let githubLoading = $derived(loadingState === 'github');
   let isAnyLoading = $derived(loadingState !== 'idle');
 
   // SECURITY: Validate redirect URL to prevent open redirects
@@ -221,28 +218,29 @@
   }
 
   // SECURITY: Validate OAuth endpoints before redirect
-  function handleOAuthLogin(provider: 'google' | 'github') {
-    // Use clean OAuth routes (without /api/v1 prefix) for consistency
-    // Backend supports both /auth/:provider and /api/v1/auth/:provider
-    const defaultEndpoints = {
-      google: '/auth/google',
-      github: '/auth/github',
-    };
+  function handleOAuthLogin(providerId: string) {
+    // Get provider from registry
+    const provider = getProvider(providerId);
+    if (!provider) {
+      error = 'Unknown authentication provider.';
+      return;
+    }
 
+    // Use endpoint from registry, with optional override from config
     const configuredEndpoints = authConfig.endpoints || {};
-    const endpoint = safeGet(configuredEndpoints, provider) || safeGet(defaultEndpoints, provider);
+    const endpoint = safeGet(configuredEndpoints, providerId) || provider.authEndpoint;
 
-    // SECURITY: Basic endpoint validation - accept both formats
-    if (!endpoint || (!endpoint.startsWith('/auth/') && !endpoint.startsWith('/api/v1/auth/'))) {
+    // SECURITY: Basic endpoint validation - accept OAuth and API v2 auth formats
+    if (!endpoint || (!endpoint.startsWith('/auth/') && !endpoint.startsWith('/api/v2/auth/'))) {
       error = 'Configuration error. Please contact your administrator.';
       return;
     }
 
-    loadingState = provider;
+    loadingState = providerId;
 
     // Debug logging for OAuth flow
     logger.debug('OAuth login initiated', {
-      provider,
+      provider: providerId,
       endpoint,
       currentPath: window.location.pathname,
       component: 'LoginModal',
@@ -328,152 +326,123 @@
   <div class="modal modal-open">
     <div
       bind:this={modalElement}
-      class="modal-box sm:p-6 sm:pb-10 p-3 overflow-y-auto"
+      class="modal-box max-w-md p-8 overflow-y-auto"
       role="dialog"
       aria-modal="true"
       aria-labelledby="modal-title"
     >
-      <form onsubmit={handleSubmit}>
+      <!-- Close button -->
+      <button
+        type="button"
+        class="btn btn-sm btn-circle btn-ghost absolute right-3 top-3"
+        onclick={onClose}
+        disabled={isAnyLoading}
+        aria-label="Close login dialog"
+      >
+        <X class="size-4" />
+      </button>
+
+      <form onsubmit={handleSubmit} class="space-y-6">
         <input type="hidden" name="redirect" value={safeRedirectUrl} />
 
-        <div class="flex items-start flex-row">
-          <div class="hidden xs:flex flex-initial">
-            <div
-              class="mx-auto flex h-12 w-12 sm:w-12 sm:h-12 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 sm:mx-0 sm:h-10 sm:w-10"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="24"
-                height="24"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                class="lucide-lock-open stroke-white dark:stroke-gray-200"
-              >
-                <rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect>
-                <path d="M7 11V7a5 5 0 0 1 9.9-1"></path>
-              </svg>
+        <!-- Header -->
+        <div class="text-center space-y-2">
+          <div class="flex justify-center mb-4">
+            <div class="p-3 bg-primary/10 rounded-full">
+              <ShieldCheck class="size-8 text-primary" />
             </div>
           </div>
+          <h3 id="modal-title" class="text-2xl font-semibold">
+            {t('auth.loginTitle')}
+          </h3>
+          <p class="text-base-content/60 text-sm">
+            {t('auth.loginSubtitle')}
+          </p>
+        </div>
 
-          <div class="flex-1">
-            <h3 id="modal-title" class="text-xl font-black py-2 px-6">Login to BirdNET-Go</h3>
-            {#if authConfig.basicEnabled}
-              <div class="form-control p-6 mx-2 xs:ml-0 xs:mx-14">
-                <label class="label" for="loginPassword" id="passwordLabel">Password</label>
+        <!-- Password login section -->
+        {#if authConfig.basicEnabled}
+          <div class="space-y-4">
+            <div class="form-control">
+              <label class="label" for="loginPassword">
+                <span class="label-text font-medium">{t('auth.password')}</span>
+              </label>
+              <div class="relative">
+                <KeyRound
+                  class="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-base-content/40"
+                />
                 <input
                   type="password"
                   id="loginPassword"
                   bind:value={password}
-                  class="input input-bordered"
+                  class="input input-bordered w-full pl-11"
+                  placeholder={t('auth.enterPassword')}
                   required
                   disabled={isAnyLoading}
                   autocomplete="current-password"
                   aria-required="true"
-                  aria-describedby="loginError"
+                  aria-describedby={error ? 'loginError' : undefined}
                 />
-                {#if error}
-                  <div
-                    id="loginError"
-                    class="text-red-700 relative mt-2"
-                    role="alert"
-                    aria-live="polite"
-                  >
-                    {error}
-                  </div>
-                {/if}
-
-                <!-- SECURITY: Rate limiting notice -->
               </div>
-            {/if}
-          </div>
-        </div>
+              {#if error}
+                <div
+                  id="loginError"
+                  class="text-error text-sm mt-2"
+                  role="alert"
+                  aria-live="polite"
+                >
+                  {error}
+                </div>
+              {/if}
+            </div>
 
-        {#if authConfig.basicEnabled}
-          <div class="modal-action px-8 xs:px-[4.5rem] flex-row gap-4 justify-between">
-            <button
-              type="button"
-              onclick={onClose}
-              class="btn btn-outline"
-              disabled={isAnyLoading}
-              aria-label="Cancel login"
-            >
-              Cancel
-            </button>
             <button
               type="submit"
-              class="btn btn-primary grow pr-10"
+              class="btn btn-primary w-full"
               disabled={isAnyLoading || !password}
-              aria-label="Login with password"
+              aria-label="Continue with password"
             >
               {#if isSubmitting}
-                <span class="loading loading-spinner" aria-hidden="true"></span>
+                <span class="loading loading-spinner loading-sm" aria-hidden="true"></span>
               {/if}
-              Login
+              {t('auth.continue')}
             </button>
           </div>
         {/if}
 
-        {#if authConfig.basicEnabled && (authConfig.googleEnabled || authConfig.githubEnabled)}
-          <div class="divider">or</div>
+        <!-- Divider -->
+        {#if authConfig.basicEnabled && hasOAuthProviders}
+          <div class="divider text-base-content/40 text-xs uppercase">{t('auth.or')}</div>
         {/if}
 
-        {#if authConfig.googleEnabled || authConfig.githubEnabled}
-          <div class="flex flex-col sm:flex-row gap-4 flex-wrap px-6 xs:px-16 pb-6">
-            {#if authConfig.googleEnabled}
+        <!-- OAuth providers -->
+        {#if hasOAuthProviders}
+          <div class="space-y-3">
+            {#each enabledProviders as provider (provider.id)}
+              {@const Icon = provider.icon}
+              {@const isLoading = loadingState === provider.id}
               <button
                 type="button"
-                class="btn btn-primary grow xs:pr-10 text-xs xs:text-sm"
-                onclick={() => handleOAuthLogin('google')}
+                class="btn btn-outline w-full justify-start gap-3 font-normal hover:bg-base-200"
+                onclick={() => handleOAuthLogin(provider.id)}
                 disabled={isAnyLoading}
-                aria-label="Login with Google"
+                aria-label={t(provider.loginButtonKey)}
               >
-                {#if googleLoading}
-                  <span
-                    class="loading loading-spinner xs:loading xs:loading-spinner"
-                    aria-hidden="true"
-                  ></span>
+                {#if isLoading}
+                  <span class="loading loading-spinner loading-sm" aria-hidden="true"></span>
+                {:else}
+                  <Icon class="size-5 shrink-0" />
                 {/if}
-                Login with Google
+                <span class="flex-1 text-left">{t(provider.loginButtonKey)}</span>
               </button>
-            {/if}
-
-            {#if authConfig.githubEnabled}
-              <button
-                type="button"
-                class="btn btn-primary grow xs:pr-10 text-xs xs:text-sm"
-                onclick={() => handleOAuthLogin('github')}
-                disabled={isAnyLoading}
-                aria-label="Login with GitHub"
-              >
-                {#if githubLoading}
-                  <span
-                    class="loading loading-spinner xs:loading xs:loading-spinner"
-                    aria-hidden="true"
-                  ></span>
-                {/if}
-                Login with GitHub
-              </button>
-            {/if}
+            {/each}
           </div>
         {/if}
       </form>
-
-      <!-- Close button -->
-      <button
-        class="btn btn-ghost btn-circle btn absolute text-lg right-2 top-2"
-        onclick={onClose}
-        disabled={isSubmitting}
-        aria-label="Close login dialog"
-      >
-        ✕
-      </button>
     </div>
 
     <div
-      class="modal-backdrop"
+      class="modal-backdrop bg-black/50"
       onclick={onClose}
       onkeydown={e => e.key === 'Escape' && onClose()}
       role="button"

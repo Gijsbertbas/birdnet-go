@@ -9,7 +9,16 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/telemetry"
+)
+
+// Severity level constants for error classification.
+const (
+	SeverityCritical = "critical"
+	SeverityHigh     = "high"
+	SeverityMedium   = "medium"
+	SeverityLow      = "low"
 )
 
 // DatastoreTelemetry handles telemetry reporting for datastore operations
@@ -74,22 +83,22 @@ func (dt *DatastoreTelemetry) CaptureEnhancedError(err error, operation string, 
 	enhancedErr := dt.buildEnhancedError(err, operation, context)
 
 	// Log locally with full context
-	logFields := []any{
-		"operation", operation,
-		"error", err.Error(),
-		"severity", severity,
-		"recommendations", context.Recommendations,
+	logFields := []logger.Field{
+		logger.String("operation", operation),
+		logger.Error(err),
+		logger.String("severity", severity),
+		logger.Any("recommendations", context.Recommendations),
 	}
 
 	// Add resource summary only if ResourceSnapshot is available
 	if context.ResourceSnapshot != nil {
-		logFields = append(logFields, "resource_summary", context.ResourceSnapshot.FormatResourceSummary())
+		logFields = append(logFields, logger.String("resource_summary", context.ResourceSnapshot.FormatResourceSummary()))
 	}
 
-	getLogger().Error("Database error with context", logFields...)
+	GetLogger().Error("Database error with context", logFields...)
 
 	// Send to telemetry based on severity
-	if severity == "critical" || severity == "high" {
+	if severity == SeverityCritical || severity == SeverityHigh {
 		dt.sendCriticalErrorToTelemetry(enhancedErr, context)
 	} else {
 		dt.sendErrorToTelemetry(enhancedErr, context)
@@ -111,7 +120,7 @@ func (dt *DatastoreTelemetry) gatherErrorContext(err error, operation string, st
 		context.Recommendations = snapshot.GetResourceRecommendations()
 		context.Severity = dt.calculateSeverity(err, context)
 	} else {
-		getLogger().Warn("Failed to capture resource snapshot for error context", "error", captureErr)
+		GetLogger().Warn("Failed to capture resource snapshot for error context", logger.Error(captureErr))
 	}
 
 	// Capture database health if store interface supports it
@@ -189,17 +198,17 @@ func (dt *DatastoreTelemetry) calculateSeverity(err error, context *ErrorContext
 		strings.Contains(errStr, "no such table") ||
 		strings.Contains(errStr, "disk full") ||
 		strings.Contains(errStr, "out of memory") {
-		return "critical"
+		return SeverityCritical
 	}
 
 	// High severity for resource exhaustion or constraint violations
 	if context != nil && context.ResourceSnapshot != nil {
 		if context.ResourceSnapshot.IsCriticalResourceState() {
-			return "high"
+			return SeverityHigh
 		}
 		// Check for very low disk space
 		if context.ResourceSnapshot.DiskSpace.AvailableBytes < 100*1024*1024 { // Less than 100MB
-			return "high"
+			return SeverityHigh
 		}
 	}
 
@@ -207,11 +216,11 @@ func (dt *DatastoreTelemetry) calculateSeverity(err error, context *ErrorContext
 	if strings.Contains(errStr, "constraint") ||
 		strings.Contains(errStr, "deadlock") ||
 		strings.Contains(errStr, "timeout") {
-		return "medium"
+		return SeverityMedium
 	}
 
 	// Default to low severity
-	return "low"
+	return SeverityLow
 }
 
 // sendCriticalErrorToTelemetry sends critical errors with full context attachments
@@ -220,7 +229,7 @@ func (dt *DatastoreTelemetry) sendCriticalErrorToTelemetry(err error, context *E
 	sentry.WithScope(func(scope *sentry.Scope) {
 		scope.SetLevel(sentry.LevelError)
 		scope.SetTag("component", "datastore")
-		scope.SetTag("severity", "critical")
+		scope.SetTag("severity", SeverityCritical)
 		scope.SetTag("operation", context.Operation)
 
 		// Add resource context as attachment
@@ -282,7 +291,7 @@ func (dt *DatastoreTelemetry) sendCriticalErrorToTelemetry(err error, context *E
 // sendErrorToTelemetry sends regular errors to telemetry
 func (dt *DatastoreTelemetry) sendErrorToTelemetry(err error, context *ErrorContext) {
 	level := sentry.LevelWarning
-	if context.Severity == "high" {
+	if context.Severity == SeverityHigh {
 		level = sentry.LevelError
 	}
 

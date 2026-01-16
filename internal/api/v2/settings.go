@@ -4,10 +4,8 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"maps"
 	"net/http"
-	"net/url"
 	"reflect"
 	"sort"
 	"strconv"
@@ -19,7 +17,19 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/telemetry"
+)
+
+// Settings validation and UI constants (file-local)
+const (
+	maxNodeNameLength     = 100                    // Maximum characters for node name
+	actionDelay           = 100 * time.Millisecond // Delay between reconfiguration actions
+	toastDurationShort    = 3000                   // Short toast duration (3 seconds)
+	toastDurationMedium   = 4000                   // Medium toast duration (4 seconds)
+	toastDurationLong     = 5000                   // Long toast duration (5 seconds)
+	toastDurationExtended = 8000                   // Extended toast duration (8 seconds)
+	minSortableElements   = 2                      // Minimum elements needed after first for sorting
 )
 
 // UpdateRequest represents a request to update settings
@@ -30,12 +40,10 @@ type UpdateRequest struct {
 
 // initSettingsRoutes registers all settings-related API endpoints
 func (c *Controller) initSettingsRoutes() {
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Initializing settings routes")
-	}
+	c.logInfoIfEnabled("Initializing settings routes")
 
 	// Create settings API group
-	settingsGroup := c.Group.Group("/settings", c.AuthMiddleware)
+	settingsGroup := c.Group.Group("/settings", c.authMiddleware)
 
 	// Routes for settings
 	// GET /api/v2/settings - Retrieves all application settings
@@ -53,19 +61,15 @@ func (c *Controller) initSettingsRoutes() {
 	// PATCH /api/v2/settings/:section - Updates a specific settings section with partial replacement
 	settingsGroup.PATCH("/:section", c.UpdateSectionSettings)
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Settings routes initialized successfully")
-	}
+	c.logInfoIfEnabled("Settings routes initialized successfully")
 }
 
 // GetAllSettings handles GET /api/v2/settings
 func (c *Controller) GetAllSettings(ctx echo.Context) error {
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Getting all settings",
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Getting all settings",
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	// Acquire read lock to ensure settings aren't being modified during read
 	c.settingsMutex.RLock()
@@ -76,22 +80,18 @@ func (c *Controller) GetAllSettings(ctx echo.Context) error {
 		// Fallback to global settings if controller settings not set
 		settings = conf.Setting()
 		if settings == nil {
-			if c.apiLogger != nil {
-				c.apiLogger.Error("Settings not initialized when trying to get all settings",
-					"path", ctx.Request().URL.Path,
-					"ip", ctx.RealIP(),
-				)
-			}
+			c.logErrorIfEnabled("Settings not initialized when trying to get all settings",
+				logger.String("path", ctx.Request().URL.Path),
+				logger.String("ip", ctx.RealIP()),
+			)
 			return c.HandleError(ctx, fmt.Errorf("settings not initialized"), "Failed to get settings", http.StatusInternalServerError)
 		}
 	}
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved all settings successfully",
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Retrieved all settings successfully",
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	// Return a copy of the settings
 	return ctx.JSON(http.StatusOK, settings)
@@ -100,14 +100,14 @@ func (c *Controller) GetAllSettings(ctx echo.Context) error {
 // GetSectionSettings handles GET /api/v2/settings/:section
 func (c *Controller) GetSectionSettings(ctx echo.Context) error {
 	section := ctx.Param("section")
-	c.logAPIRequest(ctx, slog.LevelInfo, "Getting settings for section", "section", section)
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Getting settings for section", logger.String("section", section))
 
 	// Acquire read lock to ensure settings aren't being modified during read
 	c.settingsMutex.RLock()
 	defer c.settingsMutex.RUnlock()
 
 	if section == "" {
-		c.logAPIRequest(ctx, slog.LevelError, "Missing section parameter")
+		c.logAPIRequest(ctx, logger.LogLevelError, "Missing section parameter")
 		return c.HandleError(ctx, fmt.Errorf("section not specified"), "Section parameter is required", http.StatusBadRequest)
 	}
 
@@ -116,7 +116,7 @@ func (c *Controller) GetSectionSettings(ctx echo.Context) error {
 		// Fallback to global settings if controller settings not set
 		settings = conf.Setting()
 		if settings == nil {
-			c.logAPIRequest(ctx, slog.LevelError, "Settings not initialized when trying to get section settings", "section", section)
+			c.logAPIRequest(ctx, logger.LogLevelError, "Settings not initialized when trying to get section settings", logger.String("section", section))
 			return c.HandleError(ctx, fmt.Errorf("settings not initialized"), "Failed to get settings", http.StatusInternalServerError)
 		}
 	}
@@ -124,18 +124,18 @@ func (c *Controller) GetSectionSettings(ctx echo.Context) error {
 	// Get the settings section
 	sectionValue, err := getSettingsSection(settings, section)
 	if err != nil {
-		c.logAPIRequest(ctx, slog.LevelError, "Failed to get settings section", "section", section, "error", err.Error())
+		c.logAPIRequest(ctx, logger.LogLevelError, "Failed to get settings section", logger.String("section", section), logger.Error(err))
 		return c.HandleError(ctx, err, "Failed to get settings section", http.StatusNotFound)
 	}
 
-	c.logAPIRequest(ctx, slog.LevelInfo, "Retrieved settings section successfully", "section", section)
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Retrieved settings section successfully", logger.String("section", section))
 
 	return ctx.JSON(http.StatusOK, sectionValue)
 }
 
 // UpdateSettings handles PUT /api/v2/settings
 func (c *Controller) UpdateSettings(ctx echo.Context) error {
-	c.logAPIRequest(ctx, slog.LevelInfo, "Attempting to update settings")
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Attempting to update settings")
 	// Acquire write lock to prevent concurrent settings updates
 	c.settingsMutex.Lock()
 	defer c.settingsMutex.Unlock()
@@ -145,7 +145,7 @@ func (c *Controller) UpdateSettings(ctx echo.Context) error {
 		// Fallback to global settings if controller settings not set
 		settings = conf.Setting()
 		if settings == nil {
-			c.logAPIRequest(ctx, slog.LevelError, "Settings not initialized during update attempt")
+			c.logAPIRequest(ctx, logger.LogLevelError, "Settings not initialized during update attempt")
 			return c.HandleError(ctx, fmt.Errorf("settings not initialized"), "Failed to get settings", http.StatusInternalServerError)
 		}
 	}
@@ -157,13 +157,13 @@ func (c *Controller) UpdateSettings(ctx echo.Context) error {
 	var updatedSettings conf.Settings
 	if err := ctx.Bind(&updatedSettings); err != nil {
 		// Log binding error
-		c.logAPIRequest(ctx, slog.LevelError, "Failed to bind request body for settings update", "error", err.Error())
+		c.logAPIRequest(ctx, logger.LogLevelError, "Failed to bind request body for settings update", logger.Error(err))
 		return c.HandleError(ctx, err, "Failed to parse request body", http.StatusBadRequest)
 	}
 
 	// Verify the request body contains valid data
 	if err := validateSettingsData(&updatedSettings); err != nil {
-		c.logAPIRequest(ctx, slog.LevelError, "Invalid settings data received", "error", err.Error())
+		c.logAPIRequest(ctx, logger.LogLevelError, "Invalid settings data received", logger.Error(err))
 		return c.HandleError(ctx, err, "Invalid settings data", http.StatusBadRequest)
 	}
 
@@ -171,19 +171,24 @@ func (c *Controller) UpdateSettings(ctx echo.Context) error {
 	skippedFields, err := updateAllowedSettingsWithTracking(settings, &updatedSettings)
 	if err != nil {
 		// Log error during field update attempt
-		c.logAPIRequest(ctx, slog.LevelError, "Error updating allowed settings fields", "error", err.Error(), "skipped_fields", skippedFields)
+		c.logAPIRequest(ctx, logger.LogLevelError, "Error updating allowed settings fields", logger.Error(err), logger.Any("skipped_fields", skippedFields))
 		return c.HandleError(ctx, err, "Failed to update settings", http.StatusInternalServerError)
 	}
 	if len(skippedFields) > 0 {
 		// Log skipped fields at Debug level
-		c.logAPIRequest(ctx, slog.LevelDebug, "Skipped protected fields during settings update", "skipped_fields", skippedFields)
+		c.logAPIRequest(ctx, logger.LogLevelDebug, "Skipped protected fields during settings update", logger.Any("skipped_fields", skippedFields))
+	}
+
+	// Normalize species config keys to lowercase for case-insensitive matching
+	if settings.Realtime.Species.Config != nil {
+		settings.Realtime.Species.Config = conf.NormalizeSpeciesConfigKeys(settings.Realtime.Species.Config)
 	}
 
 	// Check if any important settings have changed and trigger actions as needed
 	if err := c.handleSettingsChanges(&oldSettings, settings); err != nil {
 		// Attempt to rollback changes if applying them failed
 		*settings = oldSettings
-		c.logAPIRequest(ctx, slog.LevelError, "Failed to apply settings changes, rolling back", "error", err.Error())
+		c.logAPIRequest(ctx, logger.LogLevelError, "Failed to apply settings changes, rolling back", logger.Error(err))
 		return c.HandleError(ctx, err, "Failed to apply settings changes, rolled back to previous settings", http.StatusInternalServerError)
 	}
 
@@ -191,14 +196,14 @@ func (c *Controller) UpdateSettings(ctx echo.Context) error {
 	if err := conf.SaveSettings(); err != nil {
 		// Attempt to rollback changes if saving failed
 		*settings = oldSettings
-		c.logAPIRequest(ctx, slog.LevelError, "Failed to save settings to disk, rolling back", "error", err.Error())
+		c.logAPIRequest(ctx, logger.LogLevelError, "Failed to save settings to disk, rolling back", logger.Error(err))
 		return c.HandleError(ctx, err, "Failed to save settings, rolled back to previous settings", http.StatusInternalServerError)
 	}
 
 	// Update the cached telemetry state after settings change
 	telemetry.UpdateTelemetryEnabled()
 
-	c.logAPIRequest(ctx, slog.LevelInfo, "Settings updated and saved successfully", "skipped_fields_count", len(skippedFields))
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Settings updated and saved successfully", logger.Int("skipped_fields_count", len(skippedFields)))
 	return ctx.JSON(http.StatusOK, map[string]any{
 		"message":       "Settings updated successfully",
 		"skippedFields": skippedFields,
@@ -467,9 +472,29 @@ func handlePrimitiveField(
 	return nil
 }
 
+// getSettingsOrFallback returns controller settings or falls back to global settings.
+func (c *Controller) getSettingsOrFallback() *conf.Settings {
+	if c.Settings != nil {
+		return c.Settings
+	}
+	return conf.Setting()
+}
+
+// parseAndValidateJSON binds and validates the request body as JSON.
+func parseAndValidateJSON(ctx echo.Context) (json.RawMessage, error) {
+	var requestBody json.RawMessage
+	if err := ctx.Bind(&requestBody); err != nil {
+		return nil, err
+	}
+	var tempValue any
+	if err := json.Unmarshal(requestBody, &tempValue); err != nil {
+		return nil, err
+	}
+	return requestBody, nil
+}
+
 // UpdateSectionSettings handles PATCH /api/v2/settings/:section
 func (c *Controller) UpdateSectionSettings(ctx echo.Context) error {
-	// Acquire write lock to prevent concurrent settings updates
 	c.settingsMutex.Lock()
 	defer c.settingsMutex.Unlock()
 
@@ -478,57 +503,38 @@ func (c *Controller) UpdateSectionSettings(ctx echo.Context) error {
 		return c.HandleError(ctx, fmt.Errorf("section not specified"), "Section parameter is required", http.StatusBadRequest)
 	}
 
-	settings := c.Settings
+	settings := c.getSettingsOrFallback()
 	if settings == nil {
-		// Fallback to global settings if controller settings not set
-		settings = conf.Setting()
-		if settings == nil {
-			return c.HandleError(ctx, fmt.Errorf("settings not initialized"), "Failed to get settings", http.StatusInternalServerError)
-		}
+		return c.HandleError(ctx, fmt.Errorf("settings not initialized"), "Failed to get settings", http.StatusInternalServerError)
 	}
 
-	// Create a backup of current settings for rollback if needed
 	oldSettings := *settings
 
-	// Parse the request body
-	var requestBody json.RawMessage
-	if err := ctx.Bind(&requestBody); err != nil {
+	requestBody, err := parseAndValidateJSON(ctx)
+	if err != nil {
 		return c.HandleError(ctx, err, "Failed to parse request body", http.StatusBadRequest)
 	}
 
-	// Validate that the request body contains valid JSON
-	var tempValue any
-	if err := json.Unmarshal(requestBody, &tempValue); err != nil {
-		return c.HandleError(ctx, err, "Invalid JSON in request body", http.StatusBadRequest)
-	}
-
-	// Update the specific section
 	var skippedFields []string
 	if err := updateSettingsSectionWithTracking(settings, section, requestBody, &skippedFields); err != nil {
-		// Log which fields were attempted to be updated but were protected
 		if len(skippedFields) > 0 {
 			c.Debug("Protected fields that were skipped in update of section %s: %s", section, strings.Join(skippedFields, ", "))
 		}
 		return c.HandleError(ctx, err, fmt.Sprintf("Failed to update %s settings", section), http.StatusBadRequest)
 	}
 
-	// Check if any important settings have changed and trigger actions as needed
 	if err := c.handleSettingsChanges(&oldSettings, settings); err != nil {
-		// Attempt to rollback changes if applying them failed
 		*settings = oldSettings
 		return c.HandleError(ctx, err, "Failed to apply settings changes, rolled back to previous settings", http.StatusInternalServerError)
 	}
 
-	// Save settings to disk (unless disabled for tests)
 	if !c.DisableSaveSettings {
 		if err := conf.SaveSettings(); err != nil {
-			// Attempt to rollback changes if saving failed
 			*settings = oldSettings
 			return c.HandleError(ctx, err, "Failed to save settings, rolled back to previous settings", http.StatusInternalServerError)
 		}
 	}
 
-	// Update the cached telemetry state after settings change
 	telemetry.UpdateTelemetryEnabled()
 
 	return ctx.JSON(http.StatusOK, map[string]any{
@@ -562,49 +568,6 @@ func updateSettingsSectionWithTracking(settings *conf.Settings, section string, 
 
 	// Use the generic handler with merging for ALL sections
 	return handleGenericSection(sectionValue, data, section, skippedFields)
-}
-
-// validateRTSPURLs validates a slice of RTSP URLs
-func validateRTSPURLs(urls []string) error {
-	for i, urlStr := range urls {
-		if urlStr == "" {
-			return fmt.Errorf("RTSP URL at index %d cannot be empty", i)
-		}
-
-		// Parse the URL to validate its structure
-		parsedURL, err := url.Parse(urlStr)
-		if err != nil {
-			return fmt.Errorf("RTSP URL at index %d is malformed: %w", i, err)
-		}
-
-		// Check if the scheme is RTSP
-		if parsedURL.Scheme != "rtsp" {
-			return fmt.Errorf("RTSP URL at index %d must use rtsp:// scheme, got %s://", i, parsedURL.Scheme)
-		}
-
-		// Check if host is present
-		if parsedURL.Host == "" {
-			return fmt.Errorf("RTSP URL at index %d is missing host", i)
-		}
-
-		// Validate that the host part is properly formatted
-		// This includes checking for valid hostname or IP address
-		if parsedURL.Hostname() == "" {
-			return fmt.Errorf("RTSP URL at index %d has invalid hostname", i)
-		}
-
-		// If port is specified, validate it's a valid number
-		if portStr := parsedURL.Port(); portStr != "" {
-			port, err := strconv.Atoi(portStr)
-			if err != nil {
-				return fmt.Errorf("RTSP URL at index %d has invalid port: %w", i, err)
-			}
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("RTSP URL at index %d has port %d out of valid range (1-65535)", i, port)
-			}
-		}
-	}
-	return nil
 }
 
 // mergeJSONIntoStruct merges JSON data into an existing struct without zeroing out missing fields
@@ -670,6 +633,74 @@ func deepMergeMaps(dst, src map[string]any) map[string]any {
 	return result
 }
 
+// normalizeSpeciesConfigKeysInJSON normalizes species config map keys to lowercase in the JSON data.
+// This ensures case-insensitive key matching during deep merge operations.
+// For "species" section: normalizes keys in the "config" field
+// For "realtime" section: normalizes keys in the "species.config" field
+func normalizeSpeciesConfigKeysInJSON(data json.RawMessage, sectionName string) (json.RawMessage, error) {
+	// Only process species-related sections
+	if sectionName != SettingsSectionSpecies && sectionName != SettingsSectionRealtime {
+		return data, nil
+	}
+
+	var dataMap map[string]any
+	if err := json.Unmarshal(data, &dataMap); err != nil {
+		// For species/realtime sections, we expect a JSON object
+		// Return error for clearer feedback on malformed requests
+		return nil, fmt.Errorf("failed to unmarshal section data as JSON object: %w", err)
+	}
+
+	modified := false
+
+	switch sectionName {
+	case SettingsSectionSpecies:
+		// Direct species section: normalize "config" keys
+		if configMap, ok := dataMap["config"].(map[string]any); ok {
+			dataMap["config"] = normalizeMapKeysToLowercase(configMap)
+			modified = true
+		}
+	case SettingsSectionRealtime:
+		// Realtime section: normalize "species.config" keys
+		if speciesMap, ok := dataMap["species"].(map[string]any); ok {
+			if configMap, ok := speciesMap["config"].(map[string]any); ok {
+				speciesMap["config"] = normalizeMapKeysToLowercase(configMap)
+				modified = true
+			}
+		}
+	}
+
+	if !modified {
+		return data, nil
+	}
+
+	return json.Marshal(dataMap)
+}
+
+// normalizeMapKeysToLowercase converts all keys in a map to lowercase.
+// Uses a two-pass algorithm to ensure deterministic behavior when the input
+// contains conflicting keys (e.g., "Bird" and "bird"): mixed-case keys
+// take precedence over their lowercase counterparts.
+func normalizeMapKeysToLowercase(m map[string]any) map[string]any {
+	result := make(map[string]any, len(m))
+
+	// First pass: add all already-lowercase keys
+	for k, v := range m {
+		if k == strings.ToLower(k) {
+			result[k] = v
+		}
+	}
+
+	// Second pass: add non-lowercase keys (normalized), overwriting any
+	// existing lowercase versions
+	for k, v := range m {
+		if k != strings.ToLower(k) {
+			result[strings.ToLower(k)] = v
+		}
+	}
+
+	return result
+}
+
 // Helper functions
 
 // getSettingsSectionValue returns a pointer to the requested section of settings for in-place updates
@@ -678,17 +709,17 @@ func getSettingsSectionValue(settings *conf.Settings, section string) (any, erro
 
 	// Map section names to their corresponding pointers
 	switch section {
-	case "birdnet":
+	case SettingsSectionBirdnet:
 		return &settings.BirdNET, nil
-	case "webserver":
+	case SettingsSectionWebserver:
 		return &settings.WebServer, nil
 	case "security":
 		return &settings.Security, nil
 	case "main":
 		return &settings.Main, nil
-	case "realtime":
+	case SettingsSectionRealtime:
 		return &settings.Realtime, nil
-	case "audio":
+	case SettingsSectionAudio:
 		return getAudioSectionValue(settings), nil
 	case "dashboard":
 		return &settings.Realtime.Dashboard, nil
@@ -698,7 +729,7 @@ func getSettingsSectionValue(settings *conf.Settings, section string) (any, erro
 		return &settings.Realtime.MQTT, nil
 	case "birdweather":
 		return &settings.Realtime.Birdweather, nil
-	case "species":
+	case SettingsSectionSpecies:
 		return &settings.Realtime.Species, nil
 	case "rtsp":
 		return &settings.Realtime.RTSP, nil
@@ -719,8 +750,15 @@ func getSettingsSectionValue(settings *conf.Settings, section string) (any, erro
 
 // handleGenericSection handles updates to any settings section using merging
 func handleGenericSection(sectionPtr any, data json.RawMessage, sectionName string, skippedFields *[]string) error {
+	// Normalize species config keys in the incoming data BEFORE merging
+	// This ensures case-insensitive key matching during the deep merge
+	normalizedData, err := normalizeSpeciesConfigKeysInJSON(data, sectionName)
+	if err != nil {
+		return fmt.Errorf("failed to normalize species config keys: %w", err)
+	}
+
 	// Use mergeJSONIntoStruct to preserve fields not included in the update
-	if err := mergeJSONIntoStruct(data, sectionPtr); err != nil {
+	if err := mergeJSONIntoStruct(normalizedData, sectionPtr); err != nil {
 		return fmt.Errorf("failed to merge settings for section %s: %w", sectionName, err)
 	}
 
@@ -729,11 +767,11 @@ func handleGenericSection(sectionPtr any, data json.RawMessage, sectionName stri
 	// We need to map our lowercase section names to the expected capitalized format
 	capitalizedSectionName := ""
 	switch sectionName {
-	case "birdnet":
+	case SettingsSectionBirdnet:
 		capitalizedSectionName = "BirdNET"
-	case "realtime":
+	case SettingsSectionRealtime:
 		capitalizedSectionName = "Realtime"
-	case "webserver":
+	case SettingsSectionWebserver:
 		capitalizedSectionName = "WebServer"
 	default:
 		// For other sections, capitalize first letter
@@ -760,15 +798,15 @@ type sectionValidator func(data json.RawMessage) error
 // getSectionValidators returns validators for sections that need special validation
 func getSectionValidators() map[string]sectionValidator {
 	return map[string]sectionValidator{
-		"mqtt":         validateMQTTSection,
-		"rtsp":         validateRTSPSection,
-		"security":     validateSecuritySection,
-		"main":         validateMainSection,
-		"birdnet":      validateBirdNETSection,
-		"webserver":    validateWebServerSection,
-		"species":      validateSpeciesSection,
-		"realtime":     validateRealtimeSection,
-		"notification": validateNotificationSection,
+		"mqtt":                   validateMQTTSection,
+		"rtsp":                   validateStreamsSection,
+		"security":               validateSecuritySection,
+		"main":                   validateMainSection,
+		SettingsSectionBirdnet:   validateBirdNETSection,
+		SettingsSectionWebserver: validateWebServerSection,
+		SettingsSectionSpecies:   validateSpeciesSection,
+		SettingsSectionRealtime:  validateRealtimeSection,
+		"notification":           validateNotificationSection,
 	}
 }
 
@@ -787,24 +825,27 @@ func validateMQTTSection(data json.RawMessage) error {
 	return nil
 }
 
-// validateRTSPSection validates RTSP settings
-func validateRTSPSection(data json.RawMessage) error {
+// validateStreamsSection validates stream settings
+func validateStreamsSection(data json.RawMessage) error {
 	var rtspSettings conf.RTSPSettings
 	if err := json.Unmarshal(data, &rtspSettings); err != nil {
 		return err
 	}
 
-	// Validate RTSP URLs
-	return validateRTSPURLs(rtspSettings.URLs)
+	// Validate RTSP streams
+	return rtspSettings.ValidateStreams()
 }
 
 // securitySectionAllowedFields defines which fields in the security section can be updated via API
 var securitySectionAllowedFields = map[string]bool{
 	"host":              true, // Server hostname for TLS
+	"baseUrl":           true, // Base URL for OAuth redirects
 	"autoTls":           true, // AutoTLS setting
 	"basicAuth":         true, // Basic authentication settings
-	"googleAuth":        true, // Google OAuth settings
-	"githubAuth":        true, // GitHub OAuth settings
+	"oauthProviders":    true, // New array-based OAuth provider configuration
+	"googleAuth":        true, // Legacy Google OAuth settings (deprecated)
+	"githubAuth":        true, // Legacy GitHub OAuth settings (deprecated)
+	"microsoftAuth":     true, // Legacy Microsoft OAuth settings (deprecated)
 	"allowSubnetBypass": true, // Subnet bypass settings
 	"redirectToHttps":   true, // HTTPS redirect setting
 	// sessionSecret is NOT allowed - it's generated internally
@@ -838,7 +879,12 @@ func validateSecuritySectionValues(updateMap map[string]any) error {
 		return err
 	}
 
-	// Validate OAuth settings
+	// Validate new array-based OAuth providers
+	if err := validateOAuthProvidersArray(updateMap); err != nil {
+		return err
+	}
+
+	// Validate legacy OAuth settings (deprecated, but still supported)
 	if err := validateOAuthSettings("googleAuth", updateMap); err != nil {
 		return err
 	}
@@ -944,6 +990,131 @@ func validateSubnetBypassField(updateMap map[string]any) error {
 	return nil
 }
 
+// validOAuthProviders defines the valid OAuth provider names
+var validOAuthProviders = map[string]bool{
+	"google":    true,
+	"github":    true,
+	"microsoft": true,
+	"line":      true,
+	"kakao":     true,
+}
+
+// getValidOAuthProviderNames returns sorted list of valid provider names for error messages
+func getValidOAuthProviderNames() string {
+	names := make([]string, 0, len(validOAuthProviders))
+	for name := range validOAuthProviders {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// validateOAuthProvidersArray validates the new array-based OAuth providers configuration
+func validateOAuthProvidersArray(updateMap map[string]any) error {
+	providers, exists := updateMap["oauthProviders"]
+	if !exists {
+		return nil
+	}
+
+	providersArray, ok := providers.([]any)
+	if !ok {
+		return fmt.Errorf("oauthProviders must be an array")
+	}
+
+	// Track configured providers to detect duplicates
+	configuredProviders := make(map[string]bool)
+
+	for i, item := range providersArray {
+		providerName, err := validateOAuthProviderEntry(item, i, configuredProviders)
+		if err != nil {
+			return err
+		}
+		configuredProviders[providerName] = true
+	}
+
+	return nil
+}
+
+// validateOAuthProviderEntry validates a single OAuth provider entry in the array.
+// Returns the provider name if valid, or an error if validation fails.
+func validateOAuthProviderEntry(item any, index int, configuredProviders map[string]bool) (string, error) {
+	providerMap, ok := item.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("oauthProviders[%d] must be an object", index)
+	}
+
+	providerName, err := validateOAuthProviderName(providerMap, index, configuredProviders)
+	if err != nil {
+		return "", err
+	}
+
+	if err := validateOAuthProviderEnabled(providerMap, index); err != nil {
+		return "", err
+	}
+
+	return providerName, nil
+}
+
+// validateOAuthProviderName validates the provider name field and checks for duplicates.
+func validateOAuthProviderName(providerMap map[string]any, index int, configuredProviders map[string]bool) (string, error) {
+	providerName, ok := providerMap["provider"].(string)
+	if !ok || providerName == "" {
+		return "", fmt.Errorf("oauthProviders[%d].provider must be a non-empty string", index)
+	}
+
+	if !validOAuthProviders[providerName] {
+		return "", fmt.Errorf("oauthProviders[%d].provider '%s' is not a valid provider (valid: %s)", index, providerName, getValidOAuthProviderNames())
+	}
+
+	if configuredProviders[providerName] {
+		return "", fmt.Errorf("oauthProviders contains duplicate provider '%s'", providerName)
+	}
+
+	return providerName, nil
+}
+
+// validateOAuthProviderEnabled validates the enabled field and required credentials.
+func validateOAuthProviderEnabled(providerMap map[string]any, index int) error {
+	enabledVal, exists := providerMap["enabled"]
+	if !exists {
+		return nil
+	}
+
+	enabledBool, ok := enabledVal.(bool)
+	if !ok {
+		return fmt.Errorf("oauthProviders[%d].enabled must be a boolean", index)
+	}
+
+	if !enabledBool {
+		return nil
+	}
+
+	// Provider is enabled, validate required fields
+	if err := validateRequiredStringInProvider(providerMap, "clientId", index); err != nil {
+		return err
+	}
+	return validateRequiredStringInProvider(providerMap, "clientSecret", index)
+}
+
+// validateRequiredStringInProvider validates a required string field in an OAuth provider config
+func validateRequiredStringInProvider(providerMap map[string]any, fieldName string, index int) error {
+	val, exists := providerMap[fieldName]
+	if !exists {
+		return fmt.Errorf("oauthProviders[%d].%s is required when enabled", index, fieldName)
+	}
+
+	str, ok := val.(string)
+	if !ok {
+		return fmt.Errorf("oauthProviders[%d].%s must be a string", index, fieldName)
+	}
+
+	if str == "" {
+		return fmt.Errorf("oauthProviders[%d].%s cannot be empty when enabled", index, fieldName)
+	}
+
+	return nil
+}
+
 // validateOAuthSettings validates OAuth provider settings
 func validateOAuthSettings(providerName string, updateMap map[string]any) error {
 	provider, exists := updateMap[providerName]
@@ -968,24 +1139,11 @@ func validateOAuthSettings(providerName string, updateMap map[string]any) error 
 
 	// If enabled, validate required fields
 	if enabled {
-		// Check clientId
-		if clientId, exists := providerMap["clientId"]; exists {
-			if str, ok := clientId.(string); !ok || str == "" {
-				return fmt.Errorf("%s.clientId is required when enabled", providerName)
-			}
-		} else if enabled {
-			// clientId field missing when provider is enabled
-			return fmt.Errorf("%s.clientId is required when enabled", providerName)
+		if err := validateRequiredStringWhenEnabled(providerMap, "clientId", providerName); err != nil {
+			return err
 		}
-
-		// Check clientSecret
-		if clientSecret, exists := providerMap["clientSecret"]; exists {
-			if str, ok := clientSecret.(string); !ok || str == "" {
-				return fmt.Errorf("%s.clientSecret is required when enabled", providerName)
-			}
-		} else if enabled {
-			// clientSecret field missing when provider is enabled
-			return fmt.Errorf("%s.clientSecret is required when enabled", providerName)
+		if err := validateRequiredStringWhenEnabled(providerMap, "clientSecret", providerName); err != nil {
+			return err
 		}
 	}
 
@@ -1010,28 +1168,10 @@ func validateMainSection(data json.RawMessage) error {
 
 // validateMainSectionValues validates the values of main section fields
 func validateMainSectionValues(updateMap map[string]any) error {
-	// Validate node name
-	if name, exists := updateMap["name"]; exists {
-		if str, ok := name.(string); ok {
-			if str == "" {
-				return fmt.Errorf("node name cannot be empty")
-			}
-			if len(str) > 100 {
-				return fmt.Errorf("node name must not exceed 100 characters")
-			}
-		} else {
-			return fmt.Errorf("node name must be a string")
-		}
+	if err := validateNonEmptyString(updateMap, "name", maxNodeNameLength, "node name"); err != nil {
+		return err
 	}
-
-	// Validate timeAs24h
-	if timeAs24h, exists := updateMap["timeAs24h"]; exists {
-		if _, ok := timeAs24h.(bool); !ok {
-			return fmt.Errorf("timeAs24h must be a boolean value")
-		}
-	}
-
-	return nil
+	return validateBoolField(updateMap, "timeAs24h", "timeAs24h")
 }
 
 // validateBirdNETSection validates BirdNET settings
@@ -1041,25 +1181,10 @@ func validateBirdNETSection(data json.RawMessage) error {
 		return err
 	}
 
-	// Validate latitude
-	if lat, exists := updateMap["latitude"]; exists {
-		if latFloat, ok := lat.(float64); ok {
-			if latFloat < -90 || latFloat > 90 {
-				return fmt.Errorf("latitude must be between -90 and 90")
-			}
-		}
+	if err := validateFloatInRange(updateMap, "latitude", minLatitude, maxLatitude, "latitude"); err != nil {
+		return err
 	}
-
-	// Validate longitude
-	if lng, exists := updateMap["longitude"]; exists {
-		if lngFloat, ok := lng.(float64); ok {
-			if lngFloat < -180 || lngFloat > 180 {
-				return fmt.Errorf("longitude must be between -180 and 180")
-			}
-		}
-	}
-
-	return nil
+	return validateFloatInRange(updateMap, "longitude", minLongitude, maxLongitude, "longitude")
 }
 
 // validateWebServerSection validates WebServer settings
@@ -1069,25 +1194,7 @@ func validateWebServerSection(data json.RawMessage) error {
 		return err
 	}
 
-	// Validate port
-	if portValue, exists := updateMap["port"]; exists {
-		switch port := portValue.(type) {
-		case string:
-			portInt, err := strconv.Atoi(port)
-			if err != nil {
-				return fmt.Errorf("port must be a valid number")
-			}
-			if portInt < 1 || portInt > 65535 {
-				return fmt.Errorf("port must be between 1 and 65535")
-			}
-		case int:
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("port must be between 1 and 65535")
-			}
-		}
-	}
-
-	return nil
+	return validatePortField(updateMap, "port")
 }
 
 // validateSpeciesSection validates species settings
@@ -1178,17 +1285,17 @@ func getSettingsSection(settings *conf.Settings, section string) (any, error) {
 
 	// Check nested fields
 	switch section {
-	case "birdnet":
+	case SettingsSectionBirdnet:
 		return settings.BirdNET, nil
-	case "webserver":
+	case SettingsSectionWebserver:
 		return settings.WebServer, nil
 	case "security":
 		return settings.Security, nil
 	case "main":
 		return settings.Main, nil
-	case "realtime":
+	case SettingsSectionRealtime:
 		return settings.Realtime, nil
-	case "audio":
+	case SettingsSectionAudio:
 		return getAudioSection(settings), nil
 	case "dashboard":
 		return settings.Realtime.Dashboard, nil
@@ -1198,58 +1305,87 @@ func getSettingsSection(settings *conf.Settings, section string) (any, error) {
 		return settings.Realtime.MQTT, nil
 	case "birdweather":
 		return settings.Realtime.Birdweather, nil
-	case "species":
+	case SettingsSectionSpecies:
 		return settings.Realtime.Species, nil
 	default:
 		return nil, fmt.Errorf("unknown settings section: %s", section)
 	}
 }
 
+// Field validation constants
+const (
+	minPort        = 1
+	maxPort        = 65535
+	minLatitude    = -90
+	maxLatitude    = 90
+	minLongitude   = -180
+	maxLongitude   = 180
+	minPasswordLen = 8
+)
+
+// fieldValidators maps field names to their validation functions
+var fieldValidators = map[string]func(value any) error{
+	"port":      validatePort,
+	"latitude":  validateLatitude,
+	"longitude": validateLongitude,
+	"password":  validatePassword,
+}
+
 // validateField performs validation on specific fields that require extra checks
 // Returns nil if validation passes, error otherwise
 func validateField(fieldName string, value any) error {
-	switch fieldName {
-	case "port":
-		// Validate port is in valid range
-		switch port := value.(type) {
-		case int:
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("port must be between 1 and 65535")
-			}
-		case string:
-			// Handle string ports (convert to int and validate)
-			portInt, err := strconv.Atoi(port)
-			if err != nil {
-				return fmt.Errorf("port must be a valid number")
-			}
-			if portInt < 1 || portInt > 65535 {
-				return fmt.Errorf("port must be between 1 and 65535")
-			}
+	if validator, ok := fieldValidators[fieldName]; ok {
+		return validator(value)
+	}
+	return nil
+}
+
+// validatePort validates port numbers in valid range (1-65535)
+func validatePort(value any) error {
+	switch port := value.(type) {
+	case int:
+		if port < minPort || port > maxPort {
+			return fmt.Errorf("port must be between %d and %d", minPort, maxPort)
 		}
-	case "latitude":
-		// Validate latitude range
-		if lat, ok := value.(float64); ok {
-			if lat < -90 || lat > 90 {
-				return fmt.Errorf("latitude must be between -90 and 90")
-			}
+	case string:
+		portInt, err := strconv.Atoi(port)
+		if err != nil {
+			return fmt.Errorf("port must be a valid number")
 		}
-	case "longitude":
-		// Validate longitude range
-		if lng, ok := value.(float64); ok {
-			if lng < -180 || lng > 180 {
-				return fmt.Errorf("longitude must be between -180 and 180")
-			}
-		}
-	case "password":
-		// For sensitive fields like passwords, perform additional validation
-		// For example, you could check minimum length, complexity, etc.
-		if pass, ok := value.(string); ok {
-			if pass != "" && len(pass) < 8 {
-				return fmt.Errorf("password must be at least 8 characters long")
-			}
+		if portInt < minPort || portInt > maxPort {
+			return fmt.Errorf("port must be between %d and %d", minPort, maxPort)
 		}
 	}
+	return nil
+}
 
+// validateLatitude validates latitude range (-90 to 90)
+func validateLatitude(value any) error {
+	if lat, ok := value.(float64); ok {
+		if lat < minLatitude || lat > maxLatitude {
+			return fmt.Errorf("latitude must be between %d and %d", minLatitude, maxLatitude)
+		}
+	}
+	return nil
+}
+
+// validateLongitude validates longitude range (-180 to 180)
+func validateLongitude(value any) error {
+	if lng, ok := value.(float64); ok {
+		if lng < minLongitude || lng > maxLongitude {
+			return fmt.Errorf("longitude must be between %d and %d", minLongitude, maxLongitude)
+		}
+	}
+	return nil
+}
+
+// validatePassword validates password minimum length
+func validatePassword(value any) error {
+	if pass, ok := value.(string); ok {
+		if pass != "" && len(pass) < minPasswordLen {
+			return fmt.Errorf("password must be at least %d characters long", minPasswordLen)
+		}
+	}
 	return nil
 }
 
@@ -1302,68 +1438,46 @@ func getBlockedFieldMap() map[string]any {
 	}
 }
 
+// settingsChangeCheck defines a settings change detector with its associated action and notification.
+type settingsChangeCheck struct {
+	name     string                                 // Human-readable name for logging
+	action   string                                 // Control action to trigger (empty = notify only)
+	changed  func(old, current *conf.Settings) bool // Function to detect if settings changed
+	toast    string                                 // Toast message to display
+	toastTyp string                                 // Toast type: "info" or "warning"
+	duration int                                    // Toast duration in milliseconds
+}
+
+// settingsChangeChecks defines all settings change detectors in order of execution.
+// Each check has a detection function, action to trigger, and toast notification.
+var settingsChangeChecks = []settingsChangeCheck{
+	{"BirdNET", "reload_birdnet", birdnetSettingsChanged, "Reloading BirdNET model with new settings...", "info", toastDurationLong},
+	{"Range filter", "rebuild_range_filter", rangeFilterSettingsChanged, "Rebuilding species range filter...", "info", toastDurationMedium},
+	{"Species interval", "update_detection_intervals", intervalSettingsChanged, "Updating detection intervals...", "info", toastDurationShort},
+	{"MQTT", "reconfigure_mqtt", mqttSettingsChanged, "Reconfiguring MQTT connection...", "info", toastDurationMedium},
+	{"BirdWeather", "reconfigure_birdweather", birdWeatherSettingsChanged, "Reconfiguring BirdWeather integration...", "info", toastDurationMedium},
+	{"Streams", "reconfigure_rtsp_sources", streamsSettingsChanged, "Reconfiguring audio streams...", "info", toastDurationMedium},
+	{"Telemetry", "reconfigure_telemetry", telemetrySettingsChanged, "Reconfiguring telemetry settings...", "info", toastDurationShort},
+	{"Species tracking", "reconfigure_species_tracking", speciesTrackingSettingsChanged, "Reconfiguring species tracking...", "info", toastDurationShort},
+	{"Web server", "", webserverSettingsChanged, "Web server settings changed. Restart required to apply.", "warning", toastDurationExtended},
+}
+
 // handleSettingsChanges checks if important settings have changed and triggers appropriate actions
 func (c *Controller) handleSettingsChanges(oldSettings, currentSettings *conf.Settings) error {
-	// Create a slice to track which reconfigurations need to be performed
 	var reconfigActions []string
 
-	// Check BirdNET settings
-	if birdnetSettingsChanged(oldSettings, currentSettings) {
-		c.Debug("BirdNET settings changed, triggering reload")
-		reconfigActions = append(reconfigActions, "reload_birdnet")
-		// Send toast notification
-		_ = c.SendToast("Reloading BirdNET model with new settings...", "info", 5000)
+	// Process all settings change checks using table-driven approach
+	for _, check := range settingsChangeChecks {
+		if check.changed(oldSettings, currentSettings) {
+			c.Debug("%s settings changed, triggering %s", check.name, check.action)
+			if check.action != "" {
+				reconfigActions = append(reconfigActions, check.action)
+			}
+			_ = c.SendToast(check.toast, check.toastTyp, check.duration)
+		}
 	}
 
-	// Check range filter settings
-	if rangeFilterSettingsChanged(oldSettings, currentSettings) {
-		c.Debug("Range filter settings changed, triggering rebuild")
-		reconfigActions = append(reconfigActions, "rebuild_range_filter")
-		// Send toast notification
-		_ = c.SendToast("Rebuilding species range filter...", "info", 4000)
-	}
-
-	// Check species interval settings
-	if speciesIntervalSettingsChanged(oldSettings, currentSettings) || oldSettings.Realtime.Interval != currentSettings.Realtime.Interval {
-		c.Debug("Species interval settings changed, triggering update")
-		reconfigActions = append(reconfigActions, "update_detection_intervals")
-		// Send toast notification
-		_ = c.SendToast("Updating detection intervals...", "info", 3000)
-	}
-
-	// Check MQTT settings
-	if mqttSettingsChanged(oldSettings, currentSettings) {
-		c.Debug("MQTT settings changed, triggering reconfiguration")
-		reconfigActions = append(reconfigActions, "reconfigure_mqtt")
-		// Send toast notification
-		_ = c.SendToast("Reconfiguring MQTT connection...", "info", 4000)
-	}
-
-	// Check BirdWeather settings
-	if birdWeatherSettingsChanged(oldSettings, currentSettings) {
-		c.Debug("BirdWeather settings changed, triggering reconfiguration")
-		reconfigActions = append(reconfigActions, "reconfigure_birdweather")
-		// Send toast notification
-		_ = c.SendToast("Reconfiguring BirdWeather integration...", "info", 4000)
-	}
-
-	// Check RTSP settings
-	if rtspSettingsChanged(oldSettings, currentSettings) {
-		c.Debug("RTSP settings changed, triggering reconfiguration")
-		reconfigActions = append(reconfigActions, "reconfigure_rtsp_sources")
-		// Send toast notification
-		_ = c.SendToast("Reconfiguring RTSP sources...", "info", 4000)
-	}
-
-	// Check telemetry settings
-	if telemetrySettingsChanged(oldSettings, currentSettings) {
-		c.Debug("Telemetry settings changed, triggering reconfiguration")
-		reconfigActions = append(reconfigActions, "reconfigure_telemetry")
-		// Send toast notification
-		_ = c.SendToast("Reconfiguring telemetry settings...", "info", 3000)
-	}
-
-	// Handle audio settings changes
+	// Handle audio settings changes (separate due to error return)
 	audioActions, err := c.handleAudioSettingsChanges(oldSettings, currentSettings)
 	if err != nil {
 		return err
@@ -1376,13 +1490,17 @@ func (c *Controller) handleSettingsChanges(oldSettings, currentSettings *conf.Se
 			for _, action := range actions {
 				c.Debug("Asynchronously executing action: %s", action)
 				c.controlChan <- action
-				// Add a small delay between actions to avoid overwhelming the system
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(actionDelay)
 			}
 		}(reconfigActions)
 	}
 
 	return nil
+}
+
+// intervalSettingsChanged checks if species interval or global interval settings have changed.
+func intervalSettingsChanged(old, current *conf.Settings) bool {
+	return speciesIntervalSettingsChanged(old, current) || old.Realtime.Interval != current.Realtime.Interval
 }
 
 // birdnetSettingsChanged checks if BirdNET settings have changed
@@ -1456,23 +1574,26 @@ func mqttSettingsChanged(oldSettings, currentSettings *conf.Settings) bool {
 		oldMQTT.TLS.ClientKey != newMQTT.TLS.ClientKey
 }
 
-// rtspSettingsChanged checks if RTSP settings have changed
-func rtspSettingsChanged(oldSettings, currentSettings *conf.Settings) bool {
+// streamsSettingsChanged checks if stream settings have changed
+func streamsSettingsChanged(oldSettings, currentSettings *conf.Settings) bool {
 	oldRTSP := oldSettings.Realtime.RTSP
 	newRTSP := currentSettings.Realtime.RTSP
 
-	// Check for changes in RTSP transport protocol
-	if oldRTSP.Transport != newRTSP.Transport {
+	// Check for changes in stream count
+	if len(oldRTSP.Streams) != len(newRTSP.Streams) {
 		return true
 	}
 
-	// Check for changes in RTSP URLs
-	if len(oldRTSP.URLs) != len(newRTSP.URLs) {
-		return true
-	}
-
-	for i, url := range oldRTSP.URLs {
-		if i >= len(newRTSP.URLs) || url != newRTSP.URLs[i] {
+	// Check for changes in individual streams (name, URL, type, or transport)
+	for i, oldStream := range oldRTSP.Streams {
+		if i >= len(newRTSP.Streams) {
+			return true
+		}
+		newStream := newRTSP.Streams[i]
+		if oldStream.Name != newStream.Name ||
+			oldStream.URL != newStream.URL ||
+			oldStream.Type != newStream.Type ||
+			oldStream.Transport != newStream.Transport {
 			return true
 		}
 	}
@@ -1558,6 +1679,82 @@ func telemetrySettingsChanged(oldSettings, currentSettings *conf.Settings) bool 
 	return false
 }
 
+// yearlyTrackingChanged checks if yearly tracking settings have changed.
+func yearlyTrackingChanged(old, current conf.YearlyTrackingSettings) bool {
+	return old.Enabled != current.Enabled ||
+		old.WindowDays != current.WindowDays ||
+		old.ResetMonth != current.ResetMonth ||
+		old.ResetDay != current.ResetDay
+}
+
+// seasonalTrackingChanged checks if seasonal tracking settings have changed.
+func seasonalTrackingChanged(old, current conf.SeasonalTrackingSettings) bool {
+	if old.Enabled != current.Enabled || old.WindowDays != current.WindowDays {
+		return true
+	}
+	if len(old.Seasons) != len(current.Seasons) {
+		return true
+	}
+	for name, oldSeason := range old.Seasons {
+		currentSeason, exists := current.Seasons[name]
+		if !exists || oldSeason.StartMonth != currentSeason.StartMonth || oldSeason.StartDay != currentSeason.StartDay {
+			return true
+		}
+	}
+	return false
+}
+
+// speciesTrackingSettingsChanged checks if species tracking settings have changed
+func speciesTrackingSettingsChanged(oldSettings, currentSettings *conf.Settings) bool {
+	oldTracking := oldSettings.Realtime.SpeciesTracking
+	newTracking := currentSettings.Realtime.SpeciesTracking
+
+	// Check for changes in enabled state
+	if oldTracking.Enabled != newTracking.Enabled {
+		return true
+	}
+
+	// If disabled, no need to check other settings
+	if !newTracking.Enabled {
+		return false
+	}
+
+	// Check core settings
+	if oldTracking.NewSpeciesWindowDays != newTracking.NewSpeciesWindowDays ||
+		oldTracking.SyncIntervalMinutes != newTracking.SyncIntervalMinutes ||
+		oldTracking.NotificationSuppressionHours != newTracking.NotificationSuppressionHours {
+		return true
+	}
+
+	return yearlyTrackingChanged(oldTracking.YearlyTracking, newTracking.YearlyTracking) ||
+		seasonalTrackingChanged(oldTracking.SeasonalTracking, newTracking.SeasonalTracking)
+}
+
+// webserverSettingsChanged checks if web server settings have changed that require a restart
+func webserverSettingsChanged(oldSettings, currentSettings *conf.Settings) bool {
+	oldWS := oldSettings.WebServer
+	newWS := currentSettings.WebServer
+
+	// Check web server core settings
+	if oldWS.Port != newWS.Port ||
+		oldWS.Enabled != newWS.Enabled ||
+		oldWS.Debug != newWS.Debug {
+		return true
+	}
+
+	// Check security/TLS settings that affect the server
+	oldSec := oldSettings.Security
+	newSec := currentSettings.Security
+
+	if oldSec.Host != newSec.Host ||
+		oldSec.AutoTLS != newSec.AutoTLS ||
+		oldSec.RedirectToHTTPS != newSec.RedirectToHTTPS {
+		return true
+	}
+
+	return false
+}
+
 // LocaleData represents a locale with its code and full name
 type LocaleData struct {
 	Code string `json:"code"`
@@ -1572,74 +1769,71 @@ type ImageProviderOption struct {
 
 // GetLocales handles GET /api/v2/settings/locales
 func (c *Controller) GetLocales(ctx echo.Context) error {
-	c.logAPIRequest(ctx, slog.LevelInfo, "Getting available locales")
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Getting available locales")
 
 	// Return locales in the same format as v1 for compatibility
 	// This matches the client-side expectation of key-value pairs
 	locales := make(map[string]string)
 	maps.Copy(locales, conf.LocaleCodes)
 
-	c.logAPIRequest(ctx, slog.LevelInfo, "Retrieved locales successfully", "count", len(locales))
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Retrieved locales successfully", logger.Int("count", len(locales)))
 
 	return ctx.JSON(http.StatusOK, locales)
 }
 
+// capitalizeProviderName returns a display name for the provider with first letter capitalized.
+func capitalizeProviderName(name string) string {
+	if name == "" {
+		return "(unknown)"
+	}
+	r, size := utf8.DecodeRuneInString(name)
+	return strings.ToUpper(string(r)) + name[size:]
+}
+
+// collectImageProviders collects and sorts image providers from the registry.
+func (c *Controller) collectImageProviders(ctx echo.Context) (providers []ImageProviderOption, count int) {
+	providers = []ImageProviderOption{{Value: "auto", Display: "Auto (Default)"}}
+
+	if c.BirdImageCache == nil {
+		c.logAPIRequest(ctx, logger.LogLevelWarn, "BirdImageCache is nil, cannot get provider names")
+		return providers, count
+	}
+
+	registry := c.BirdImageCache.GetRegistry()
+	if registry == nil {
+		c.logAPIRequest(ctx, logger.LogLevelWarn, "ImageProviderRegistry is nil, cannot get provider names")
+		return providers, count
+	}
+
+	registry.RangeProviders(func(name string, _ *imageprovider.BirdImageCache) bool {
+		providers = append(providers, ImageProviderOption{Value: name, Display: capitalizeProviderName(name)})
+		count++
+		return true
+	})
+
+	// Sort providers alphabetically by display name (excluding 'auto')
+	if len(providers) > minSortableElements {
+		sub := providers[1:]
+		sort.Slice(sub, func(i, j int) bool { return sub[i].Display < sub[j].Display })
+	}
+
+	return providers, count
+}
+
 // GetImageProviders handles GET /api/v2/settings/imageproviders
 func (c *Controller) GetImageProviders(ctx echo.Context) error {
-	c.logAPIRequest(ctx, slog.LevelInfo, "Getting available image providers")
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Getting available image providers")
 
-	// Prepare image provider options
-	providerOptionList := []ImageProviderOption{
-		{Value: "auto", Display: "Auto (Default)"}, // Always add auto first
-	}
+	providers, providerCount := c.collectImageProviders(ctx)
 
-	providerCount := 0
-	if c.BirdImageCache != nil {
-		c.logAPIRequest(ctx, slog.LevelDebug, "BirdImageCache is available, checking for registry")
-		if registry := c.BirdImageCache.GetRegistry(); registry != nil {
-			c.logAPIRequest(ctx, slog.LevelDebug, "Registry found, ranging over providers")
-			registry.RangeProviders(func(name string, cache *imageprovider.BirdImageCache) bool {
-				c.logAPIRequest(ctx, slog.LevelDebug, "Found provider", "name", name)
-				// Simple capitalization for display name (Rune-aware)
-				var displayName string
-				if name != "" {
-					r, size := utf8.DecodeRuneInString(name)
-					displayName = strings.ToUpper(string(r)) + name[size:]
-				} else {
-					displayName = "(unknown)"
-				}
-				providerOptionList = append(providerOptionList, ImageProviderOption{Value: name, Display: displayName})
-				providerCount++
-				return true // Continue ranging
-			})
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Retrieved image providers successfully", logger.Int("count", len(providers)), logger.Int("provider_count", providerCount))
 
-			// Sort the providers alphabetically by display name (excluding the first 'auto' entry)
-			if len(providerOptionList) > 2 { // Need at least 3 elements to sort the part after 'auto'
-				sub := providerOptionList[1:] // Create a sub-slice for sorting
-				sort.Slice(sub, func(i, j int) bool {
-					return sub[i].Display < sub[j].Display // Compare elements within the sub-slice
-				})
-			}
-		} else {
-			c.logAPIRequest(ctx, slog.LevelWarn, "ImageProviderRegistry is nil, cannot get provider names")
-		}
-	} else {
-		c.logAPIRequest(ctx, slog.LevelWarn, "BirdImageCache is nil, cannot get provider names")
-	}
-
-	c.logAPIRequest(ctx, slog.LevelInfo, "Retrieved image providers successfully", "count", len(providerOptionList), "provider_count", providerCount)
-
-	// Return in format expected by client: { providers: [...] }
-	response := map[string]any{
-		"providers": providerOptionList,
-	}
-
-	return ctx.JSON(http.StatusOK, response)
+	return ctx.JSON(http.StatusOK, map[string]any{"providers": providers})
 }
 
 // GetSystemID handles GET /api/v2/settings/systemid
 func (c *Controller) GetSystemID(ctx echo.Context) error {
-	c.logAPIRequest(ctx, slog.LevelInfo, "Getting system ID")
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Getting system ID")
 
 	// Acquire read lock to ensure settings aren't being modified during read
 	c.settingsMutex.RLock()
@@ -1650,12 +1844,12 @@ func (c *Controller) GetSystemID(ctx echo.Context) error {
 		// Fallback to global settings if controller settings not set
 		settings = conf.Setting()
 		if settings == nil {
-			c.logAPIRequest(ctx, slog.LevelError, "Settings not initialized when trying to get system ID", "endpoint", "GetSystemID")
+			c.logAPIRequest(ctx, logger.LogLevelError, "Settings not initialized when trying to get system ID", logger.String("endpoint", "GetSystemID"))
 			return c.HandleError(ctx, fmt.Errorf("settings not initialized"), "Failed to get settings", http.StatusInternalServerError)
 		}
 	}
 
-	c.logAPIRequest(ctx, slog.LevelInfo, "Retrieved system ID successfully", "system_id", settings.SystemID)
+	c.logAPIRequest(ctx, logger.LogLevelInfo, "Retrieved system ID successfully", logger.String("system_id", settings.SystemID))
 
 	// Return system ID in the format expected by the frontend
 	response := map[string]string{

@@ -3,10 +3,10 @@ package metrics
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // HTTPMetrics contains Prometheus metrics for HTTP handler operations
@@ -38,11 +38,11 @@ type HTTPMetrics struct {
 	templateRenderErrors   *prometheus.CounterVec
 
 	// SSE (Server-Sent Events) metrics
-	sseActiveConnections   prometheus.Gauge
-	sseTotalConnections    *prometheus.CounterVec
-	sseConnectionDuration  *prometheus.HistogramVec
-	sseMessagesSent        *prometheus.CounterVec
-	sseErrors              *prometheus.CounterVec
+	sseActiveConnections  prometheus.Gauge
+	sseTotalConnections   *prometheus.CounterVec
+	sseConnectionDuration *prometheus.HistogramVec
+	sseMessagesSent       *prometheus.CounterVec
+	sseErrors             *prometheus.CounterVec
 }
 
 // NewHTTPMetrics creates and registers new HTTP handler metrics
@@ -89,7 +89,7 @@ func (m *HTTPMetrics) initMetrics() error {
 		prometheus.HistogramOpts{
 			Name:    "http_response_size_bytes",
 			Help:    "Size of HTTP responses in bytes",
-			Buckets: prometheus.ExponentialBuckets(100, 10, 6), // 100B to ~100MB
+			Buckets: prometheus.ExponentialBuckets(BucketStart100B, BucketFactor10, BucketCount6), // 100B to ~100MB
 		},
 		[]string{"method", "path"},
 	)
@@ -107,7 +107,7 @@ func (m *HTTPMetrics) initMetrics() error {
 		prometheus.HistogramOpts{
 			Name:    "http_handler_operation_duration_seconds",
 			Help:    "Time taken for handler operations",
-			Buckets: prometheus.ExponentialBuckets(0.001, 2, 12), // 1ms to ~4s
+			Buckets: prometheus.ExponentialBuckets(BucketStart1ms, BucketFactor2, BucketCount12), // 1ms to ~4s
 		},
 		[]string{"handler", "operation"},
 	)
@@ -133,7 +133,7 @@ func (m *HTTPMetrics) initMetrics() error {
 		prometheus.HistogramOpts{
 			Name:    "http_handler_database_operation_duration_seconds",
 			Help:    "Time taken for database operations from handlers",
-			Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // 1ms to ~32s
+			Buckets: prometheus.ExponentialBuckets(BucketStart1ms, BucketFactor2, BucketCount15), // 1ms to ~32s
 		},
 		[]string{"handler", "db_operation"},
 	)
@@ -168,7 +168,7 @@ func (m *HTTPMetrics) initMetrics() error {
 		prometheus.HistogramOpts{
 			Name:    "http_template_render_duration_seconds",
 			Help:    "Time taken for template rendering",
-			Buckets: prometheus.ExponentialBuckets(0.001, 2, 10), // 1ms to ~1s
+			Buckets: prometheus.ExponentialBuckets(BucketStart1ms, BucketFactor2, BucketCount10), // 1ms to ~1s
 		},
 		[]string{"template"},
 	)
@@ -201,7 +201,7 @@ func (m *HTTPMetrics) initMetrics() error {
 		prometheus.HistogramOpts{
 			Name:    "http_sse_connection_duration_seconds",
 			Help:    "Duration of SSE connections in seconds",
-			Buckets: prometheus.ExponentialBuckets(1, 2, 15), // 1s to ~32768s (9+ hours)
+			Buckets: prometheus.ExponentialBuckets(BucketStart1s, BucketFactor2, BucketCount15), // 1s to ~32768s (9+ hours)
 		},
 		[]string{"endpoint"},
 	)
@@ -366,7 +366,7 @@ func (m *HTTPMetrics) SSEConnectionClosed(endpoint string, duration float64, rea
 	default:
 		reason = SSECloseReasonError
 	}
-	
+
 	m.sseActiveConnections.Dec()
 	m.sseTotalConnections.WithLabelValues(endpoint, reason).Inc()
 	m.sseConnectionDuration.WithLabelValues(endpoint).Observe(duration)
@@ -387,7 +387,7 @@ func (m *HTTPMetrics) GetActiveSSEConnections() float64 {
 	metric := &dto.Metric{}
 	if err := m.sseActiveConnections.Write(metric); err != nil {
 		// Log the error with context for debugging metric registration issues
-		log.Printf("HTTPMetrics: Failed to write SSE active connections metric: %v", err)
+		GetLogger().Warn("Failed to write SSE active connections metric", logger.Error(err))
 		return 0
 	}
 	if metric.Gauge != nil && metric.Gauge.Value != nil {

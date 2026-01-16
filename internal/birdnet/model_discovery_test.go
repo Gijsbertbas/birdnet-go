@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,9 +21,7 @@ func withTempWorkDir(t *testing.T, fn func(tempDir string)) {
 	
 	// Register cleanup to restore working directory
 	t.Cleanup(func() {
-		if err := os.Chdir(originalWd); err != nil {
-			t.Errorf("Failed to restore working directory: %v", err)
-		}
+		assert.NoError(t, os.Chdir(originalWd), "Failed to restore working directory")
 	})
 	
 	require.NoError(t, os.Chdir(tempDir), "Failed to change to temp directory")
@@ -40,8 +39,8 @@ func TestTryLoadModelFromStandardPaths_RelativeDirectory(t *testing.T) {
 	withTempWorkDir(t, func(tempDir string) {
 		// Create test file in relative model directory
 		modelPath := filepath.Join(DefaultModelDirectory, testModelName)
-		require.NoError(t, os.MkdirAll(DefaultModelDirectory, 0o755), "Failed to create model directory")
-		require.NoError(t, os.WriteFile(modelPath, []byte(testContent), 0o644), "Failed to create test file")
+		require.NoError(t, os.MkdirAll(DefaultModelDirectory, 0o750), "Failed to create model directory")
+		require.NoError(t, os.WriteFile(modelPath, []byte(testContent), 0o600), "Failed to create test file")
 
 		data, path, err := tryLoadModelFromStandardPaths(testModelName, "test")
 
@@ -61,9 +60,9 @@ func TestTryLoadModelFromStandardPaths_LegacyDataDirectory(t *testing.T) {
 	withTempWorkDir(t, func(tempDir string) {
 		// Create test file in legacy data/model directory  
 		modelPath := filepath.Join("data", DefaultModelDirectory, testModelName)
-		require.NoError(t, os.MkdirAll(filepath.Join("data", DefaultModelDirectory), 0o755), 
+		require.NoError(t, os.MkdirAll(filepath.Join("data", DefaultModelDirectory), 0o750), 
 			"Failed to create model directory")
-		require.NoError(t, os.WriteFile(modelPath, []byte(testContent), 0o644), 
+		require.NoError(t, os.WriteFile(modelPath, []byte(testContent), 0o600), 
 			"Failed to create test file")
 
 		data, path, err := tryLoadModelFromStandardPaths(testModelName, "test")
@@ -86,13 +85,13 @@ func TestTryLoadModelFromStandardPaths_FirstHitWins(t *testing.T) {
 		secondPath := filepath.Join("data", DefaultModelDirectory, testModelName)
 
 		// Create first priority file
-		require.NoError(t, os.MkdirAll(DefaultModelDirectory, 0o755), "Failed to create first directory")
-		require.NoError(t, os.WriteFile(firstPath, []byte("first_priority"), 0o644), "Failed to create first file")
+		require.NoError(t, os.MkdirAll(DefaultModelDirectory, 0o750), "Failed to create first directory")
+		require.NoError(t, os.WriteFile(firstPath, []byte("first_priority"), 0o600), "Failed to create first file")
 
 		// Create second priority file
-		require.NoError(t, os.MkdirAll(filepath.Join("data", DefaultModelDirectory), 0o755), 
+		require.NoError(t, os.MkdirAll(filepath.Join("data", DefaultModelDirectory), 0o750), 
 			"Failed to create second directory")
-		require.NoError(t, os.WriteFile(secondPath, []byte("second_priority"), 0o644), 
+		require.NoError(t, os.WriteFile(secondPath, []byte("second_priority"), 0o600), 
 			"Failed to create second file")
 
 		data, path, err := tryLoadModelFromStandardPaths(testModelName, "test")
@@ -140,8 +139,8 @@ func TestTryLoadModelFromStandardPaths_RangeFilterModels(t *testing.T) {
 			withTempWorkDir(t, func(tempDir string) {
 				// Create test file
 				modelPath := filepath.Join(DefaultModelDirectory, tc.modelName)
-				require.NoError(t, os.MkdirAll(DefaultModelDirectory, 0o755), "Failed to create model directory")
-				require.NoError(t, os.WriteFile(modelPath, []byte(testContent), 0o644), "Failed to create test file")
+				require.NoError(t, os.MkdirAll(DefaultModelDirectory, 0o750), "Failed to create model directory")
+				require.NoError(t, os.WriteFile(modelPath, []byte(testContent), 0o600), "Failed to create test file")
 
 				data, path, err := tryLoadModelFromStandardPaths(tc.modelName, "test")
 

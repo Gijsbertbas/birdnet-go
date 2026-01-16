@@ -1,7 +1,8 @@
 <script lang="ts">
   import { cn } from '$lib/utils/cn';
-  import { dataIcons } from '$lib/utils/icons';
+  import { Terminal, ChevronUp, ChevronDown, ChevronsUpDown } from '@lucide/svelte';
   import { safeArrayAccess } from '$lib/utils/security';
+  import { t } from '$lib/i18n';
 
   interface ProcessInfo {
     pid: number;
@@ -11,6 +12,9 @@
     memory: number;
     uptime: number;
   }
+
+  type SortColumn = 'name' | 'status' | 'cpu' | 'memory' | 'uptime';
+  type SortDirection = 'asc' | 'desc';
 
   interface Props {
     title: string;
@@ -31,6 +35,54 @@
     onToggleShowAll,
     className = '',
   }: Props = $props();
+
+  // Sort state
+  let sortColumn = $state<SortColumn>('name');
+  let sortDirection = $state<SortDirection>('asc');
+
+  // Handle column header click to toggle sort
+  function handleSort(column: SortColumn) {
+    if (sortColumn === column) {
+      // Toggle direction if clicking same column
+      sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      // New column: set to ascending by default
+      sortColumn = column;
+      sortDirection = 'asc';
+    }
+  }
+
+  // Sorted processes
+  let sortedProcesses = $derived.by(() => {
+    if (!processes || processes.length === 0) return [];
+
+    return [...processes].sort((a, b) => {
+      let comparison = 0;
+
+      switch (sortColumn) {
+        case 'name': {
+          const nameA = a.name === 'main' ? 'BirdNET-Go' : a.name;
+          const nameB = b.name === 'main' ? 'BirdNET-Go' : b.name;
+          comparison = nameA.localeCompare(nameB);
+          break;
+        }
+        case 'status':
+          comparison = a.status.localeCompare(b.status);
+          break;
+        case 'cpu':
+          comparison = a.cpu - b.cpu;
+          break;
+        case 'memory':
+          comparison = a.memory - b.memory;
+          break;
+        case 'uptime':
+          comparison = a.uptime - b.uptime;
+          break;
+      }
+
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+  });
 
   // PERFORMANCE OPTIMIZATION: Pure utility functions outside reactive context
   // These functions only depend on their parameters, not component state
@@ -94,20 +146,20 @@
   }
 </script>
 
-<div class={cn('card bg-base-100 shadow-sm', className)}>
+<div class={cn('card bg-base-100 shadow-xs', className)}>
   <div class="card-body card-padding">
     <div class="flex justify-between items-center mb-2">
       <h2 class="card-title" id="process-info-heading">{title}</h2>
 
       <!-- Enhanced toggle for showing all processes -->
-      <div class="flex items-center gap-2 bg-base-200 px-3 py-1.5 rounded-lg shadow-sm">
-        <span class="text-sm font-medium">Show all processes</span>
+      <div class="flex items-center gap-2 bg-base-200 px-3 py-1.5 rounded-lg shadow-xs">
+        <span class="text-sm font-medium">{t('system.processInfo.table.showAllProcesses')}</span>
         <input
           type="checkbox"
           class="toggle toggle-sm toggle-primary"
           checked={showAllProcesses}
           onchange={handleToggleChange}
-          aria-label="Toggle to show all system processes"
+          aria-label={t('system.processInfo.table.showAllProcesses')}
         />
       </div>
     </div>
@@ -118,7 +170,7 @@
       <div class="py-4">
         <div class="flex justify-center">
           <span class="loading loading-spinner loading-lg" aria-hidden="true"></span>
-          <span class="sr-only">Loading process information...</span>
+          <span class="sr-only">{t('system.processInfo.loading')}</span>
         </div>
       </div>
     {/if}
@@ -134,33 +186,129 @@
         <table class="table table-zebra w-full">
           <thead>
             <tr class="bg-base-200">
-              <th scope="col">Process</th>
-              <th scope="col">Status</th>
-              <th scope="col">CPU</th>
-              <th scope="col">Memory</th>
-              <th scope="col">Uptime</th>
+              <th scope="col">
+                <button
+                  type="button"
+                  class="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer w-full"
+                  onclick={() => handleSort('name')}
+                  aria-label="Sort by process name"
+                >
+                  {t('system.processInfo.table.process')}
+                  {#if sortColumn === 'name'}
+                    {#if sortDirection === 'asc'}
+                      <ChevronUp class="size-4" />
+                    {:else}
+                      <ChevronDown class="size-4" />
+                    {/if}
+                  {:else}
+                    <ChevronsUpDown class="size-4 opacity-30" />
+                  {/if}
+                </button>
+              </th>
+              <th scope="col">
+                <button
+                  type="button"
+                  class="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer w-full"
+                  onclick={() => handleSort('status')}
+                  aria-label="Sort by status"
+                >
+                  {t('system.processInfo.table.status')}
+                  {#if sortColumn === 'status'}
+                    {#if sortDirection === 'asc'}
+                      <ChevronUp class="size-4" />
+                    {:else}
+                      <ChevronDown class="size-4" />
+                    {/if}
+                  {:else}
+                    <ChevronsUpDown class="size-4 opacity-30" />
+                  {/if}
+                </button>
+              </th>
+              <th scope="col">
+                <button
+                  type="button"
+                  class="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer w-full"
+                  onclick={() => handleSort('cpu')}
+                  aria-label="Sort by CPU usage"
+                >
+                  {t('system.processInfo.table.cpu')}
+                  {#if sortColumn === 'cpu'}
+                    {#if sortDirection === 'asc'}
+                      <ChevronUp class="size-4" />
+                    {:else}
+                      <ChevronDown class="size-4" />
+                    {/if}
+                  {:else}
+                    <ChevronsUpDown class="size-4 opacity-30" />
+                  {/if}
+                </button>
+              </th>
+              <th scope="col">
+                <button
+                  type="button"
+                  class="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer w-full"
+                  onclick={() => handleSort('memory')}
+                  aria-label="Sort by memory usage"
+                >
+                  {t('system.processInfo.table.memory')}
+                  {#if sortColumn === 'memory'}
+                    {#if sortDirection === 'asc'}
+                      <ChevronUp class="size-4" />
+                    {:else}
+                      <ChevronDown class="size-4" />
+                    {/if}
+                  {:else}
+                    <ChevronsUpDown class="size-4 opacity-30" />
+                  {/if}
+                </button>
+              </th>
+              <th scope="col">
+                <button
+                  type="button"
+                  class="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer w-full"
+                  onclick={() => handleSort('uptime')}
+                  aria-label="Sort by uptime"
+                >
+                  {t('system.processInfo.table.uptime')}
+                  {#if sortColumn === 'uptime'}
+                    {#if sortDirection === 'asc'}
+                      <ChevronUp class="size-4" />
+                    {:else}
+                      <ChevronDown class="size-4" />
+                    {/if}
+                  {:else}
+                    <ChevronsUpDown class="size-4 opacity-30" />
+                  {/if}
+                </button>
+              </th>
             </tr>
           </thead>
           <tbody>
-            {#if processes.length === 0}
+            {#if sortedProcesses.length === 0}
               <tr>
-                <td colspan="5" class="text-center py-6 text-base-content/70">
-                  No process information available
+                <td
+                  colspan="5"
+                  class="text-center py-6 opacity-70"
+                  style:color="var(--color-base-content)"
+                >
+                  {t('system.processInfo.noProcesses')}
                 </td>
               </tr>
             {:else}
-              {#each processes as process (process.pid)}
+              {#each sortedProcesses as process (process.pid)}
                 <tr class="hover:bg-base-200/50 transition-colors duration-150">
                   <td>
                     <div class="flex items-start gap-2">
                       <div class="p-1.5 bg-primary/10 rounded-md text-primary">
-                        {@html dataIcons.terminal}
+                        <Terminal class="size-4" />
                       </div>
                       <div>
                         <div class="font-medium">
                           {processDisplayNames[process.pid]}
                         </div>
-                        <div class="text-xs text-base-content/60">PID: {process.pid}</div>
+                        <div class="text-xs opacity-60" style:color="var(--color-base-content)">
+                          PID: {process.pid}
+                        </div>
                       </div>
                     </div>
                   </td>

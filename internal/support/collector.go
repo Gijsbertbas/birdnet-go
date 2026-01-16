@@ -8,8 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
-	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,16 +22,9 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/tphakala/birdnet-go/internal/errors"
-	"github.com/tphakala/birdnet-go/internal/logging"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/privacy"
 	"gopkg.in/yaml.v3"
-)
-
-// Package-level logger specific to support service
-var (
-	serviceLogger   *slog.Logger
-	serviceLevelVar = new(slog.LevelVar) // Dynamic level control
-	closeLogger     func() error
 )
 
 // Sentinel errors for support collector operations
@@ -76,8 +68,14 @@ const (
 	logReadmeFileName   = "logs/README.txt"
 
 	// Redaction and privacy
-	redactionPlaceholder = "[REDACTED]"
-	logReadmeContent     = "No log files were found or all logs were older than the specified duration."
+	redactedPlaceholder      = "[redacted]"
+	redactedUserPlaceholder  = "[user]"
+	redactedPassPlaceholder  = "[pass]"
+	redactedHostPlaceholder  = "[host]"
+	redactedPathPlaceholder  = "[path]"
+	redactedQueryPlaceholder = "[query]"
+	urlSchemeDelimiter       = "://"
+	logReadmeContent         = "No log files were found or all logs were older than the specified duration."
 
 	// Journal command flags
 	journalFlagUnit       = "-u"
@@ -128,23 +126,10 @@ func isRunningInDocker() bool {
 	return false
 }
 
-func init() {
-	var err error
-	// Define log file path relative to working directory
-	logFilePath := filepath.Join("logs", "support.log")
-	initialLevel := slog.LevelDebug // Set desired initial level
-	serviceLevelVar.Set(initialLevel)
-
-	// Initialize the service-specific file logger
-	serviceLogger, closeLogger, err = logging.NewFileLogger(logFilePath, "support", serviceLevelVar)
-	if err != nil {
-		// Fallback: Log error to standard log and potentially disable service logging
-		log.Printf("FATAL: Failed to initialize support file logger at %s: %v. Service logging disabled.", logFilePath, err)
-		// Set logger to a disabled handler to prevent nil panics, but respects level var
-		fbHandler := slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: serviceLevelVar})
-		serviceLogger = slog.New(fbHandler).With("service", "support")
-		closeLogger = func() error { return nil } // No-op closer
-	}
+// getLogger returns the support package logger.
+// Fetched dynamically to ensure it uses the current centralized logger.
+func getLogger() logger.Logger {
+	return logger.Global().Module("support")
 }
 
 // Collector collects support data for troubleshooting
@@ -159,11 +144,151 @@ type Collector struct {
 // defaultSensitiveKeys returns the default list of sensitive configuration keys to redact
 func defaultSensitiveKeys() []string {
 	return []string{
-		"password", "token", "secret", "key", "api_key", "api_token",
-		"client_id", "client_secret", "webhook_url", "mqtt_password",
-		"apikey", "username", "broker", "topic",
-		"mqtt_username", "mqtt_topic", "birdweather_id",
+		// Authentication credentials (snake_case and camelCase variants)
+		"password", "pass", "token", "secret", "key", "api_key", "api_token",
+		"client_id", "client_secret", "apikey", "apitoken",
+		"clientid", "clientsecret", // camelCase variants
+		"accesskeyid", "secretaccesskey", "encryptionkey",
+		"sessionsecret", // session secret (camelCase)
+
+		// MQTT credentials
+		"mqtt_password", "mqtt_username", "mqtt_topic", "broker", "topic",
+
+		// Service identifiers (including generic "id" for nested identifiers like birdweather.id)
+		"birdweather_id", "birdweatherid", "username", "user", "userid", "id",
+
+		// Location data (privacy sensitive)
+		"latitude", "longitude", "stationid",
+
+		// URLs (handled specially for structural redaction)
+		"url", "urls", "endpoint", "webhook_url",
+
+		// Network topology
+		"subnet",
+
+		// Secret file paths
+		"privatekeypath", "sshkeypath", "credentialspath",
+		"tokenfile", "passfile", "userfile", "valuefile",
 	}
+}
+
+// isURLValue checks if a string value appears to be a URL
+func isURLValue(s string) bool {
+	return strings.Contains(s, urlSchemeDelimiter)
+}
+
+// isSensitiveKey checks if a key matches a sensitive key pattern using word boundaries.
+// The sensitive pattern must appear as a complete word within the key:
+//   - At start: "password", "password1", "password_hash" match "password"
+//   - After underscore: "mqtt_password", "api_key" match their suffix
+//
+// Prevents false positives where sensitive patterns appear mid-word:
+//   - "monkey" does NOT match "key" (no word boundary before "key")
+//   - "tokenizer" does NOT match "token" (letter follows "token")
+//   - "passwordhash" does NOT match "password" (letter follows)
+func isSensitiveKey(lowerKey, sensitive string) bool {
+	idx := strings.Index(lowerKey, sensitive)
+	if idx == -1 {
+		return false
+	}
+
+	endIdx := idx + len(sensitive)
+
+	// Start boundary: at start of string OR preceded by underscore
+	validStart := idx == 0 || lowerKey[idx-1] == '_'
+	if !validStart {
+		return false
+	}
+
+	// End boundary: at end of string OR followed by underscore/digit
+	// Allows: password, mqtt_password, password_hash, password1
+	// Rejects: passwordhash, tokenizer (letter follows)
+	if endIdx == len(lowerKey) {
+		return true
+	}
+	nextChar := lowerKey[endIdx]
+	return nextChar == '_' || (nextChar >= '0' && nextChar <= '9')
+}
+
+// isDefaultValue checks if a value is a default/empty value that doesn't need redaction
+func isDefaultValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	switch v := value.(type) {
+	case string:
+		return v == ""
+	case float64:
+		return v == 0.0
+	case float32:
+		return v == 0.0
+	case int:
+		return v == 0
+	case int64:
+		return v == 0
+	case int32:
+		return v == 0
+	case bool:
+		return false // booleans are never "default" for redaction purposes
+	default:
+		return false
+	}
+}
+
+// redactURLStructurally preserves URL structure while replacing sensitive components.
+// It keeps the scheme and port (useful for debugging) while replacing credentials,
+// host, path, and query with placeholders.
+func redactURLStructurally(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" {
+		// url.Parse is lenient - empty scheme means it wasn't a proper URL
+		return redactedPlaceholder
+	}
+
+	var result strings.Builder
+
+	// Preserve scheme
+	result.WriteString(parsed.Scheme)
+	result.WriteString(urlSchemeDelimiter)
+
+	// Handle credentials
+	if u := parsed.User; u != nil {
+		username := u.Username()
+		_, hasPass := u.Password()
+
+		// Only add user/pass placeholders if there's something to redact
+		if username != "" || hasPass {
+			result.WriteString(redactedUserPlaceholder)
+			if hasPass {
+				result.WriteString(":")
+				result.WriteString(redactedPassPlaceholder)
+			}
+			result.WriteString("@")
+		}
+	}
+
+	// Replace host
+	result.WriteString(redactedHostPlaceholder)
+
+	// Preserve port if present
+	if parsed.Port() != "" {
+		result.WriteString(":")
+		result.WriteString(parsed.Port())
+	}
+
+	// Replace path
+	if parsed.Path != "" && parsed.Path != "/" {
+		result.WriteString("/")
+		result.WriteString(redactedPathPlaceholder)
+	}
+
+	// Replace query
+	if parsed.RawQuery != "" {
+		result.WriteString("?")
+		result.WriteString(redactedQueryPlaceholder)
+	}
+
+	return result.String()
 }
 
 // NewCollector creates a new support data collector
@@ -213,7 +338,7 @@ func NewCollectorWithOptions(configPath, dataPath, systemID, version string, sen
 func (c *Collector) Collect(ctx context.Context, opts CollectorOptions) (*SupportDump, error) {
 	// Validate options
 	if !opts.IncludeLogs && !opts.IncludeConfig && !opts.IncludeSystemInfo {
-		serviceLogger.Error("support: collection validation failed: at least one data type must be included")
+		getLogger().Error("support: collection validation failed: at least one data type must be included")
 		return nil, errors.Newf("at least one data type must be included in support dump").
 			Component("support").
 			Category(errors.CategoryValidation).
@@ -235,66 +360,66 @@ func (c *Collector) Collect(ctx context.Context, opts CollectorOptions) (*Suppor
 		},
 	}
 
-	serviceLogger.Info("support: starting collection",
-		"dump_id", dump.ID,
-		"include_logs", opts.IncludeLogs,
-		"include_config", opts.IncludeConfig,
-		"include_system_info", opts.IncludeSystemInfo,
-		"log_duration", opts.LogDuration,
-		"max_log_size", opts.MaxLogSize)
+	getLogger().Info("support: starting collection",
+		logger.String("dump_id", dump.ID),
+		logger.Bool("include_logs", opts.IncludeLogs),
+		logger.Bool("include_config", opts.IncludeConfig),
+		logger.Bool("include_system_info", opts.IncludeSystemInfo),
+		logger.Duration("log_duration", opts.LogDuration),
+		logger.Int64("max_log_size", opts.MaxLogSize))
 
 	// Collect system information
 	if opts.IncludeSystemInfo {
-		serviceLogger.Debug("support: collecting system information")
+		getLogger().Debug("support: collecting system information")
 		dump.Diagnostics.SystemCollection.Attempted = true
 		dump.SystemInfo = c.collectSystemInfo()
 		dump.Diagnostics.SystemCollection.Successful = true
-		serviceLogger.Debug("support: system information collected",
-			"os", dump.SystemInfo.OS,
-			"arch", dump.SystemInfo.Architecture,
-			"cpu_count", dump.SystemInfo.CPUCount,
-			"memory_mb", dump.SystemInfo.MemoryMB)
+		getLogger().Debug("support: system information collected",
+			logger.String("os", dump.SystemInfo.OS),
+			logger.String("arch", dump.SystemInfo.Architecture),
+			logger.Int("cpu_count", dump.SystemInfo.CPUCount),
+			logger.Any("memory_mb", dump.SystemInfo.MemoryMB))
 	}
 
 	// Collect configuration (scrubbed)
 	if opts.IncludeConfig {
-		serviceLogger.Debug("support: collecting configuration", "scrub_sensitive", opts.ScrubSensitive)
+		getLogger().Debug("support: collecting configuration", logger.Bool("scrub_sensitive", opts.ScrubSensitive))
 		dump.Diagnostics.ConfigCollection.Attempted = true
 		config, err := c.collectConfig(opts.ScrubSensitive)
 		if err != nil {
-			serviceLogger.Error("support: failed to collect configuration", "error", err)
+			getLogger().Error("support: failed to collect configuration", logger.Error(err))
 			dump.Diagnostics.ConfigCollection.Error = err.Error()
 			// Don't fail the entire collection - continue with other data
 		} else {
 			dump.Config = config
 			dump.Diagnostics.ConfigCollection.Successful = true
-			serviceLogger.Debug("support: configuration collected successfully")
+			getLogger().Debug("support: configuration collected successfully")
 		}
 	}
 
 	// Collect logs
 	if opts.IncludeLogs {
-		serviceLogger.Debug("support: collecting logs", "duration", opts.LogDuration, "max_size", opts.MaxLogSize, "anonymize_pii", opts.AnonymizePII)
+		getLogger().Debug("support: collecting logs", logger.Duration("duration", opts.LogDuration), logger.Int64("max_size", opts.MaxLogSize), logger.Bool("anonymize_pii", opts.AnonymizePII))
 		logs := c.collectLogs(ctx, opts.LogDuration, opts.MaxLogSize, opts.AnonymizePII, &dump.Diagnostics.LogCollection)
 		dump.Logs = logs
-		serviceLogger.Debug("support: logs collected", "log_count", len(logs))
+		getLogger().Debug("support: logs collected", logger.Int("log_count", len(logs)))
 	}
 
-	serviceLogger.Info("support: collection completed successfully",
-		"dump_id", dump.ID,
-		"log_count", len(dump.Logs))
+	getLogger().Info("support: collection completed successfully",
+		logger.String("dump_id", dump.ID),
+		logger.Int("log_count", len(dump.Logs)))
 
 	return dump, nil
 }
 
 // CreateArchive creates a zip archive containing the support dump
 func (c *Collector) CreateArchive(ctx context.Context, dump *SupportDump, opts CollectorOptions) ([]byte, error) {
-	serviceLogger.Info("support: creating archive", "dump_id", dump.ID)
+	getLogger().Info("support: creating archive", logger.String("dump_id", dump.ID))
 
 	// Check context early
 	select {
 	case <-ctx.Done():
-		serviceLogger.Warn("support: context cancelled before archive creation", "error", ctx.Err())
+		getLogger().Warn("support: context cancelled before archive creation", logger.Error(ctx.Err()))
 		return nil, errors.New(ctx.Err()).
 			Component("support").
 			Category(errors.CategoryNetwork).
@@ -309,10 +434,10 @@ func (c *Collector) CreateArchive(ctx context.Context, dump *SupportDump, opts C
 	w := zip.NewWriter(&buf)
 
 	// Add metadata (keep this as JSON for easy parsing)
-	serviceLogger.Debug("support: adding metadata to archive", "dump_id", dump.ID)
+	getLogger().Debug("support: adding metadata to archive", logger.String("dump_id", dump.ID))
 	metadataFile, err := w.Create(metadataFileName)
 	if err != nil {
-		serviceLogger.Error("support: failed to create metadata file in archive", "error", err)
+		getLogger().Error("support: failed to create metadata file in archive", logger.Error(err))
 		return nil, errors.New(err).
 			Component("support").
 			Category(errors.CategoryFileIO).
@@ -338,7 +463,7 @@ func (c *Collector) CreateArchive(ctx context.Context, dump *SupportDump, opts C
 		},
 	}
 	if err := json.NewEncoder(metadataFile).Encode(metadata); err != nil {
-		serviceLogger.Error("support: failed to write metadata to archive", "error", err)
+		getLogger().Error("support: failed to write metadata to archive", logger.Error(err))
 		return nil, errors.New(err).
 			Component("support").
 			Category(errors.CategoryFileIO).
@@ -350,7 +475,7 @@ func (c *Collector) CreateArchive(ctx context.Context, dump *SupportDump, opts C
 	// Check context before adding logs
 	select {
 	case <-ctx.Done():
-		serviceLogger.Warn("support: context cancelled before adding logs", "error", ctx.Err())
+		getLogger().Warn("support: context cancelled before adding logs", logger.Error(ctx.Err()))
 		return nil, errors.New(ctx.Err()).
 			Component("support").
 			Category(errors.CategoryNetwork).
@@ -362,30 +487,30 @@ func (c *Collector) CreateArchive(ctx context.Context, dump *SupportDump, opts C
 
 	// Add log files in original format
 	if opts.IncludeLogs {
-		serviceLogger.Debug("support: adding log files to archive", "anonymize_pii", opts.AnonymizePII)
+		getLogger().Debug("support: adding log files to archive", logger.Bool("anonymize_pii", opts.AnonymizePII))
 		if err := c.addLogFilesToArchive(ctx, w, opts.LogDuration, opts.MaxLogSize, opts.AnonymizePII); err != nil {
-			serviceLogger.Error("support: failed to add log files to archive", "error", err)
+			getLogger().Error("support: failed to add log files to archive", logger.Error(err))
 			return nil, err
 		}
-		serviceLogger.Debug("support: log files added successfully")
+		getLogger().Debug("support: log files added successfully")
 	}
 
 	// Add config file in original YAML format (scrubbed)
 	if opts.IncludeConfig {
-		serviceLogger.Debug("support: adding config file to archive", "scrub_sensitive", opts.ScrubSensitive)
+		getLogger().Debug("support: adding config file to archive", logger.Bool("scrub_sensitive", opts.ScrubSensitive))
 		if err := c.addConfigToArchive(w, opts.ScrubSensitive); err != nil {
-			serviceLogger.Error("support: failed to add config to archive", "error", err)
+			getLogger().Error("support: failed to add config to archive", logger.Error(err))
 			return nil, err
 		}
-		serviceLogger.Debug("support: config file added successfully")
+		getLogger().Debug("support: config file added successfully")
 	}
 
 	// Add system info
 	if opts.IncludeSystemInfo {
-		serviceLogger.Debug("support: adding system info to archive")
+		getLogger().Debug("support: adding system info to archive")
 		sysInfoFile, err := w.Create(systemInfoFileName)
 		if err != nil {
-			serviceLogger.Error("support: failed to create system info file in archive", "error", err)
+			getLogger().Error("support: failed to create system info file in archive", logger.Error(err))
 			return nil, errors.New(err).
 				Component("support").
 				Category(errors.CategoryFileIO).
@@ -393,21 +518,21 @@ func (c *Collector) CreateArchive(ctx context.Context, dump *SupportDump, opts C
 				Build()
 		}
 		if err := json.NewEncoder(sysInfoFile).Encode(dump.SystemInfo); err != nil {
-			serviceLogger.Error("support: failed to write system info to archive", "error", err)
+			getLogger().Error("support: failed to write system info to archive", logger.Error(err))
 			return nil, errors.New(err).
 				Component("support").
 				Category(errors.CategoryFileIO).
 				Context("operation", "write_system_info").
 				Build()
 		}
-		serviceLogger.Debug("support: system info added successfully")
+		getLogger().Debug("support: system info added successfully")
 	}
 
 	// Always add diagnostics - this is crucial for troubleshooting collection issues
-	serviceLogger.Debug("support: adding collection diagnostics to archive")
+	getLogger().Debug("support: adding collection diagnostics to archive")
 	diagnosticsFile, err := w.Create(diagnosticsFileName)
 	if err != nil {
-		serviceLogger.Error("support: failed to create diagnostics file in archive", "error", err)
+		getLogger().Error("support: failed to create diagnostics file in archive", logger.Error(err))
 		return nil, errors.New(err).
 			Component("support").
 			Category(errors.CategoryFileIO).
@@ -415,18 +540,18 @@ func (c *Collector) CreateArchive(ctx context.Context, dump *SupportDump, opts C
 			Build()
 	}
 	if err := json.NewEncoder(diagnosticsFile).Encode(dump.Diagnostics); err != nil {
-		serviceLogger.Error("support: failed to write diagnostics to archive", "error", err)
+		getLogger().Error("support: failed to write diagnostics to archive", logger.Error(err))
 		return nil, errors.New(err).
 			Component("support").
 			Category(errors.CategoryFileIO).
 			Context("operation", "write_diagnostics").
 			Build()
 	}
-	serviceLogger.Debug("support: collection diagnostics added successfully")
+	getLogger().Debug("support: collection diagnostics added successfully")
 
 	// Close the archive writer
 	if err := w.Close(); err != nil {
-		serviceLogger.Error("support: failed to close archive", "error", err)
+		getLogger().Error("support: failed to close archive", logger.Error(err))
 		return nil, errors.New(err).
 			Component("support").
 			Category(errors.CategoryFileIO).
@@ -436,9 +561,9 @@ func (c *Collector) CreateArchive(ctx context.Context, dump *SupportDump, opts C
 	}
 
 	archiveSize := buf.Len()
-	serviceLogger.Info("support: archive created successfully",
-		"dump_id", dump.ID,
-		"archive_size", archiveSize)
+	getLogger().Info("support: archive created successfully",
+		logger.String("dump_id", dump.ID),
+		logger.Int("archive_size", archiveSize))
 
 	return buf.Bytes(), nil
 }
@@ -513,7 +638,7 @@ func (c *Collector) collectSystemInfo() SystemInfo {
 func (c *Collector) collectConfig(scrub bool) (map[string]any, error) {
 	// Load config file
 	configPath := filepath.Join(c.configPath, "config.yaml")
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is from c.configPath (application config directory)
 	if err != nil {
 		return nil, errors.New(err).
 			Component("support").
@@ -550,24 +675,110 @@ func (c *Collector) scrubConfig(config map[string]any) map[string]any {
 	return scrubbed
 }
 
-// scrubValue recursively scrubs sensitive values
+// scrubValue recursively scrubs sensitive values.
+// For sensitive keys:
+//   - Default/empty values are left unchanged
+//   - URL values get structural redaction (preserving scheme and port)
+//   - Other values get replaced with [redacted]
+//
+// For non-sensitive keys, it recursively processes nested structures
+// and sanitizes RTSP URLs in string values.
 func (c *Collector) scrubValue(key string, value any, sensitiveKeys []string) any {
-	// Check if key is sensitive - if so, completely redact it
+	// Check if key is sensitive using word boundary matching
 	lowerKey := strings.ToLower(key)
+	isSensitive := false
 	for _, sensitive := range sensitiveKeys {
-		if strings.Contains(lowerKey, sensitive) {
-			return redactionPlaceholder
+		if isSensitiveKey(lowerKey, sensitive) {
+			isSensitive = true
+			break
 		}
 	}
 
-	// Recursively scrub nested structures
+	if isSensitive {
+		return c.redactSensitiveValue(value, sensitiveKeys)
+	}
+
+	// Recursively process nested structures
+	return c.processNonSensitiveValue(key, value, sensitiveKeys)
+}
+
+// scrubMap recursively processes a map, scrubbing each key-value pair.
+func (c *Collector) scrubMap(m map[string]any, sensitiveKeys []string) map[string]any {
+	scrubbed := make(map[string]any, len(m))
+	for k, val := range m {
+		scrubbed[k] = c.scrubValue(k, val, sensitiveKeys)
+	}
+	return scrubbed
+}
+
+// redactSensitiveValue handles redaction of values for sensitive keys.
+// For scalar values (strings, numbers), it applies redaction.
+// For complex types (maps, arrays), it recursively processes them
+// to redact nested sensitive fields while preserving structure.
+func (c *Collector) redactSensitiveValue(value any, sensitiveKeys []string) any {
+	// Skip default/empty values
+	if isDefaultValue(value) {
+		return value
+	}
+
+	switch v := value.(type) {
+	case string:
+		if isURLValue(v) {
+			return redactURLStructurally(v)
+		}
+		return redactedPlaceholder
+	case float64, float32, int, int64, int32:
+		return redactedPlaceholder
+	case []any:
+		// Recursively process arrays to preserve structure
+		return c.redactSliceRecursively(v, sensitiveKeys)
+	case map[string]any:
+		// Recursively process maps to preserve structure
+		return c.scrubMap(v, sensitiveKeys)
+	default:
+		return redactedPlaceholder
+	}
+}
+
+// redactSliceRecursively handles redaction of slice values while preserving structure.
+// For each item in the slice, it recursively processes to redact nested sensitive fields.
+// Default values (empty strings, zero numbers) are preserved to maintain consistency
+// with scalar sensitive value handling.
+func (c *Collector) redactSliceRecursively(slice []any, sensitiveKeys []string) []any {
+	if len(slice) == 0 {
+		return slice
+	}
+	redacted := make([]any, len(slice))
+	for i, item := range slice {
+		// Preserve default values consistently with scalar handling
+		if isDefaultValue(item) {
+			redacted[i] = item
+			continue
+		}
+
+		switch v := item.(type) {
+		case string:
+			if isURLValue(v) {
+				redacted[i] = redactURLStructurally(v)
+			} else {
+				redacted[i] = redactedPlaceholder
+			}
+		case map[string]any:
+			redacted[i] = c.scrubMap(v, sensitiveKeys)
+		case []any:
+			redacted[i] = c.redactSliceRecursively(v, sensitiveKeys)
+		default:
+			redacted[i] = redactedPlaceholder
+		}
+	}
+	return redacted
+}
+
+// processNonSensitiveValue handles non-sensitive values with recursive processing.
+func (c *Collector) processNonSensitiveValue(key string, value any, sensitiveKeys []string) any {
 	switch v := value.(type) {
 	case map[string]any:
-		scrubbed := make(map[string]any)
-		for k, val := range v {
-			scrubbed[k] = c.scrubValue(k, val, sensitiveKeys)
-		}
-		return scrubbed
+		return c.scrubMap(v, sensitiveKeys)
 	case []any:
 		scrubbed := make([]any, len(v))
 		for i, item := range v {
@@ -575,8 +786,7 @@ func (c *Collector) scrubValue(key string, value any, sensitiveKeys []string) an
 		}
 		return scrubbed
 	case string:
-		// Sanitize any RTSP URLs found in string values to remove credentials
-		// This preserves URL structure while removing sensitive authentication info
+		// Sanitize RTSP URLs in all string values (existing behavior)
 		return privacy.SanitizeRTSPUrls(v)
 	default:
 		return value
@@ -598,10 +808,10 @@ func (c *Collector) scrubValue(key string, value any, sensitiveKeys []string) an
 //   - Error messages for any failures
 //   - Summary statistics about collected logs
 func (c *Collector) collectLogs(ctx context.Context, duration time.Duration, maxSize int64, anonymizePII bool, diagnostics *LogCollectionDiagnostics) []LogEntry {
-	serviceLogger.Debug("support: collectLogs started",
-		"duration", duration,
-		"maxSize", maxSize,
-		"anonymizePII", anonymizePII)
+	getLogger().Debug("support: collectLogs started",
+		logger.Duration("duration", duration),
+		logger.Int64("maxSize", maxSize),
+		logger.Bool("anonymizePII", anonymizePII))
 
 	var logs []LogEntry
 	var totalSize int64
@@ -609,24 +819,24 @@ func (c *Collector) collectLogs(ctx context.Context, duration time.Duration, max
 	// Try to collect from journald first (systemd systems)
 	// Skip journal collection if running in Docker as it's unlikely to be available
 	if isRunningInDocker() {
-		serviceLogger.Debug("support: running in Docker, skipping journal log collection")
+		getLogger().Debug("support: running in Docker, skipping journal log collection")
 		diagnostics.JournalLogs.Attempted = false
 		diagnostics.JournalLogs.Details = map[string]any{
 			"skipped_reason": "running_in_docker",
 		}
 	} else {
-		serviceLogger.Debug("support: attempting to collect journal logs")
+		getLogger().Debug("support: attempting to collect journal logs")
 		diagnostics.JournalLogs.Attempted = true
 		journalLogs, err := c.collectJournalLogs(ctx, duration, anonymizePII, &diagnostics.JournalLogs)
 		if err != nil {
 			diagnostics.JournalLogs.Error = err.Error()
 			if errors.Is(err, ErrJournalNotAvailable) {
-				serviceLogger.Debug("support: journal logs not available (expected on non-systemd systems)")
+				getLogger().Debug("support: journal logs not available (expected on non-systemd systems)")
 			} else {
-				serviceLogger.Warn("support: error collecting journal logs", "error", err)
+				getLogger().Warn("support: error collecting journal logs", logger.Error(err))
 			}
 		} else {
-			serviceLogger.Debug("support: collected journal logs", "count", len(journalLogs))
+			getLogger().Debug("support: collected journal logs", logger.Int("count", len(journalLogs)))
 			diagnostics.JournalLogs.Successful = true
 			diagnostics.JournalLogs.EntriesFound = len(journalLogs)
 			logs = append(logs, journalLogs...)
@@ -638,14 +848,14 @@ func (c *Collector) collectLogs(ctx context.Context, duration time.Duration, max
 	}
 
 	// Also check for log files in the data directory
-	serviceLogger.Debug("support: attempting to collect log files")
+	getLogger().Debug("support: attempting to collect log files")
 	diagnostics.FileLogs.Attempted = true
 	logFiles, fileSize, err := c.collectLogFilesWithDiagnostics(duration, maxSize-totalSize, anonymizePII, &diagnostics.FileLogs)
 	if err != nil {
 		diagnostics.FileLogs.Error = err.Error()
-		serviceLogger.Warn("support: error collecting log files", "error", err)
+		getLogger().Warn("support: error collecting log files", logger.Error(err))
 	} else {
-		serviceLogger.Debug("support: collected log files", "count", len(logFiles))
+		getLogger().Debug("support: collected log files", logger.Int("count", len(logFiles)))
 		diagnostics.FileLogs.Successful = true
 		diagnostics.FileLogs.EntriesFound = len(logFiles)
 		logs = append(logs, logFiles...)
@@ -653,7 +863,7 @@ func (c *Collector) collectLogs(ctx context.Context, duration time.Duration, max
 	}
 
 	// Sort logs by timestamp
-	serviceLogger.Debug("support: sorting logs by timestamp", "total_logs", len(logs))
+	getLogger().Debug("support: sorting logs by timestamp", logger.Int("total_logs", len(logs)))
 	sortLogsByTime(logs)
 
 	// Update summary diagnostics
@@ -680,7 +890,7 @@ func (c *Collector) collectLogs(ctx context.Context, duration time.Duration, max
 		diagnostics.Summary.TimeRange.To = logs[len(logs)-1].Timestamp
 	}
 
-	serviceLogger.Debug("support: collectLogs completed", "total_logs", len(logs))
+	getLogger().Debug("support: collectLogs completed", logger.Int("total_logs", len(logs)))
 	return logs
 }
 
@@ -690,12 +900,12 @@ func (c *Collector) collectJournalLogs(ctx context.Context, duration time.Durati
 	since := time.Now().Add(-duration).Format(journalTimeFormat)
 
 	// Limit to prevent timeout using defined constant
-	serviceLogger.Debug("support: running journalctl",
-		"since", since,
-		"maxLines", maxJournalLogLines)
+	getLogger().Debug("support: running journalctl",
+		logger.String("since", since),
+		logger.Int("maxLines", maxJournalLogLines))
 
 	// Run journalctl command with line limit
-	cmd := exec.CommandContext(ctx, "journalctl",
+	cmd := exec.CommandContext(ctx, "journalctl", //nolint:gosec // G204: hardcoded command, args are constants/formatted values
 		journalFlagUnit, systemdServiceName,
 		journalFlagSince, since,
 		journalFlagNoPager,
@@ -714,7 +924,7 @@ func (c *Collector) collectJournalLogs(ctx context.Context, duration time.Durati
 	if err != nil {
 		// journalctl might not be available or service might not exist
 		// This is not a fatal error, just means no journald logs available
-		serviceLogger.Debug("journalctl unavailable or service not found", "error", err)
+		getLogger().Debug("journalctl unavailable or service not found", logger.Error(err))
 		diagnostics.Details["error_type"] = "command_failed"
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -724,11 +934,11 @@ func (c *Collector) collectJournalLogs(ctx context.Context, duration time.Durati
 		return nil, ErrJournalNotAvailable
 	}
 
-	serviceLogger.Debug("support: journalctl output received", "size", len(output))
+	getLogger().Debug("support: journalctl output received", logger.Int("size", len(output)))
 
 	// Parse JSON output line by line
 	lines := strings.Split(string(output), "\n")
-	serviceLogger.Debug("support: parsing journal entries", "lineCount", len(lines))
+	getLogger().Debug("support: parsing journal entries", logger.Int("lineCount", len(lines)))
 
 	// Pre-allocate logs slice based on number of lines
 	logs := make([]LogEntry, 0, len(lines))
@@ -742,11 +952,11 @@ func (c *Collector) collectJournalLogs(ctx context.Context, duration time.Durati
 
 		// Log progress every N lines
 		if i > 0 && i%logProgressInterval == 0 {
-			serviceLogger.Debug("support: journal parsing progress",
-				"processed", i,
-				"total", len(lines),
-				"parsed", parsedCount,
-				"skipped", skippedCount)
+			getLogger().Debug("support: journal parsing progress",
+				logger.Int("processed", i),
+				logger.Int("total", len(lines)),
+				logger.Int("parsed", parsedCount),
+				logger.Int("skipped", skippedCount))
 		}
 
 		var entry map[string]any
@@ -796,11 +1006,11 @@ func (c *Collector) collectJournalLogs(ctx context.Context, duration time.Durati
 		parsedCount++
 	}
 
-	serviceLogger.Debug("support: journal parsing completed",
-		"totalLines", len(lines),
-		"parsedEntries", parsedCount,
-		"skippedEntries", skippedCount,
-		"resultCount", len(logs))
+	getLogger().Debug("support: journal parsing completed",
+		logger.Int("totalLines", len(lines)),
+		logger.Int("parsedEntries", parsedCount),
+		logger.Int("skippedEntries", skippedCount),
+		logger.Int("resultCount", len(logs)))
 
 	// Add parsing diagnostics
 	diagnostics.Details["output_size_bytes"] = len(output)
@@ -935,14 +1145,14 @@ func (c *Collector) collectLogFiles(duration time.Duration, maxSize int64, anony
 // parseLogFile parses a log file and extracts entries
 func (c *Collector) parseLogFile(path string, cutoffTime time.Time, maxSize int64, anonymizePII bool) (logs []LogEntry, totalSize int64) {
 
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // G304: path is from known log file locations
 	if err != nil {
 		// Log file might not exist or be inaccessible, which is fine
 		return logs, 0
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			log.Printf("Failed to close file: %v", err)
+			getLogger().Warn("Failed to close log file", logger.String("path", path), logger.Error(err))
 		}
 	}()
 
@@ -1046,7 +1256,7 @@ func sortLogsByTime(logs []LogEntry) {
 // addConfigToArchive adds the config file to the archive in YAML format with scrubbing
 func (c *Collector) addConfigToArchive(w *zip.Writer, scrubSensitive bool) error {
 	configPath := filepath.Join(c.configPath, "config.yaml")
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is from c.configPath (application config directory)
 	if err != nil {
 		return errors.New(err).
 			Component("support").
@@ -1116,10 +1326,10 @@ type logFileCollector struct {
 
 // addLogFilesToArchive adds log files to the archive in their original format
 func (c *Collector) addLogFilesToArchive(ctx context.Context, w *zip.Writer, duration time.Duration, maxSize int64, anonymizePII bool) error {
-	serviceLogger.Debug("support: addLogFilesToArchive started",
-		"duration", duration,
-		"maxSize", maxSize,
-		"anonymizePII", anonymizePII)
+	getLogger().Debug("support: addLogFilesToArchive started",
+		logger.Duration("duration", duration),
+		logger.Int64("maxSize", maxSize),
+		logger.Bool("anonymizePII", anonymizePII))
 
 	lfc := &logFileCollector{
 		ctx:          ctx,
@@ -1133,40 +1343,40 @@ func (c *Collector) addLogFilesToArchive(ctx context.Context, w *zip.Writer, dur
 
 	// Get unique log paths
 	uniquePaths := c.getUniqueLogPaths()
-	serviceLogger.Debug("support: unique log paths identified", "count", len(uniquePaths), "paths", uniquePaths)
+	getLogger().Debug("support: unique log paths identified", logger.Int("count", len(uniquePaths)), logger.Any("paths", uniquePaths))
 
 	// Process each log path
 	for _, logPath := range uniquePaths {
 		if lfc.totalSize >= lfc.maxSize {
-			serviceLogger.Debug("support: stopping log collection - max size reached",
-				"totalSize", lfc.totalSize,
-				"maxSize", lfc.maxSize)
+			getLogger().Debug("support: stopping log collection - max size reached",
+				logger.Int64("totalSize", lfc.totalSize),
+				logger.Int64("maxSize", lfc.maxSize))
 			break
 		}
 
-		serviceLogger.Debug("support: processing log path for archive", "path", logPath)
+		getLogger().Debug("support: processing log path for archive", logger.String("path", logPath))
 		if err := lfc.processLogPath(w, logPath); err != nil {
-			serviceLogger.Warn("support: error processing log path", "path", logPath, "error", err)
+			getLogger().Warn("support: error processing log path", logger.String("path", logPath), logger.Error(err))
 			// Continue with next path on error
 			continue
 		}
 	}
 
 	// Add journald logs
-	serviceLogger.Debug("support: attempting to add journald logs to archive")
+	getLogger().Debug("support: attempting to add journald logs to archive")
 	if err := lfc.addJournaldLogs(w, duration); err == nil {
 		lfc.logsAdded++
-		serviceLogger.Debug("support: journald logs added successfully")
+		getLogger().Debug("support: journald logs added successfully")
 	} else {
-		serviceLogger.Debug("support: could not add journald logs", "error", err)
+		getLogger().Debug("support: could not add journald logs", logger.Error(err))
 	}
 
 	// Add README if no logs found
 	if lfc.logsAdded == 0 {
-		serviceLogger.Debug("support: no logs found, adding README note")
+		getLogger().Debug("support: no logs found, adding README note")
 		lfc.addNoLogsNote(w)
 	} else {
-		serviceLogger.Debug("support: logs added to archive", "count", lfc.logsAdded, "totalSize", lfc.totalSize)
+		getLogger().Debug("support: logs added to archive", logger.Int("count", lfc.logsAdded), logger.Int64("totalSize", lfc.totalSize))
 	}
 
 	return nil
@@ -1426,13 +1636,13 @@ func (lfc *logFileCollector) addNoLogsNote(w *zip.Writer) {
 
 // addFileToArchive adds a single file to the zip archive
 func (c *Collector) addFileToArchive(w *zip.Writer, sourcePath, archivePath string) error {
-	file, err := os.Open(sourcePath)
+	file, err := os.Open(sourcePath) //nolint:gosec // G304: sourcePath is from known log/config file locations
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			log.Printf("Failed to close file: %v", err)
+			getLogger().Warn("Failed to close file during archive creation", logger.String("source_path", sourcePath), logger.Error(err))
 		}
 	}()
 
@@ -1465,13 +1675,13 @@ func (c *Collector) addLogFileToArchive(w *zip.Writer, sourcePath, archivePath s
 	}
 
 	// Read the file content for anonymization
-	file, err := os.Open(sourcePath)
+	file, err := os.Open(sourcePath) //nolint:gosec // G304: sourcePath is from known log file locations
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			log.Printf("Failed to close file: %v", err)
+			getLogger().Warn("Failed to close log file during archive", logger.String("source_path", sourcePath), logger.Error(err))
 		}
 	}()
 
@@ -1510,22 +1720,19 @@ func (c *Collector) addLogFileToArchive(w *zip.Writer, sourcePath, archivePath s
 func (c *Collector) getJournaldLogs(ctx context.Context, duration time.Duration) string {
 	since := time.Now().Add(-duration).Format(journalTimeFormat)
 
-	// Use same line limit as collectJournalLogs
-	const maxJournalLines = 5000
-
-	cmd := exec.CommandContext(ctx, "journalctl",
+	cmd := exec.CommandContext(ctx, "journalctl", //nolint:gosec // G204: hardcoded command, args are constants/formatted values
 		"-u", "birdnet-go.service",
 		"--since", since,
 		"--no-pager",
-		"-n", fmt.Sprintf("%d", maxJournalLines)) // Limit number of lines
+		"-n", fmt.Sprintf("%d", maxJournalLogLines)) // Limit number of lines
 
 	output, err := cmd.Output()
 	if err != nil {
-		serviceLogger.Debug("support: getJournaldLogs failed", "error", err)
+		getLogger().Debug("support: getJournaldLogs failed", logger.Error(err))
 		return ""
 	}
 
-	serviceLogger.Debug("support: getJournaldLogs retrieved", "size", len(output))
+	getLogger().Debug("support: getJournaldLogs retrieved", logger.Int("size", len(output)))
 	return string(output)
 }
 

@@ -3,8 +3,6 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -306,8 +304,9 @@ func TestAudioExportPartialUpdate(t *testing.T) {
 // TestSpeciesConfigUpdate verifies complex nested species config updates
 func TestSpeciesConfigUpdate(t *testing.T) {
 	// Get initial settings and setup species config
+	// Use lowercase key since that's what a real config would have after load normalization
 	initialSettings := getTestSettings(t)
-	initialSettings.Realtime.Species.Config["American Robin"] = conf.SpeciesConfig{
+	initialSettings.Realtime.Species.Config["american robin"] = conf.SpeciesConfig{
 		Threshold: 0.8,
 		Interval:  30,
 		Actions: []conf.SpeciesAction{{
@@ -351,9 +350,9 @@ func TestSpeciesConfigUpdate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	// Verify settings were preserved
+	// Verify settings were preserved (keys normalized to lowercase after API update)
 	settings := controller.Settings
-	robinConfig := settings.Realtime.Species.Config["American Robin"]
+	robinConfig := settings.Realtime.Species.Config["american robin"]
 	assert.InDelta(t, 0.9, robinConfig.Threshold, 0.0001) // Changed
 	assert.Equal(t, 30, robinConfig.Interval)             // Preserved
 	assert.Len(t, robinConfig.Actions, 1)                 // Preserved
@@ -447,7 +446,6 @@ func TestValidationErrors(t *testing.T) {
 			controller := &Controller{
 				Echo:        e,
 				controlChan: make(chan string, 10),
-				logger:      log.New(io.Discard, "TEST: ", log.LstdFlags), // Add logger for tests (silent)
 			}
 
 			var body []byte

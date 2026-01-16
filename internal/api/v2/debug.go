@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/notification"
 	"github.com/tphakala/birdnet-go/internal/telemetry"
 )
@@ -48,18 +49,18 @@ type DebugSystemStatus struct {
 func (c *Controller) initDebugRoutes() {
 	// Only register debug routes if debug mode is enabled
 	if !c.Settings.Debug {
-		c.logger.Println("Debug mode not enabled, skipping debug routes")
+		GetLogger().Debug("Debug mode not enabled, skipping debug routes")
 		return
 	}
 
 	// Debug endpoints require authentication
-	debugGroup := c.Group.Group("/debug", c.getEffectiveAuthMiddleware())
-	
+	debugGroup := c.Group.Group("/debug", c.authMiddleware)
+
 	debugGroup.POST("/trigger-error", c.DebugTriggerError)
 	debugGroup.POST("/trigger-notification", c.DebugTriggerNotification)
 	debugGroup.GET("/status", c.DebugSystemStatus)
-	
-	c.logger.Println("Debug routes initialized")
+
+	GetLogger().Info("Debug routes initialized")
 }
 
 // DebugTriggerError triggers a test error for telemetry testing
@@ -108,12 +109,10 @@ func (c *Controller) DebugTriggerError(ctx echo.Context) error {
 	err := testErr.Build()
 
 	// Log the error which will trigger telemetry if enabled
-	if c.apiLogger != nil {
-		c.apiLogger.Error("Debug error triggered", 
-			"error", err,
-			"component", req.Component,
-			"category", req.Category)
-	}
+	c.logErrorIfEnabled("Debug error triggered",
+		logger.Error(err),
+		logger.String("component", req.Component),
+		logger.String("category", req.Category))
 
 	response := DebugResponse{
 		Success: true,
@@ -166,7 +165,7 @@ func (c *Controller) DebugTriggerNotification(ctx echo.Context) error {
 
 	// Map string type to notification.Type
 	notifType := mapNotificationType(req.Type)
-	
+
 	// Create notification using the service
 	_, err := notificationService.CreateWithComponent(
 		notifType,
@@ -175,7 +174,7 @@ func (c *Controller) DebugTriggerNotification(ctx echo.Context) error {
 		req.Message,
 		"debug",
 	)
-	
+
 	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{
 			"error": fmt.Sprintf("Failed to create notification: %v", err),
@@ -250,12 +249,12 @@ func getTelemetryStatus() map[string]any {
 	status := map[string]any{
 		"enabled": false, // Default to false for safety
 	}
-	
+
 	// Check if settings are available via global conf
 	if settings := conf.GetSettings(); settings != nil {
 		status["enabled"] = settings.Sentry.Enabled
 	}
-	
+
 	// Add health check info if available
 	if healthHandler := telemetry.NewHealthCheckHandler(); healthHandler != nil {
 		// Get coordinator from global instance
@@ -263,7 +262,7 @@ func getTelemetryStatus() map[string]any {
 			health := coord.HealthCheck()
 			status["healthy"] = health.Healthy
 			status["components"] = make(map[string]any)
-			
+
 			for name, compHealth := range health.Components {
 				status["components"].(map[string]any)[name] = map[string]any{
 					"state":   compHealth.State.String(),
@@ -273,7 +272,7 @@ func getTelemetryStatus() map[string]any {
 			}
 		}
 	}
-	
+
 	// Add worker stats if available
 	if worker := telemetry.GetTelemetryWorker(); worker != nil {
 		stats := worker.GetStats()
@@ -284,21 +283,21 @@ func getTelemetryStatus() map[string]any {
 			"circuit_state":    stats.CircuitState,
 		}
 	}
-	
+
 	return status
 }
 
 func mapNotificationType(typeStr string) notification.Type {
 	switch typeStr {
-	case "error":
+	case NotificationTypeError:
 		return notification.TypeError
-	case "warning":
+	case NotificationTypeWarning:
 		return notification.TypeWarning
-	case "info":
+	case NotificationTypeInfo:
 		return notification.TypeInfo
-	case "detection":
+	case NotificationTypeDetection:
 		return notification.TypeDetection
-	case "system":
+	case NotificationTypeSystem:
 		return notification.TypeSystem
 	default:
 		return notification.TypeInfo

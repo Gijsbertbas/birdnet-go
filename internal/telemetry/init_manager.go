@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"log/slog"
 	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // InitState represents the initialization state of a component
@@ -19,6 +19,24 @@ const (
 	InitStateInProgress
 	InitStateCompleted
 	InitStateFailed
+)
+
+// Component name constants for telemetry initialization
+const (
+	ComponentErrorIntegration = "error_integration"
+	ComponentSentry           = "sentry"
+	ComponentEventBus         = "event_bus"
+	ComponentWorker           = "worker"
+)
+
+// Initialization timeouts and intervals
+const (
+	// sentryInitTimeout is the timeout for Sentry initialization
+	sentryInitTimeout = 10 * time.Second
+	// componentWaitInterval is the polling interval when waiting for components
+	componentWaitInterval = 10 * time.Millisecond
+	// shutdownFlushTimeout is the timeout for flushing during shutdown
+	shutdownFlushTimeout = 2 * time.Second
 )
 
 // InitManager coordinates safe initialization of telemetry components
@@ -42,8 +60,8 @@ type InitManager struct {
 	workerErr           atomic.Value // stores error
 
 	// Dependencies
-	mu     sync.RWMutex
-	logger *slog.Logger
+	mu        sync.RWMutex
+	initLog   logger.Logger
 }
 
 var (
@@ -55,7 +73,7 @@ var (
 func GetInitManager() *InitManager {
 	initManagerOnce.Do(func() {
 		initManager = &InitManager{
-			logger: getLoggerSafe("init-manager"),
+			initLog: GetLogger().With(logger.String("component", "init-manager")),
 		}
 	})
 	return initManager
@@ -66,18 +84,20 @@ func (m *InitManager) InitializeErrorIntegrationSafe() error {
 	var err error
 	m.errorIntegrationOnce.Do(func() {
 		m.errorIntegration.Store(int32(InitStateInProgress))
-		m.logger.Debug("initializing error integration")
+		m.initLog.Debug("initializing error integration")
 
 		// Call the actual initialization
 		InitializeErrorIntegration()
 
 		m.errorIntegration.Store(int32(InitStateCompleted))
-		m.logger.Info("error integration initialized successfully")
+		m.initLog.Info("error integration initialized successfully")
 	})
 
 	// Check for stored error
 	if v := m.errorIntegrationErr.Load(); v != nil {
-		err = v.(error)
+		if e, ok := v.(error); ok {
+			err = e
+		}
 	}
 
 	return err
@@ -88,7 +108,7 @@ func (m *InitManager) InitializeSentrySafe(settings any) error {
 	var err error
 	m.sentryOnce.Do(func() {
 		m.sentryClient.Store(int32(InitStateInProgress))
-		m.logger.Debug("initializing Sentry client")
+		m.initLog.Debug("initializing Sentry client")
 
 		// Ensure error integration is ready
 		if err := m.InitializeErrorIntegrationSafe(); err != nil {
@@ -98,7 +118,7 @@ func (m *InitManager) InitializeSentrySafe(settings any) error {
 		}
 
 		// Call the actual initialization with a timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), sentryInitTimeout)
 		defer cancel()
 
 		done := make(chan error, 1)
@@ -116,22 +136,24 @@ func (m *InitManager) InitializeSentrySafe(settings any) error {
 			if err != nil {
 				m.sentryErr.Store(err)
 				m.sentryClient.Store(int32(InitStateFailed))
-				m.logger.Error("Sentry initialization failed", "error", err)
+				m.initLog.Error("Sentry initialization failed", logger.Error(err))
 			} else {
 				m.sentryClient.Store(int32(InitStateCompleted))
-				m.logger.Info("Sentry initialized successfully")
+				m.initLog.Info("Sentry initialized successfully")
 			}
 		case <-ctx.Done():
 			err = fmt.Errorf("sentry initialization timeout")
 			m.sentryErr.Store(err)
 			m.sentryClient.Store(int32(InitStateFailed))
-			m.logger.Error("Sentry initialization timeout")
+			m.initLog.Error("Sentry initialization timeout")
 		}
 	})
 
 	// Check for stored error
 	if v := m.sentryErr.Load(); v != nil {
-		err = v.(error)
+		if e, ok := v.(error); ok {
+			err = e
+		}
 	}
 
 	return err
@@ -142,7 +164,7 @@ func (m *InitManager) InitializeEventBusSafe() error {
 	var err error
 	m.eventBusOnce.Do(func() {
 		m.eventBus.Store(int32(InitStateInProgress))
-		m.logger.Debug("initializing event bus integration")
+		m.initLog.Debug("initializing event bus integration")
 
 		// Ensure dependencies are ready
 		if state := InitState(m.errorIntegration.Load()); state != InitStateCompleted {
@@ -156,17 +178,19 @@ func (m *InitManager) InitializeEventBusSafe() error {
 		if err = InitializeTelemetryEventBus(); err != nil {
 			m.eventBusErr.Store(err)
 			m.eventBus.Store(int32(InitStateFailed))
-			m.logger.Error("event bus integration failed", "error", err)
+			m.initLog.Error("event bus integration failed", logger.Error(err))
 			return
 		}
 
 		m.eventBus.Store(int32(InitStateCompleted))
-		m.logger.Info("event bus integration initialized successfully")
+		m.initLog.Info("event bus integration initialized successfully")
 	})
 
 	// Check for stored error
 	if v := m.eventBusErr.Load(); v != nil {
-		err = v.(error)
+		if e, ok := v.(error); ok {
+			err = e
+		}
 	}
 
 	return err
@@ -175,13 +199,13 @@ func (m *InitManager) InitializeEventBusSafe() error {
 // GetComponentState returns the current state of a component
 func (m *InitManager) GetComponentState(component string) InitState {
 	switch component {
-	case "error_integration":
+	case ComponentErrorIntegration:
 		return InitState(m.errorIntegration.Load())
-	case "sentry":
+	case ComponentSentry:
 		return InitState(m.sentryClient.Load())
-	case "event_bus":
+	case ComponentEventBus:
 		return InitState(m.eventBus.Load())
-	case "worker":
+	case ComponentWorker:
 		return InitState(m.telemetryWorker.Load())
 	default:
 		return InitStateNotStarted
@@ -191,7 +215,7 @@ func (m *InitManager) GetComponentState(component string) InitState {
 // WaitForComponent waits for a component to reach the desired state
 func (m *InitManager) WaitForComponent(component string, desiredState InitState, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(componentWaitInterval)
 	defer ticker.Stop()
 
 	for time.Now().Before(deadline) {
@@ -206,6 +230,28 @@ func (m *InitManager) WaitForComponent(component string, desiredState InitState,
 		component, desiredState, currentState)
 }
 
+// getComponentError returns the error message for a component, if any
+func (m *InitManager) getComponentError(component string) string {
+	var v any
+	switch component {
+	case ComponentErrorIntegration:
+		v = m.errorIntegrationErr.Load()
+	case ComponentSentry:
+		v = m.sentryErr.Load()
+	case ComponentEventBus:
+		v = m.eventBusErr.Load()
+	case ComponentWorker:
+		v = m.workerErr.Load()
+	}
+	if v == nil {
+		return ""
+	}
+	if err, ok := v.(error); ok {
+		return err.Error()
+	}
+	return ""
+}
+
 // HealthCheck performs a health check on all telemetry components
 func (m *InitManager) HealthCheck() HealthStatus {
 	status := HealthStatus{
@@ -214,46 +260,17 @@ func (m *InitManager) HealthCheck() HealthStatus {
 	}
 
 	// Check each component
-	components := []string{"error_integration", "sentry", "event_bus", "worker"}
+	components := []string{ComponentErrorIntegration, ComponentSentry, ComponentEventBus, ComponentWorker}
 	for _, comp := range components {
 		state := m.GetComponentState(comp)
-		health := ComponentHealth{
+		status.Components[comp] = ComponentHealth{
 			State:   state,
 			Healthy: state == InitStateCompleted,
+			Error:   m.getComponentError(comp),
 		}
-
-		// Add error if available
-		switch comp {
-		case "error_integration":
-			if v := m.errorIntegrationErr.Load(); v != nil {
-				if err, ok := v.(error); ok {
-					health.Error = err.Error()
-				}
-			}
-		case "sentry":
-			if v := m.sentryErr.Load(); v != nil {
-				if err, ok := v.(error); ok {
-					health.Error = err.Error()
-				}
-			}
-		case "event_bus":
-			if v := m.eventBusErr.Load(); v != nil {
-				if err, ok := v.(error); ok {
-					health.Error = err.Error()
-				}
-			}
-		case "worker":
-			if v := m.workerErr.Load(); v != nil {
-				if err, ok := v.(error); ok {
-					health.Error = err.Error()
-				}
-			}
-		}
-
-		status.Components[comp] = health
 	}
 
-	// Overall health
+	// Overall health - healthy unless a component failed (not just unstarted)
 	status.Healthy = true
 	for _, health := range status.Components {
 		if !health.Healthy && health.State != InitStateNotStarted {
@@ -267,25 +284,36 @@ func (m *InitManager) HealthCheck() HealthStatus {
 
 // Shutdown performs graceful shutdown of telemetry components
 func (m *InitManager) Shutdown(ctx context.Context) error {
-	m.logger.Info("starting telemetry shutdown")
+	m.initLog.Info("starting telemetry shutdown")
 
 	// Mark components as shutting down
 	m.telemetryWorker.Store(int32(InitStateNotStarted))
 	m.eventBus.Store(int32(InitStateNotStarted))
 
-	// Flush Sentry with timeout
+	// Flush Sentry with timeout.
+	// Note: If context times out, this goroutine continues running until
+	// Flush completes. This is intentional to allow in-flight events to
+	// be sent even when the shutdown deadline is exceeded.
 	done := make(chan struct{})
 	go func() {
-		Flush(2 * time.Second)
+		Flush(shutdownFlushTimeout)
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		m.logger.Info("telemetry shutdown completed")
+		// Close the service logger file handle
+		if err := CloseServiceLogger(); err != nil {
+			m.initLog.Warn("failed to close service logger", logger.Error(err))
+		}
+		m.initLog.Info("telemetry shutdown completed")
 		return nil
 	case <-ctx.Done():
-		m.logger.Warn("telemetry shutdown timeout")
+		// Still try to close logger even on timeout
+		if err := CloseServiceLogger(); err != nil {
+			m.initLog.Warn("failed to close service logger during timeout", logger.Error(err))
+		}
+		m.initLog.Warn("telemetry shutdown timeout")
 		return ctx.Err()
 	}
 }

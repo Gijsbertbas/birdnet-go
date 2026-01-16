@@ -49,19 +49,12 @@ describe('AudioPlayer', () => {
   beforeEach(() => {
     vi.useFakeTimers();
 
-    // Mock ResizeObserver
-    global.ResizeObserver = vi.fn().mockImplementation(() => ({
-      observe: vi.fn(),
-      unobserve: vi.fn(),
-      disconnect: vi.fn(),
-    }));
-
     // Mock HTMLMediaElement methods
     mockPlay = vi.fn().mockResolvedValue(undefined);
     mockPause = vi.fn();
 
-    window.HTMLMediaElement.prototype.play = mockPlay;
-    window.HTMLMediaElement.prototype.pause = mockPause;
+    window.HTMLMediaElement.prototype.play = mockPlay as unknown as () => Promise<void>;
+    window.HTMLMediaElement.prototype.pause = mockPause as unknown as () => void;
 
     // Mock addEventListener to store handlers
     window.HTMLMediaElement.prototype.addEventListener = vi.fn(
@@ -148,27 +141,6 @@ describe('AudioPlayer', () => {
 
     const img = screen.getByAltText('Audio spectrogram');
     expect(img).toHaveAttribute('src', '/api/v2/spectrogram/123?size=md');
-  });
-
-  it('shows loading state after delay', async () => {
-    const { container } = audioPlayerTest.render({
-      audioUrl: '/audio/test.mp3',
-      detectionId: 'test-123',
-      showSpectrogram: true,
-    });
-
-    // Initially, spinner should not be visible (delayed by 150ms)
-    let loadingSpinner = container.querySelector('.loading.loading-spinner');
-    expect(loadingSpinner).not.toBeInTheDocument();
-
-    // Advance timers by 150ms to trigger spinner display
-    vi.advanceTimersByTime(150);
-
-    // Now spinner should be visible
-    await waitFor(() => {
-      loadingSpinner = container.querySelector('.loading.loading-spinner');
-      expect(loadingSpinner).toBeInTheDocument();
-    });
   });
 
   it('shows play button when paused', () => {

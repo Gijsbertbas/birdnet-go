@@ -3,12 +3,24 @@
   import RootLayout from './lib/desktop/layouts/RootLayout.svelte';
   import DashboardPage from './lib/desktop/features/dashboard/pages/DashboardPage.svelte'; // Keep dashboard for initial load
   import type { Component } from 'svelte';
-  import type { BirdnetConfig } from './app.d.ts';
   import { getLogger } from './lib/utils/logger';
   import { createSafeMap } from './lib/utils/security';
   import { sseNotifications } from './lib/stores/sseNotifications'; // Initialize SSE toast handler
+  import { t } from './lib/i18n';
+  import { appState, initApp, MAX_RETRIES } from './lib/stores/appState.svelte';
+  import { navigation } from './lib/stores/navigation.svelte';
 
   const logger = getLogger('app');
+
+  /**
+   * Client-side navigation function.
+   * Updates URL via History API and triggers route handling.
+   * Page title translation is automatic via $derived(t(pageTitleKey)).
+   */
+  function navigate(url: string): void {
+    navigation.navigate(url);
+    handleRouting(navigation.currentPath);
+  }
 
   // Dynamic imports for heavy pages - properly typed component references
   let Analytics = $state<Component | null>(null);
@@ -27,69 +39,88 @@
 
   let currentRoute = $state<string>('');
   let currentPage = $state<string>('');
-  let pageTitle = $state<string>('Dashboard');
+  let pageTitleKey = $state<string>('navigation.dashboard');
   let loadingComponent = $state<boolean>(false);
+
+  // Derived translated title - automatically updates when language changes
+  let pageTitle = $derived(t(pageTitleKey));
   let dynamicErrorCode = $state<string | null>(null);
   let detectionId = $state<string | null>(null);
 
-  // Get configuration from server
-  let config = $state<BirdnetConfig | null>(null);
-  let securityEnabled = $state<boolean>(false);
-  let accessAllowed = $state<boolean>(true);
-  let version = $state<string>('Development Build');
+  // Configuration derived from centralized appState
+  let securityEnabled = $derived(appState.security.enabled);
+  let accessAllowed = $derived(appState.security.accessAllowed);
+  let version = $derived(appState.version);
+  let authConfig = $derived(appState.security.authConfig);
+
+  // App initialization state
+  let appInitialized = $derived(appState.initialized);
+  let appLoading = $derived(appState.loading);
+  let appError = $derived(appState.error);
 
   // Route configuration for better maintainability
   interface RouteConfig {
     route: string;
     page: string;
-    title: string;
+    titleKey: string;
     component: string;
   }
 
   const routeConfigs: RouteConfig[] = [
-    { route: 'dashboard', page: 'dashboard', title: 'Dashboard', component: '' },
+    { route: 'dashboard', page: 'dashboard', titleKey: 'navigation.dashboard', component: '' },
     {
       route: 'notifications',
       page: 'notifications',
-      title: 'Notifications',
+      titleKey: 'navigation.notifications',
       component: 'notifications',
     },
     {
       route: 'species',
       page: 'analytics/species',
-      title: 'Species Analytics',
+      titleKey: 'pageTitle.speciesAnalytics',
       component: 'species',
     },
-    { route: 'analytics', page: 'analytics', title: 'Analytics', component: 'analytics' },
+    {
+      route: 'analytics',
+      page: 'analytics',
+      titleKey: 'navigation.analytics',
+      component: 'analytics',
+    },
     {
       route: 'advanced-analytics',
       page: 'analytics/advanced',
-      title: 'Advanced Analytics',
+      titleKey: 'pageTitle.advancedAnalytics',
       component: 'advanced-analytics',
     },
-    { route: 'search', page: 'search', title: 'Search', component: 'search' },
-    { route: 'detections', page: 'detections', title: 'Detections', component: 'detections' },
+    { route: 'search', page: 'search', titleKey: 'navigation.search', component: 'search' },
+    {
+      route: 'detections',
+      page: 'detections',
+      titleKey: 'navigation.detections',
+      component: 'detections',
+    },
     {
       route: 'detection-detail',
       page: 'detection-detail',
-      title: 'Detection Details',
+      titleKey: 'pageTitle.detectionDetails',
       component: 'detection-detail',
     },
-    { route: 'about', page: 'about', title: 'About', component: 'about' },
-    { route: 'system', page: 'system', title: 'System', component: 'system' },
-    { route: 'settings', page: 'settings', title: 'Settings', component: 'settings' },
+    { route: 'about', page: 'about', titleKey: 'navigation.about', component: 'about' },
+    { route: 'system', page: 'system', titleKey: 'navigation.system', component: 'system' },
+    { route: 'settings', page: 'settings', titleKey: 'navigation.settings', component: 'settings' },
   ];
 
-  const settingsSubpages = {
-    '/main': 'Main Settings',
-    '/userinterface': 'User Interface',
-    '/audio': 'Audio Settings',
-    '/detectionfilters': 'Detection Filters',
-    '/integrations': 'Integrations',
-    '/security': 'Security Settings',
-    '/species': 'Species Settings',
-    '/notifications': 'Notifications Settings',
-    '/support': 'Support',
+  // Settings subpage title keys
+  const settingsSubpages: Record<string, string> = {
+    '/main': 'settings.sections.node',
+    '/userinterface': 'settings.sections.userinterface',
+    '/audio': 'settings.sections.audio',
+    '/detectionfilters': 'settings.sections.filters',
+    '/integrations': 'settings.sections.integration',
+    '/security': 'settings.sections.security',
+    '/species': 'settings.sections.species',
+    '/notifications': 'settings.sections.notifications',
+    '/support': 'settings.sections.support',
   };
 
   // Dynamic import helper
@@ -107,9 +138,8 @@
           break;
         case 'advanced-analytics':
           if (!AdvancedAnalytics) {
-            const module = await import(
-              './lib/desktop/features/analytics/pages/AdvancedAnalytics.svelte'
-            );
+            const module =
+              await import('./lib/desktop/features/analytics/pages/AdvancedAnalytics.svelte');
             AdvancedAnalytics = module.default;
           }
           break;
@@ -189,7 +219,7 @@
       // Fall back to generic error page on component load failure
       currentRoute = 'error-generic';
       currentPage = 'error-generic';
-      pageTitle = 'Component Load Error';
+      pageTitleKey = 'pageTitle.componentError';
       dynamicErrorCode = '500';
       // Try to load the generic error component if it hasn't been loaded yet
       if (!GenericErrorPage) {
@@ -215,6 +245,7 @@
 
   // Route path to config mapping - using Map for safe lookups
   const pathToRouteMap = createSafeMap<RouteConfig | undefined>({
+    '/': findRouteConfig('dashboard'),
     '/ui/': findRouteConfig('dashboard'),
     '/ui': findRouteConfig('dashboard'),
     '/ui/dashboard': findRouteConfig('dashboard'),
@@ -238,7 +269,7 @@
         detectionId = id;
         currentRoute = 'detection-detail';
         currentPage = 'detection-detail';
-        pageTitle = 'Detection Details';
+        pageTitleKey = 'pageTitle.detectionDetails';
         loadComponent('detection-detail');
         return;
       }
@@ -250,12 +281,12 @@
       if (settingsConfig) {
         currentRoute = settingsConfig.route;
         currentPage = settingsConfig.page;
-        pageTitle = settingsConfig.title;
+        pageTitleKey = settingsConfig.titleKey;
 
         // Update title based on specific settings page
-        for (const [subpath, title] of Object.entries(settingsSubpages)) {
+        for (const [subpath, titleKey] of Object.entries(settingsSubpages)) {
           if (path.includes(subpath)) {
-            pageTitle = title;
+            pageTitleKey = titleKey;
             break;
           }
         }
@@ -267,7 +298,7 @@
         // Settings config not found, redirect to error page
         currentRoute = 'error-404';
         currentPage = 'error-404';
-        pageTitle = 'Settings Not Available';
+        pageTitleKey = 'pageTitle.settingsNotAvailable';
         loadComponent('error-404');
       }
       return;
@@ -278,7 +309,7 @@
     if (routeConfig) {
       currentRoute = routeConfig.route;
       currentPage = routeConfig.page;
-      pageTitle = routeConfig.title;
+      pageTitleKey = routeConfig.titleKey;
 
       if (routeConfig.component) {
         loadComponent(routeConfig.component);
@@ -289,39 +320,45 @@
     // Handle error pages or unknown routes
     const urlParams = new URLSearchParams(window.location.search);
     const errorCode = urlParams.get('error');
-    const errorTitle = urlParams.get('title');
 
     if (errorCode === '404') {
       currentRoute = 'error-404';
       currentPage = 'error-404';
-      pageTitle = 'Page Not Found';
+      pageTitleKey = 'pageTitle.pageNotFound';
       loadComponent('error-404');
     } else if (errorCode === '500') {
       currentRoute = 'error-500';
       currentPage = 'error-500';
-      pageTitle = 'Internal Server Error';
+      pageTitleKey = 'pageTitle.serverError';
       loadComponent('error-500');
     } else if (errorCode) {
       currentRoute = 'error-generic';
       currentPage = 'error-generic';
-      pageTitle = errorTitle || 'Error';
+      // For dynamic error titles from URL, we use a generic error key
+      pageTitleKey = 'common.error';
       dynamicErrorCode = errorCode || '500';
       loadComponent('error-generic');
     } else {
       // Unknown route, default to 404
       currentRoute = 'error-404';
       currentPage = 'error-404';
-      pageTitle = 'Page Not Found';
+      pageTitleKey = 'pageTitle.pageNotFound';
       loadComponent('error-404');
     }
   }
 
-  onMount(() => {
-    // Get server configuration
-    config = window.BIRDNET_CONFIG || null;
-    securityEnabled = config?.security?.enabled || false;
-    accessAllowed = config?.security?.accessAllowed !== false; // Default to true unless explicitly false
-    version = config?.version || 'Development Build';
+  onMount(async () => {
+    // Initialize application configuration from API with retry logic
+    const success = await initApp();
+
+    if (!success) {
+      // Fatal initialization error - appState.error will contain the message
+      logger.error('App initialization failed after all retries', {
+        error: appState.error,
+      });
+      // The template will show the error page based on appError state
+      return;
+    }
 
     // Ensure SSE notifications manager is connected (it auto-connects on import)
     // This prevents tree-shaking and ensures toast messages work properly
@@ -329,9 +366,22 @@
       logger.debug('SSE notifications manager initialized');
     }
 
-    // Determine current route from URL path
-    const path = window.location.pathname;
-    handleRouting(path);
+    // Determine current route from URL path (use store which has normalized path)
+    handleRouting(navigation.currentPath);
+  });
+
+  // Use $effect for browser back/forward navigation with automatic cleanup
+  $effect(() => {
+    const handlePopState = () => {
+      navigation.handlePopState();
+      handleRouting(navigation.currentPath);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
   });
 </script>
 
@@ -342,44 +392,87 @@
   {/if}
 {/snippet}
 
-<RootLayout title={pageTitle} {currentPage} {securityEnabled} {accessAllowed} {version}>
-  {#if currentRoute === 'dashboard'}
-    <DashboardPage />
-  {:else if currentRoute === 'notifications'}
-    {@render renderRoute(Notifications)}
-  {:else if currentRoute === 'analytics'}
-    {@render renderRoute(Analytics)}
-  {:else if currentRoute === 'advanced-analytics'}
-    {@render renderRoute(AdvancedAnalytics)}
-  {:else if currentRoute === 'species'}
-    {@render renderRoute(Species)}
-  {:else if currentRoute === 'search'}
-    {@render renderRoute(Search)}
-  {:else if currentRoute === 'about'}
-    {@render renderRoute(About)}
-  {:else if currentRoute === 'system'}
-    {@render renderRoute(System)}
-  {:else if currentRoute === 'settings'}
-    {@render renderRoute(Settings)}
-  {:else if currentRoute === 'detections'}
-    {@render renderRoute(Detections)}
-  {:else if currentRoute === 'detection-detail'}
-    {#if DetectionDetail}
-      {@const Component = DetectionDetail}
-      <Component {detectionId} />
+<!-- Show loading screen during initialization -->
+{#if appLoading || (!appInitialized && !appError)}
+  <div class="flex h-screen w-full items-center justify-center bg-base-200">
+    <div class="flex flex-col items-center gap-4">
+      <span class="loading loading-spinner loading-lg text-primary"></span>
+      <p class="text-base-content/70">{t('common.loading')}</p>
+      {#if appState.retryCount > 0}
+        <p class="text-sm text-warning">
+          {t('common.retrying')} ({appState.retryCount}/{MAX_RETRIES})...
+        </p>
+      {/if}
+    </div>
+  </div>
+  <!-- Show fatal error page if initialization failed -->
+{:else if appError}
+  <div class="flex min-h-screen flex-col items-center justify-center bg-base-200 p-4">
+    <div class="card max-w-lg bg-base-100 shadow-xl">
+      <div class="card-body items-center text-center">
+        <div class="mb-4 text-6xl text-error">500</div>
+        <h2 class="card-title text-error">{t('error.server.title')}</h2>
+        <p class="text-base-content/70">{t('error.server.description')}</p>
+        <div class="mt-4 rounded-lg bg-base-200 p-4 text-left">
+          <p class="font-mono text-sm text-error">{appError}</p>
+        </div>
+        <div class="card-actions mt-6">
+          <button class="btn btn-primary" onclick={() => window.location.reload()}>
+            {t('common.retry')}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{:else}
+  <RootLayout
+    title={pageTitle}
+    {currentPage}
+    currentPath={navigation.currentPath}
+    {securityEnabled}
+    {accessAllowed}
+    {version}
+    {authConfig}
+    onNavigate={navigate}
+  >
+    {#if currentRoute === 'dashboard'}
+      <DashboardPage />
+    {:else if currentRoute === 'notifications'}
+      {@render renderRoute(Notifications)}
+    {:else if currentRoute === 'analytics'}
+      {@render renderRoute(Analytics)}
+    {:else if currentRoute === 'advanced-analytics'}
+      {@render renderRoute(AdvancedAnalytics)}
+    {:else if currentRoute === 'species'}
+      {@render renderRoute(Species)}
+    {:else if currentRoute === 'search'}
+      {@render renderRoute(Search)}
+    {:else if currentRoute === 'about'}
+      {@render renderRoute(About)}
+    {:else if currentRoute === 'system'}
+      {@render renderRoute(System)}
+    {:else if currentRoute === 'settings'}
+      {@render renderRoute(Settings)}
+    {:else if currentRoute === 'detections'}
+      {@render renderRoute(Detections)}
+    {:else if currentRoute === 'detection-detail'}
+      {#if DetectionDetail}
+        {@const Component = DetectionDetail}
+        <Component {detectionId} />
+      {/if}
+    {:else if currentRoute === 'error-404'}
+      {@render renderRoute(ErrorPage)}
+    {:else if currentRoute === 'error-500'}
+      {@render renderRoute(ServerErrorPage)}
+    {:else if currentRoute === 'error-generic'}
+      {#if GenericErrorPage}
+        {@const ErrorComponent = GenericErrorPage}
+        <ErrorComponent
+          code={dynamicErrorCode || '500'}
+          title={t('error.generic.componentLoadError')}
+          message={t('error.generic.failedToLoadComponent')}
+        />
+      {/if}
     {/if}
-  {:else if currentRoute === 'error-404'}
-    {@render renderRoute(ErrorPage)}
-  {:else if currentRoute === 'error-500'}
-    {@render renderRoute(ServerErrorPage)}
-  {:else if currentRoute === 'error-generic'}
-    {#if GenericErrorPage}
-      {@const ErrorComponent = GenericErrorPage}
-      <ErrorComponent
-        code={dynamicErrorCode || '500'}
-        title="Component Load Error"
-        message="Failed to load the requested component"
-      />
-    {/if}
-  {/if}
-</RootLayout>
+  </RootLayout>
+{/if}

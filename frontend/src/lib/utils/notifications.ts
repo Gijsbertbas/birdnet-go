@@ -18,6 +18,90 @@ export interface Notification {
   priority: Priority;
   component?: string;
   status?: string;
+  metadata?: {
+    note_id?: number;
+    [key: string]: unknown;
+  };
+}
+
+/**
+ * API notification type - matches backend response format
+ * The backend sends 'status' field instead of 'read' boolean
+ */
+export interface ApiNotification {
+  id: string;
+  type: 'error' | 'warning' | 'info' | 'detection' | 'system';
+  title: string;
+  message: string;
+  timestamp: string;
+  priority: Priority;
+  status: 'unread' | 'read' | 'acknowledged';
+  component?: string;
+  metadata?: {
+    note_id?: number;
+    [key: string]: unknown;
+  };
+}
+
+/**
+ * Input type for mapping function - accepts both API format and frontend format
+ * This is intentionally permissive to handle various notification sources:
+ * - Real API responses (have status, no read)
+ * - Test mocks (have read, may not have status)
+ * - Pre-mapped notifications (have both)
+ * - SSE notifications (have status, no read)
+ */
+type NotificationInput = {
+  id: string;
+  type: 'error' | 'warning' | 'info' | 'detection' | 'system';
+  title: string;
+  message: string;
+  timestamp: string;
+  priority: Priority;
+  status?: string;
+  read?: boolean;
+  component?: string;
+  metadata?: {
+    note_id?: number;
+    [key: string]: unknown;
+  };
+};
+
+/**
+ * Maps a notification from API format to frontend format
+ * The backend sends 'status' (string) but frontend expects 'read' (boolean)
+ *
+ * This function handles three cases:
+ * 1. Already mapped: has 'read' field already set, keep it
+ * 2. API response: has 'status' field, derive 'read' from it
+ * 3. Neither: default to unread (read: false)
+ *
+ * @param notification - Notification from API response or pre-mapped notification
+ * @returns Notification with 'read' boolean derived from 'status'
+ */
+export function mapApiNotification(notification: NotificationInput): Notification {
+  // If 'read' is already defined (boolean), preserve it
+  // This handles test mocks and already-mapped notifications
+  if (typeof notification.read === 'boolean') {
+    return notification as Notification;
+  }
+
+  // Otherwise, derive 'read' from 'status'
+  // 'unread' or undefined -> read: false, 'read'/'acknowledged' -> read: true
+  return {
+    ...notification,
+    read: notification.status === 'read' || notification.status === 'acknowledged',
+  } as Notification;
+}
+
+/**
+ * Maps an array of notifications from API format to frontend format
+ *
+ * @param notifications - Array of notifications from API response or pre-mapped notifications
+ * @returns Array of notifications with 'read' boolean derived from 'status'
+ */
+export function mapApiNotifications(notifications: NotificationInput[]): Notification[] {
+  return notifications.map(mapApiNotification);
 }
 
 /**
@@ -225,4 +309,96 @@ export function sanitizeNotificationMessage(message: string): string {
     })
     .join('\n')
     .trim();
+}
+
+// ============================================================================
+// Notification Grouping Utilities
+// Groups similar notifications by title + component + type (ignoring message content)
+// ============================================================================
+
+/**
+ * Group structure for clustered notifications
+ */
+export interface NotificationGroup {
+  key: string;
+  title: string;
+  type: Notification['type'];
+  component?: string;
+  notifications: Notification[];
+  latestTimestamp: string;
+  earliestTimestamp: string;
+  unreadCount: number;
+  highestPriority: Priority;
+}
+
+/**
+ * Creates a grouping key for notifications based on title, component, and type
+ * This key ignores dynamic message content to group similar notifications
+ * @param notification - The notification to create a key for
+ * @returns A string key for grouping
+ */
+export function createGroupingKey(notification: Notification): string {
+  const component = notification.component ?? 'unknown';
+  return `${notification.title}|${component}|${notification.type}`;
+}
+
+/**
+ * Groups notifications by title + component + type
+ * Returns sorted groups (newest first) with each group's notifications sorted internally
+ * @param notifications - Array of notifications to group
+ * @returns Array of notification groups sorted by latest timestamp
+ */
+export function groupNotifications(notifications: Notification[]): NotificationGroup[] {
+  if (!notifications.length) return [];
+
+  const groupMap = new Map<string, NotificationGroup>();
+
+  for (const notification of notifications) {
+    const key = createGroupingKey(notification);
+
+    if (groupMap.has(key)) {
+      const group = groupMap.get(key);
+      if (!group) continue; // Type guard (should never happen when has() is true)
+      group.notifications.push(notification);
+
+      // Update group metadata
+      if (new Date(notification.timestamp) > new Date(group.latestTimestamp)) {
+        group.latestTimestamp = notification.timestamp;
+      }
+      if (new Date(notification.timestamp) < new Date(group.earliestTimestamp)) {
+        group.earliestTimestamp = notification.timestamp;
+      }
+      if (!notification.read) {
+        group.unreadCount++;
+      }
+      group.highestPriority = getHigherPriority(group.highestPriority, notification.priority);
+    } else {
+      groupMap.set(key, {
+        key,
+        title: notification.title,
+        type: notification.type,
+        component: notification.component,
+        notifications: [notification],
+        latestTimestamp: notification.timestamp,
+        earliestTimestamp: notification.timestamp,
+        unreadCount: notification.read ? 0 : 1,
+        highestPriority: notification.priority,
+      });
+    }
+  }
+
+  // Convert to array, sort groups by latest timestamp (newest first)
+  const groups = Array.from(groupMap.values());
+  groups.sort(
+    (a, b) => new Date(b.latestTimestamp).getTime() - new Date(a.latestTimestamp).getTime()
+  );
+
+  // Sort notifications within each group (newest first)
+  for (const group of groups) {
+    group.notifications.sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+  }
+
+  return groups;
 }

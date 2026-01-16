@@ -2,13 +2,13 @@ package notification
 
 import (
 	"fmt"
-	"log/slog"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/events"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 type TemplateData struct {
@@ -47,7 +47,7 @@ func NewTemplateData(event events.DetectionEvent, baseURL string, timeAs24h bool
 	}
 
 	confidence := event.GetConfidence()
-	confidencePercent := fmt.Sprintf("%.0f", confidence*100)
+	confidencePercent := fmt.Sprintf("%.0f", confidence*PercentMultiplier)
 
 	// Get lat/lon from metadata
 	var latitude, longitude float64
@@ -120,9 +120,15 @@ func NewTemplateData(event events.DetectionEvent, baseURL string, timeAs24h bool
 // scheme or port (e.g., "birdnet.home.arpa" or "192.168.1.100"). The scheme and port
 // are determined by the autoTLS and port parameters.
 func BuildBaseURL(host, port string, autoTLS bool) string {
-	scheme := "http"
+	// URL scheme constants
+	const (
+		schemeHTTP  = "http"
+		schemeHTTPS = "https"
+	)
+
+	scheme := schemeHTTP
 	if autoTLS {
-		scheme = "https"
+		scheme = schemeHTTPS
 	}
 
 	// Priority 1: Use provided host from config (security.host)
@@ -130,18 +136,19 @@ func BuildBaseURL(host, port string, autoTLS bool) string {
 		// Priority 2: Try BIRDNET_HOST environment variable
 		if envHost := os.Getenv("BIRDNET_HOST"); envHost != "" {
 			host = strings.TrimSpace(envHost)
-			slog.Debug("Using BIRDNET_HOST environment variable for notification URLs", "host", host)
+			GetLogger().Debug("using BIRDNET_HOST environment variable for notification URLs",
+				logger.String("host", host))
 		}
 	}
 
 	// Priority 3: Fallback to localhost with warning
 	if host == "" {
 		host = "localhost"
-		slog.Warn("Using localhost for notification URLs. Set security.host in config or BIRDNET_HOST environment variable for proper URL generation when using reverse proxy or remote access")
+		GetLogger().Warn("using localhost for notification URLs; set security.host in config or BIRDNET_HOST environment variable for proper URL generation when using reverse proxy or remote access")
 	}
 
 	// Omit default ports for cleaner URLs
-	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+	if (scheme == schemeHTTPS && port == "443") || (scheme == schemeHTTP && port == "80") {
 		return fmt.Sprintf("%s://%s", scheme, host)
 	}
 

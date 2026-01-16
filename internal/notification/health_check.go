@@ -3,11 +3,11 @@ package notification
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/observability/metrics"
 )
 
@@ -31,7 +31,7 @@ type HealthChecker struct {
 	providers map[string]*healthCheckEntry
 	interval  time.Duration
 	timeout   time.Duration
-	log       *slog.Logger
+	log       logger.Logger
 	metrics   *metrics.NotificationMetrics
 	mu        sync.RWMutex
 	cancel    context.CancelFunc
@@ -56,8 +56,8 @@ type HealthCheckConfig struct {
 func DefaultHealthCheckConfig() HealthCheckConfig {
 	return HealthCheckConfig{
 		Enabled:  true,
-		Interval: 60 * time.Second,
-		Timeout:  10 * time.Second,
+		Interval: DefaultHealthCheckInterval,
+		Timeout:  DefaultHealthCheckTimeout,
 	}
 }
 
@@ -76,7 +76,7 @@ func (c HealthCheckConfig) Validate() error {
 }
 
 // NewHealthChecker creates a new HealthChecker.
-func NewHealthChecker(config HealthCheckConfig, log *slog.Logger, notificationMetrics *metrics.NotificationMetrics) *HealthChecker {
+func NewHealthChecker(config HealthCheckConfig, log logger.Logger, notificationMetrics *metrics.NotificationMetrics) *HealthChecker {
 	return &HealthChecker{
 		providers: make(map[string]*healthCheckEntry),
 		interval:  config.Interval,
@@ -104,7 +104,7 @@ func (hc *HealthChecker) RegisterProvider(provider Provider, circuitBreaker *Pus
 	}
 
 	if hc.log != nil {
-		hc.log.Debug("registered provider for health checking", "provider", name)
+		hc.log.Debug("registered provider for health checking", logger.String("provider", name))
 	}
 }
 
@@ -136,7 +136,9 @@ func (hc *HealthChecker) Start(ctx context.Context) error {
 	}()
 
 	if hc.log != nil {
-		hc.log.Info("health checker started", "interval", hc.interval, "providers", len(hc.providers))
+		hc.log.Info("health checker started",
+			logger.Duration("interval", hc.interval),
+			logger.Int("providers", len(hc.providers)))
 	}
 
 	return nil
@@ -180,77 +182,101 @@ func (hc *HealthChecker) checkProvider(entry *healthCheckEntry) {
 	providerName := entry.provider.GetName()
 	provider := entry.provider
 	circuitBreaker := entry.circuitBreaker
-	checkTime := time.Now()
-	entry.health.LastCheckTime = checkTime
+	entry.health.LastCheckTime = time.Now()
 	entry.health.TotalAttempts++
 	entry.mu.Unlock()
 
 	// Step 2: Perform health check WITHOUT holding lock (allows concurrent reads)
-	ctx, cancel := context.WithTimeout(hc.baseCtx, hc.timeout)
-	defer cancel()
-
-	var err error
-	if circuitBreaker != nil {
-		err = circuitBreaker.Call(ctx, func(ctx context.Context) error {
-			// For health checks, we don't actually send - we just validate the provider is responsive
-			// Providers can implement a lightweight health check method if available
-			return provider.ValidateConfig()
-		})
-	} else {
-		// Fallback if no circuit breaker
-		err = provider.ValidateConfig()
-	}
+	err := hc.executeHealthCheck(provider, circuitBreaker)
 
 	// Step 3: Lock briefly to update health status based on check result
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	// Update health status
-	// Don't count circuit breaker gating (open/half-open too many requests) as provider failures
-	if err == nil || errors.Is(err, ErrCircuitBreakerOpen) || errors.Is(err, ErrTooManyRequests) {
-		// Only update health on actual success (not on circuit breaker gating)
-		if err == nil {
-			entry.health.Healthy = true
-			entry.health.LastSuccessTime = time.Now()
-			entry.health.TotalSuccesses++
-			entry.health.ConsecutiveFailures = 0
-			entry.health.ErrorMessage = ""
+	hc.updateHealthStatus(entry, providerName, err)
+	hc.updateCircuitBreakerState(entry, circuitBreaker)
+	hc.logHealthCheckResult(entry, providerName)
+}
 
-			if hc.metrics != nil {
-				hc.metrics.UpdateHealthStatus(providerName, true)
-			}
-		}
-		// Circuit breaker gating is neutral - don't count as failure or success
-	} else {
-		entry.health.Healthy = false
-		entry.health.LastFailureTime = time.Now()
-		entry.health.TotalFailures++
-		entry.health.ConsecutiveFailures++
-		entry.health.ErrorMessage = err.Error()
+// executeHealthCheck performs the actual health check with optional circuit breaker.
+func (hc *HealthChecker) executeHealthCheck(provider Provider, circuitBreaker *PushCircuitBreaker) error {
+	ctx, cancel := context.WithTimeout(hc.baseCtx, hc.timeout)
+	defer cancel()
 
-		if hc.metrics != nil {
-			hc.metrics.UpdateHealthStatus(providerName, false)
-		}
+	if circuitBreaker != nil {
+		return circuitBreaker.Call(ctx, func(_ context.Context) error {
+			return provider.ValidateConfig()
+		})
+	}
+	return provider.ValidateConfig()
+}
 
-		if hc.log != nil {
-			hc.log.Warn("provider health check failed",
-				"provider", providerName,
-				"error", err,
-				"consecutive_failures", entry.health.ConsecutiveFailures)
-		}
+// updateHealthStatus updates the health entry based on the check result.
+// Circuit breaker gating (open/half-open) is treated as neutral - not counted as failure or success.
+func (hc *HealthChecker) updateHealthStatus(entry *healthCheckEntry, providerName string, err error) {
+	if hc.isCircuitBreakerGating(err) {
+		return // Neutral - don't update health status
 	}
 
-	// Update circuit breaker state
+	if err == nil {
+		hc.recordHealthSuccess(entry, providerName)
+	} else {
+		hc.recordHealthFailure(entry, providerName, err)
+	}
+}
+
+// isCircuitBreakerGating checks if the error indicates circuit breaker gating.
+func (hc *HealthChecker) isCircuitBreakerGating(err error) bool {
+	return errors.Is(err, ErrCircuitBreakerOpen) || errors.Is(err, ErrTooManyRequests)
+}
+
+// recordHealthSuccess updates health status for a successful check.
+func (hc *HealthChecker) recordHealthSuccess(entry *healthCheckEntry, providerName string) {
+	entry.health.Healthy = true
+	entry.health.LastSuccessTime = time.Now()
+	entry.health.TotalSuccesses++
+	entry.health.ConsecutiveFailures = 0
+	entry.health.ErrorMessage = ""
+
+	if hc.metrics != nil {
+		hc.metrics.UpdateHealthStatus(providerName, true)
+	}
+}
+
+// recordHealthFailure updates health status for a failed check.
+func (hc *HealthChecker) recordHealthFailure(entry *healthCheckEntry, providerName string, err error) {
+	entry.health.Healthy = false
+	entry.health.LastFailureTime = time.Now()
+	entry.health.TotalFailures++
+	entry.health.ConsecutiveFailures++
+	entry.health.ErrorMessage = err.Error()
+
+	if hc.metrics != nil {
+		hc.metrics.UpdateHealthStatus(providerName, false)
+	}
+
+	if hc.log != nil {
+		hc.log.Warn("provider health check failed",
+			logger.String("provider", providerName),
+			logger.Error(err),
+			logger.Int("consecutive_failures", entry.health.ConsecutiveFailures))
+	}
+}
+
+// updateCircuitBreakerState syncs the circuit breaker state to the health entry.
+func (hc *HealthChecker) updateCircuitBreakerState(entry *healthCheckEntry, circuitBreaker *PushCircuitBreaker) {
 	if circuitBreaker != nil {
 		entry.health.CircuitBreakerState = circuitBreaker.State()
 	}
+}
 
-	// Log successful checks at debug level
+// logHealthCheckResult logs successful health checks at debug level.
+func (hc *HealthChecker) logHealthCheckResult(entry *healthCheckEntry, providerName string) {
 	if entry.health.Healthy && hc.log != nil {
 		hc.log.Debug("provider health check passed",
-			"provider", providerName,
-			"total_successes", entry.health.TotalSuccesses,
-			"total_failures", entry.health.TotalFailures)
+			logger.String("provider", providerName),
+			logger.Int("total_successes", entry.health.TotalSuccesses),
+			logger.Int("total_failures", entry.health.TotalFailures))
 	}
 }
 

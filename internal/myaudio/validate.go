@@ -13,7 +13,7 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/errors"
-	"github.com/tphakala/birdnet-go/internal/logging"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // Validation constants
@@ -275,7 +275,7 @@ func executeFFprobe(ctx context.Context, audioPath string) (string, error) {
 	}
 
 	// Build ffprobe command to get format and stream information
-	cmd := exec.CommandContext(ctx, ffprobeBinary,
+	cmd := exec.CommandContext(ctx, ffprobeBinary, //nolint:gosec // G204: ffprobeBinary from conf.GetFfprobeBinaryName(), args are fixed
 		"-v", "error",
 		"-show_entries", "format=duration,bit_rate:stream=sample_rate,channels,codec_name",
 		"-of", "csv=p=0",
@@ -410,16 +410,17 @@ func QuickValidateAudioFile(audioPath string) (bool, error) {
 	}
 
 	// Check if file can be opened (basic accessibility check)
-	file, err := os.Open(audioPath)
+	file, err := os.Open(audioPath) //nolint:gosec // G304: audioPath is from directory walking
 	if err != nil {
 		return false, nil
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
 			// Log the close error for debugging purposes
-			logging.Debug("Failed to close audio file during validation",
-				"path", audioPath,
-				"error", err)
+			log := GetLogger()
+			log.Debug("failed to close audio file during validation",
+				logger.String("path", audioPath),
+				logger.Error(err))
 		}
 	}()
 

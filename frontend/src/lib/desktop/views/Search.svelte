@@ -1,23 +1,38 @@
 <script lang="ts">
-  import TimeOfDayIcon from '$lib/desktop/components/ui/TimeOfDayIcon.svelte';
   import WeatherInfo from '$lib/desktop/components/data/WeatherInfo.svelte';
   import AudioPlayer from '$lib/desktop/components/media/AudioPlayer.svelte';
+  import MobileAudioPlayer from '$lib/desktop/components/media/MobileAudioPlayer.svelte';
   import DatePicker from '$lib/desktop/components/ui/DatePicker.svelte';
-  import { t, getLocale } from '$lib/i18n';
-  import { getLocalDateString, parseLocalDateString } from '$lib/utils/date';
+  import { handleBirdImageError } from '$lib/desktop/components/ui/image-utils';
+  import TimeOfDayIcon from '$lib/desktop/components/ui/TimeOfDayIcon.svelte';
+  import { getLocale, t } from '$lib/i18n';
+  import { dashboardSettings } from '$lib/stores/settings';
   import { toastActions } from '$lib/stores/toast';
+  import { api } from '$lib/utils/api';
+  import { getLocalDateString, parseLocalDateString } from '$lib/utils/date';
+  import type { TemperatureUnit } from '$lib/utils/formatters';
   import {
-    actionIcons,
-    alertIconsSvg,
-    dataIcons,
-    mediaIcons,
-    systemIcons,
-    navigationIcons,
-  } from '$lib/utils/icons';
+    ArrowDownUp,
+    ChevronDown,
+    Eye,
+    FrownIcon,
+    Music,
+    Search,
+    Volume2,
+    XCircle,
+  } from '@lucide/svelte';
 
   // SPINNER CONTROL: Set to false to disable loading spinners (reduces flickering)
   // Change back to true to re-enable spinners for testing
   const ENABLE_LOADING_SPINNERS = false;
+
+  // Map user's temperature preference to TemperatureUnit format
+  // Settings store uses 'celsius'/'fahrenheit', but formatters use 'metric'/'imperial'/'standard'
+  const temperatureUnits = $derived.by((): TemperatureUnit => {
+    const setting = $dashboardSettings?.temperatureUnit;
+    if (setting === 'fahrenheit') return 'imperial';
+    return 'metric'; // Default to metric (Celsius)
+  });
 
   // Type definitions
   interface DateRange {
@@ -70,12 +85,33 @@
   let hasConfidenceError = $state(false);
   let showTooltip = $state<string | null>(null);
 
-  // PERFORMANCE OPTIMIZATION: Cache CSRF token with $derived to avoid repeated DOM queries
-  // In Svelte 5, $derived creates reactive computed values that only recalculate when dependencies change
-  // This prevents expensive DOM queries on every form submission
-  let csrfToken = $derived(
-    (document.querySelector('meta[name="csrf-token"]') as any)?.content || ''
-  );
+  // Localized pluralized results count using i18n keys
+  function formatResultsCount(count: number) {
+    if (!count || count === 0) return t('search.resultsCountZero');
+    if (count === 1) return t('search.resultsCountOne');
+    return t('search.resultsCountOther', { count });
+  }
+
+  // Mobile audio overlay state
+  let showMobilePlayer = $state(false);
+  let selectedAudioUrl = $state('');
+  let selectedSpeciesName = $state('');
+  let selectedDetectionId = $state<string | undefined>(undefined);
+
+  function openMobilePlayer(result: SearchResult) {
+    if (!result?.id) return;
+    selectedAudioUrl = `/api/v2/audio/${result.id}`;
+    selectedSpeciesName = result.commonName || '';
+    selectedDetectionId = result.id;
+    showMobilePlayer = true;
+  }
+
+  function closeMobilePlayer() {
+    showMobilePlayer = false;
+    selectedAudioUrl = '';
+    selectedSpeciesName = '';
+    selectedDetectionId = undefined;
+  }
 
   // Form validation
   function validateForm() {
@@ -111,25 +147,16 @@
         sortBy: sortBy,
       };
 
-      // Debug: Search parameters submitted
-
-      const response = await fetch('/api/v2/search', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-Token': csrfToken,
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Server responded with ${response.status}`);
+      interface SearchResponse {
+        results: SearchResult[];
+        total: number;
+        pages: number;
       }
 
-      const data = await response.json();
-      results = data.results || [];
-      totalResults = data.total || 0;
-      totalPages = data.pages || 1;
+      const data = await api.post<SearchResponse>('/api/v2/search', requestBody);
+      results = data.results ?? [];
+      totalResults = data.total ?? 0;
+      totalPages = data.pages ?? 1;
       formSubmitted = true;
     } catch (error: unknown) {
       // Handle search error silently
@@ -197,7 +224,7 @@
 
   // Memoized today value - only recalculates when component mounts or when day changes
   // This prevents unnecessary recalculations on every state change
-  const today = $derived(() => {
+  const today = $derived.by(() => {
     // Force recalculation periodically to handle day changes
     // Using Math.floor to update once per day
     const daysSinceEpoch = Math.floor(Date.now() / (1000 * 60 * 60 * 24));
@@ -207,9 +234,9 @@
   });
 
   // Optimized reactive date constraints - only recalculate when relevant dependencies change
-  const startDateConstraints = $derived(() => {
+  const startDateConstraints = $derived.by(() => {
     // Only depends on: dateRange.end and today
-    const todayValue = today();
+    const todayValue = today;
     const endDate = dateRange.end;
 
     const constraints: { maxDate?: string; minDate?: string } = {};
@@ -224,9 +251,9 @@
     return constraints;
   });
 
-  const endDateConstraints = $derived(() => {
+  const endDateConstraints = $derived.by(() => {
     // Only depends on: dateRange.start and today
-    const todayValue = today();
+    const todayValue = today;
     const startDate = dateRange.start;
 
     const constraints: { maxDate?: string; minDate?: string } = {
@@ -267,7 +294,7 @@
 
 <div class="col-span-12 space-y-4" role="region" aria-label={t('search.title')}>
   <!-- Search Form -->
-  <div class="card bg-base-100 shadow-sm">
+  <div class="card bg-base-100 shadow-xs">
     <div class="card-body card-padding">
       <h2 class="card-title" id="search-filters-heading">{t('search.title')}</h2>
 
@@ -303,7 +330,7 @@
               id="species"
               bind:value={speciesSearchTerm}
               placeholder={t('search.fields.speciesPlaceholder')}
-              class="input input-bordered w-full"
+              class="input w-full"
             />
             {#if showTooltip === 'species'}
               <div class="tooltip" id="speciesTooltip" role="tooltip">
@@ -335,8 +362,8 @@
                 placeholder={t('search.fields.from')}
                 className="w-full"
                 size="md"
-                maxDate={startDateConstraints().maxDate}
-                minDate={startDateConstraints().minDate}
+                maxDate={startDateConstraints.maxDate}
+                minDate={startDateConstraints.minDate}
               />
               <DatePicker
                 value={dateRange.end}
@@ -344,8 +371,8 @@
                 placeholder={t('search.fields.to')}
                 className="w-full"
                 size="md"
-                maxDate={endDateConstraints().maxDate}
-                minDate={endDateConstraints().minDate}
+                maxDate={endDateConstraints.maxDate}
+                minDate={endDateConstraints.minDate}
               />
             </div>
             {#if showTooltip === 'dateRange'}
@@ -375,7 +402,7 @@
               class:rotate-180={advancedFilters}
               aria-hidden="true"
             >
-              {@html navigationIcons.chevronDown}
+              <ChevronDown class="size-5" />
             </span>
           </button>
         </div>
@@ -447,11 +474,7 @@
                 <label class="label" for="verifiedStatusFilter">
                   <span class="label-text">{t('search.fields.verifiedStatus')}</span>
                 </label>
-                <select
-                  id="verifiedStatusFilter"
-                  bind:value={verifiedStatus}
-                  class="select select-bordered w-full"
-                >
+                <select id="verifiedStatusFilter" bind:value={verifiedStatus} class="select w-full">
                   <option value="any">{t('search.verifiedOptions.any')}</option>
                   <option value="verified">{t('search.verifiedOptions.verified')}</option>
                   <option value="unverified">{t('search.verifiedOptions.unverified')}</option>
@@ -463,11 +486,7 @@
                 <label class="label" for="lockedStatusFilter">
                   <span class="label-text">{t('search.fields.lockedStatus')}</span>
                 </label>
-                <select
-                  id="lockedStatusFilter"
-                  bind:value={lockedStatus}
-                  class="select select-bordered w-full"
-                >
+                <select id="lockedStatusFilter" bind:value={lockedStatus} class="select w-full">
                   <option value="any">{t('search.lockedOptions.any')}</option>
                   <option value="locked">{t('search.lockedOptions.locked')}</option>
                   <option value="unlocked">{t('search.lockedOptions.unlocked')}</option>
@@ -479,11 +498,7 @@
                 <label class="label" for="timeOfDayFilter">
                   <span class="label-text">{t('search.fields.timeOfDay')}</span>
                 </label>
-                <select
-                  id="timeOfDayFilter"
-                  bind:value={timeOfDayFilter}
-                  class="select select-bordered w-full"
-                >
+                <select id="timeOfDayFilter" bind:value={timeOfDayFilter} class="select w-full">
                   <option value="any">{t('search.timeOfDayOptions.any')}</option>
                   <option value="day">{t('search.timeOfDayOptions.day')}</option>
                   <option value="night">{t('search.timeOfDayOptions.night')}</option>
@@ -499,7 +514,7 @@
         <div class="flex flex-row gap-4 justify-end">
           <button
             type="button"
-            class="btn btn-ghost flex-shrink-0"
+            class="btn btn-ghost shrink-0"
             onclick={resetForm}
             aria-label={t('common.reset')}
           >
@@ -507,7 +522,7 @@
           </button>
           <button
             type="submit"
-            class="btn btn-primary flex-shrink-0"
+            class="btn btn-primary shrink-0"
             disabled={isLoading}
             aria-label={t('common.search')}
           >
@@ -515,7 +530,7 @@
               <span class="loading loading-spinner loading-sm mr-2" aria-hidden="true"></span>
             {:else}
               <span class="mr-2" aria-hidden="true">
-                {@html actionIcons.search}
+                <Search class="size-5" />
               </span>
             {/if}
             {t('common.search')}
@@ -526,7 +541,7 @@
   </div>
 
   <!-- Results Area -->
-  <div class="card bg-base-100 shadow-sm">
+  <div class="card bg-base-100 shadow-xs">
     <div class="card-body card-padding">
       <div class="flex items-center justify-between">
         <h2 class="card-title" id="search-results-heading">{t('search.results')}</h2>
@@ -534,10 +549,8 @@
         <!-- Results Count & Sorting -->
         {#if formSubmitted}
           <div class="flex items-center gap-4">
-            <span class="text-sm text-base-content/70" aria-live="polite"
-              >{t('search.resultsCount', {
-                count: totalResults,
-              })}</span
+            <span class="text-sm text-base-content opacity-70" aria-live="polite"
+              >{formatResultsCount(totalResults)}</span
             >
             <div class="dropdown dropdown-end">
               <div
@@ -548,12 +561,12 @@
                 aria-expanded="false"
                 aria-label={t('common.sort')}
               >
-                {@html actionIcons.sort}
+                <ArrowDownUp class="size-5" />
                 {t('common.sort')}
               </div>
               <ul
                 tabindex="0"
-                class="dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-52"
+                class="dropdown-content z-1 menu p-2 shadow-xs bg-base-100 rounded-box w-52"
                 role="menu"
               >
                 <li role="menuitem">
@@ -596,7 +609,7 @@
       <!-- Error message -->
       {#if errorMessage}
         <div class="alert alert-error mt-4" role="alert">
-          {@html alertIconsSvg.error}
+          <XCircle class="size-5" />
           <span>{errorMessage}</span>
         </div>
       {/if}
@@ -607,11 +620,13 @@
           class="mt-6 bg-base-200 rounded-lg p-4 flex flex-col items-center justify-center min-h-[200px]"
           aria-labelledby="search-results-heading"
         >
-          <span class="text-base-content/30 text-[4rem]" aria-hidden="true">
-            {@html systemIcons.search}
+          <span class="text-base-content opacity-30 text-[4rem]" aria-hidden="true">
+            <Search class="size-12" />
           </span>
-          <p class="text-base-content/50 text-center mt-4">{t('search.noSearchPerformed')}</p>
-          <p class="text-base-content/50 text-center text-sm">
+          <p class="text-base-content opacity-50 text-center mt-4">
+            {t('search.noSearchPerformed')}
+          </p>
+          <p class="text-base-content opacity-50 text-center text-sm">
             {t('search.noSearchPerformedHint')}
           </p>
         </div>
@@ -625,13 +640,14 @@
           aria-busy="true"
         >
           <span class="loading loading-spinner loading-lg text-primary" aria-hidden="true"></span>
-          <p class="text-base-content/50 text-center mt-4">{t('search.loadingResults')}</p>
+          <p class="text-base-content opacity-50 text-center mt-4">{t('search.loadingResults')}</p>
         </div>
       {/if}
 
-      <!-- Search results table - only visible when search performed -->
+      <!-- Search results - table for md+, cards for mobile -->
       {#if formSubmitted && !isLoading && results.length > 0}
-        <div class="overflow-x-auto mt-4" aria-labelledby="search-results-heading">
+        <!-- Desktop/tablet table -->
+        <div class="overflow-x-auto mt-4 hidden md:block" aria-labelledby="search-results-heading">
           <table class="table w-full">
             <thead>
               <tr>
@@ -659,7 +675,7 @@
                     <div class="flex items-center gap-2">
                       <!-- Add bird image thumbnail -->
                       <div
-                        class="w-12 h-12 rounded-md overflow-hidden bg-gray-100 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-primary transition-all focus:outline-none focus:ring-2 focus:ring-primary"
+                        class="w-12 h-12 rounded-md overflow-hidden bg-gray-100 shrink-0 cursor-pointer hover:ring-2 hover:ring-primary transition-all focus:outline-hidden focus:ring-2 focus:ring-primary"
                         onclick={() => toggleExpand(result.id)}
                         onkeydown={e => {
                           if (e.key === 'Enter' || e.key === ' ') {
@@ -689,11 +705,9 @@
                           alt={result.commonName || t('search.detailsPanel.unknownSpecies')}
                           class="w-full h-full object-cover"
                           onerror={e => {
-                            const target = e.target as any;
-                            if (target) {
-                              target.src = '/assets/images/bird-placeholder.svg';
-                              target.classList.add('p-2');
-                            }
+                            const target = e.currentTarget as HTMLImageElement;
+                            target.src = '/ui/assets/bird-placeholder.svg';
+                            target.classList.add('p-2');
                           }}
                           loading="lazy"
                           decoding="async"
@@ -770,7 +784,7 @@
                         })}
                         aria-pressed="false"
                       >
-                        {@html mediaIcons.music}
+                        <Music class="size-4" />
                       </button>
                       <button
                         class="btn btn-xs btn-square"
@@ -779,7 +793,7 @@
                           species: result.commonName || t('search.detailsPanel.unknownSpecies'),
                         })}
                       >
-                        {@html systemIcons.eye}
+                        <Eye class="size-4" />
                       </button>
                       <button
                         class="btn btn-xs btn-square expand-btn"
@@ -803,7 +817,7 @@
                           class:rotate-180={isExpanded(result.id)}
                           aria-hidden="true"
                         >
-                          {@html navigationIcons.chevronDown}
+                          <ChevronDown class="size-4" />
                         </span>
                       </button>
                     </div>
@@ -819,7 +833,7 @@
                         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                           <!-- Weather Information Container -->
                           <div class="bg-base-200 rounded-box p-4">
-                            <WeatherInfo detectionId={result.id} />
+                            <WeatherInfo detectionId={result.id} units={temperatureUnits} />
                           </div>
 
                           <!-- Bird Image Container (Middle Column) -->
@@ -827,7 +841,7 @@
                             class="bg-base-200 rounded-box p-4 flex flex-col justify-center items-center"
                           >
                             <div
-                              class="w-full aspect-square rounded-md overflow-hidden bg-gray-100 cursor-pointer hover:brightness-90 transition-all focus:outline-none focus:ring-2 focus:ring-primary"
+                              class="w-full aspect-square rounded-md overflow-hidden bg-gray-100 cursor-pointer hover:brightness-90 transition-all focus:outline-hidden focus:ring-2 focus:ring-primary"
                               onclick={() => toggleExpand(result.id)}
                               onkeydown={e => {
                                 if (e.key === 'Enter' || e.key === ' ') {
@@ -852,11 +866,9 @@
                                 alt={result.commonName || t('search.detailsPanel.unknownSpecies')}
                                 class="w-full h-full object-cover"
                                 onerror={e => {
-                                  const target = e.target as any;
-                                  if (target) {
-                                    target.src = '/assets/images/bird-placeholder.svg';
-                                    target.classList.add('p-2');
-                                  }
+                                  const target = e.currentTarget as HTMLImageElement;
+                                  target.src = '/ui/assets/bird-placeholder.svg';
+                                  target.classList.add('p-2');
                                 }}
                                 loading="lazy"
                                 decoding="async"
@@ -888,6 +900,119 @@
             </tbody>
           </table>
         </div>
+
+        <!-- Mobile card list -->
+        <div class="md:hidden mt-4 space-y-2" aria-labelledby="search-results-heading">
+          {#each results as result (result.id)}
+            <section class="bg-base-100 rounded-lg p-3">
+              <div class="flex items-start gap-3">
+                <!-- Time of Day + Date/Time -->
+                <div class="w-16 shrink-0 text-sm opacity-80">
+                  <div class="flex items-center gap-1">
+                    <TimeOfDayIcon timeOfDay={result.timeOfDay as any} className="size-4" />
+                    <span class="capitalize">{result.timeOfDay}</span>
+                  </div>
+                  <div class="mt-1 text-xs opacity-70 leading-tight">
+                    {formatDate(result.timestamp)}
+                  </div>
+                </div>
+
+                <!-- Thumbnail and names -->
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <div class="w-12 h-12 rounded-md overflow-hidden bg-base-200 shrink-0">
+                      <img
+                        src="/api/v2/media/species-image?name={encodeURIComponent(
+                          result.scientificName
+                        )}"
+                        alt={result.commonName || t('search.detailsPanel.unknownSpecies')}
+                        class="w-full h-full object-cover"
+                        onerror={handleBirdImageError}
+                        loading="lazy"
+                        decoding="async"
+                        fetchpriority="low"
+                      />
+                    </div>
+                    <div class="min-w-0">
+                      <div class="font-semibold leading-tight truncate">
+                        {result.commonName || t('search.detailsPanel.unknownSpecies')}
+                      </div>
+                      <div class="text-xs opacity-60 truncate">{result.scientificName || ''}</div>
+                    </div>
+                  </div>
+
+                  <!-- Confidence + Status -->
+                  <div class="mt-2 flex items-center gap-2">
+                    <span
+                      class="badge {result.confidence >= 0.8
+                        ? 'badge-success'
+                        : result.confidence >= 0.4
+                          ? 'badge-warning'
+                          : 'badge-error'}"
+                    >
+                      {Math.round(result.confidence * 100)}%
+                    </span>
+                    <div class="flex gap-1 flex-wrap">
+                      <div
+                        class="status-badge {result.verified === 'correct'
+                          ? 'correct'
+                          : result.verified === 'false_positive'
+                            ? 'false'
+                            : 'unverified'}"
+                      >
+                        {result.verified === 'correct'
+                          ? t('search.statusBadges.verified')
+                          : result.verified === 'false_positive'
+                            ? t('search.statusBadges.false')
+                            : t('search.statusBadges.unverified')}
+                      </div>
+                      <div class="status-badge {result.locked ? 'locked' : 'unverified'}">
+                        {result.locked
+                          ? t('search.statusBadges.locked')
+                          : t('search.statusBadges.unlocked')}
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Actions -->
+                  <div class="mt-2 flex items-center gap-2">
+                    <button
+                      class="btn btn-primary btn-sm"
+                      onclick={() => openMobilePlayer(result)}
+                      disabled={!result.hasAudio}
+                      aria-label={t('search.detailsPanel.playAudio', {
+                        species: result.commonName || t('search.detailsPanel.unknownSpecies'),
+                      })}
+                    >
+                      <Volume2 class="size-4" />
+                      {t('common.actions.play')}
+                    </button>
+                    <button
+                      class="btn btn-outline btn-sm"
+                      onclick={() => (window.location.href = `/ui/detections/${result.id}`)}
+                      aria-label={t('search.detailsPanel.viewDetails', {
+                        species: result.commonName || t('search.detailsPanel.unknownSpecies'),
+                      })}
+                    >
+                      {t('common.actions.view')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          {/each}
+
+          {#if showMobilePlayer}
+            <div class="md:hidden">
+              <MobileAudioPlayer
+                audioUrl={selectedAudioUrl}
+                speciesName={selectedSpeciesName}
+                detectionId={selectedDetectionId}
+                onClose={closeMobilePlayer}
+              />
+            </div>
+          {/if}
+        </div>
       {/if}
 
       <!-- Empty state - when search returns no results -->
@@ -895,9 +1020,9 @@
         <div
           class="mt-6 bg-base-200 rounded-lg p-4 flex flex-col items-center justify-center min-h-[200px]"
         >
-          {@html dataIcons.sadFace}
-          <p class="mt-2 text-base-content/70">{t('search.noResultsFound')}</p>
-          <p class="text-sm text-base-content/50">{t('search.noResultsHint')}</p>
+          <FrownIcon class="size-12" />
+          <p class="mt-2 text-base-content opacity-70">{t('search.noResultsFound')}</p>
+          <p class="text-sm text-base-content opacity-50">{t('search.noResultsHint')}</p>
         </div>
       {/if}
 

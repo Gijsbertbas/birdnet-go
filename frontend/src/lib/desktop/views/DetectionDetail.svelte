@@ -1,8 +1,8 @@
-<!-- 
+<!--
   DetectionDetail.svelte - Single Detection View Component
-  
+
   Purpose: Display comprehensive details for a single bird detection
-  
+
   Features:
   - Hero section with species information and confidence
   - Audio player with large spectrogram visualization
@@ -10,24 +10,24 @@
   - Species rarity and taxonomy information
   - Detection history and tracking metadata
   - Review and action controls
-  
+
   Props:
   - detectionId: string - The ID of the detection to display
 -->
 <script lang="ts">
-  import LoadingSpinner from '$lib/desktop/components/ui/LoadingSpinner.svelte';
-  import ErrorAlert from '$lib/desktop/components/ui/ErrorAlert.svelte';
-  import AudioPlayer from '$lib/desktop/components/media/AudioPlayer.svelte';
   import ConfidenceCircle from '$lib/desktop/components/data/ConfidenceCircle.svelte';
   import WeatherDetails from '$lib/desktop/components/data/WeatherDetails.svelte';
-  import SpeciesThumbnail from '$lib/desktop/components/modals/SpeciesThumbnail.svelte';
+  import AudioPlayer from '$lib/desktop/components/media/AudioPlayer.svelte';
   import SpeciesBadges from '$lib/desktop/components/modals/SpeciesBadges.svelte';
+  import SpeciesThumbnail from '$lib/desktop/components/modals/SpeciesThumbnail.svelte';
+  import ErrorAlert from '$lib/desktop/components/ui/ErrorAlert.svelte';
+  import LoadingSpinner from '$lib/desktop/components/ui/LoadingSpinner.svelte';
   import { t } from '$lib/i18n';
-  import { loggers } from '$lib/utils/logger';
-  import { mediaIcons } from '$lib/utils/icons';
   import type { Detection } from '$lib/types/detection.types';
   import { hasReviewPermission } from '$lib/utils/auth';
   import { formatLocalDateTime } from '$lib/utils/date';
+  import { loggers } from '$lib/utils/logger';
+  import { Download } from '@lucide/svelte';
 
   // Interface definitions for API responses
   interface SpeciesRarity {
@@ -70,14 +70,31 @@
 
   const logger = loggers.ui;
 
+  // Constants
+  const TAB_FOCUS_DELAY_MS = 50;
+  type TabType = 'overview' | 'taxonomy' | 'history' | 'notes' | 'review';
+
+  // Helper to calculate detection duration with NaN safety
+  function calculateDuration(endTime: string, beginTime: string): string {
+    const end = parseFloat(endTime);
+    const begin = parseFloat(beginTime);
+    const duration = end - begin;
+    if (Number.isNaN(duration)) return '—';
+    return `${duration}s`;
+  }
+
   interface Props {
     detectionId?: string;
   }
 
-  let { detectionId }: Props = $props();
+  const { detectionId: detectionIdProp }: Props = $props();
+
+  // Resolved detection ID - initialized by $effect below, not directly from prop
+  // to ensure reactive updates work correctly
+  let resolvedDetectionId = $state<string | undefined>(undefined);
 
   // State
-  let activeTab = $state<'overview' | 'taxonomy' | 'history' | 'notes' | 'review'>('overview');
+  let activeTab = $state<TabType>('overview');
 
   // Dynamic review component loading
   let ReviewCard: ReviewCardComponent | null = $state(null);
@@ -103,33 +120,62 @@
   let speciesController: AbortController | null = null;
   let taxonomyController: AbortController | null = null;
 
-  // Extract detection ID from URL if not provided and fetch data reactively
+  // Validate detection ID to prevent path traversal attacks
+  // Only allow alphanumeric characters, hyphens, and underscores
+  function isValidDetectionId(id: string): boolean {
+    return /^[a-zA-Z0-9_-]+$/.test(id);
+  }
+
+  // Resolve detection ID from URL if not provided via prop
   $effect(() => {
-    if (!detectionId) {
+    if (!detectionIdProp) {
       const pathParts = window.location.pathname.split('/');
       const detectionIndex = pathParts.indexOf('detections');
       if (detectionIndex !== -1 && pathParts[detectionIndex + 1]) {
-        detectionId = pathParts[detectionIndex + 1];
+        const candidateId = pathParts[detectionIndex + 1];
+        // Validate ID to prevent path traversal (e.g., ../users)
+        if (isValidDetectionId(candidateId)) {
+          resolvedDetectionId = candidateId;
+        } else {
+          detectionError = t('detections.errors.noIdProvided');
+        }
       }
+    } else if (isValidDetectionId(detectionIdProp)) {
+      resolvedDetectionId = detectionIdProp;
+    } else {
+      detectionError = t('detections.errors.noIdProvided');
     }
+  });
 
-    // Check for tab query parameter to set initial active tab
+  // Initialize tab from URL query parameter (with permission check for review tab)
+  $effect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const tabParam = urlParams.get('tab');
-    if (tabParam && ['overview', 'taxonomy', 'history', 'notes', 'review'].includes(tabParam)) {
-      activeTab = tabParam as typeof activeTab;
+    const validTabs: TabType[] = ['overview', 'taxonomy', 'history', 'notes', 'review'];
+    if (tabParam && validTabs.includes(tabParam as TabType)) {
+      // If review tab requested but user lacks permission, fall back to overview
+      activeTab = tabParam === 'review' && !canReview ? 'overview' : (tabParam as TabType);
     }
+  });
 
-    // Fetch detection data when detectionId changes
-    if (detectionId) {
+  // Fetch detection data when resolvedDetectionId changes
+  $effect(() => {
+    if (resolvedDetectionId) {
       fetchDetection();
     }
+
+    // Cleanup: abort pending requests when component unmounts or ID changes
+    return () => {
+      detectionController?.abort();
+      speciesController?.abort();
+      taxonomyController?.abort();
+    };
   });
 
   // Fetch detection data
   async function fetchDetection() {
-    if (!detectionId) {
-      detectionError = 'No detection ID provided';
+    if (!resolvedDetectionId) {
+      detectionError = t('detections.errors.noIdProvided');
       isLoadingDetection = false;
       return;
     }
@@ -142,31 +188,37 @@
     detectionError = null;
 
     try {
-      const response = await fetch(`/api/v2/detections/${detectionId}`, {
+      const response = await fetch(`/api/v2/detections/${resolvedDetectionId}`, {
         signal: detectionController.signal,
       });
+
+      // Check if request was aborted during fetch
+      if (detectionController.signal.aborted) return;
+
       if (response.ok) {
-        detection = (await response.json()) as Detection;
+        const data = (await response.json()) as Detection;
+        // Check again after await - signal may have been aborted during JSON parsing
+        if (detectionController.signal.aborted) return;
+        detection = data;
       } else {
         let errorMessage: string;
         switch (response.status) {
           case 404:
-            errorMessage = 'Detection not found. It may have been deleted or the ID is incorrect.';
+            errorMessage = t('detections.errors.notFound');
             break;
           case 403:
-            errorMessage = "You don't have permission to view this detection.";
+            errorMessage = t('detections.errors.noPermission');
             break;
           case 401:
-            errorMessage = 'Please log in to view this detection.';
+            errorMessage = t('detections.errors.loginRequired');
             break;
           case 500:
           case 502:
           case 503:
-            errorMessage =
-              'Server error. Please try again later or contact support if the problem persists.';
+            errorMessage = t('detections.errors.serverError');
             break;
           default:
-            errorMessage = `Failed to load detection (Error ${response.status}). Please try refreshing the page.`;
+            errorMessage = t('detections.errors.loadFailed', { status: response.status });
         }
         throw new Error(errorMessage);
       }
@@ -181,7 +233,8 @@
         // Request was aborted, don't update state
         return;
       }
-      detectionError = error instanceof Error ? error.message : 'Failed to load detection';
+      detectionError =
+        error instanceof Error ? error.message : t('detections.errors.loadFailed', { status: '' });
       logger.error('Error fetching detection:', error);
     } finally {
       isLoadingDetection = false;
@@ -201,8 +254,13 @@
         `/api/v2/species?scientific_name=${encodeURIComponent(detection.scientificName)}`,
         { signal: speciesController.signal }
       );
+      // Check if request was aborted during fetch
+      if (speciesController.signal.aborted) return;
       if (response.ok) {
-        speciesInfo = await response.json();
+        const data = await response.json();
+        // Check again after await
+        if (speciesController.signal.aborted) return;
+        speciesInfo = data;
       }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
@@ -229,8 +287,13 @@
         `/api/v2/species/taxonomy?scientific_name=${encodeURIComponent(detection.scientificName)}`,
         { signal: taxonomyController.signal }
       );
+      // Check if request was aborted during fetch
+      if (taxonomyController.signal.aborted) return;
       if (response.ok) {
-        taxonomyInfo = await response.json();
+        const data = await response.json();
+        // Check again after await
+        if (taxonomyController.signal.aborted) return;
+        taxonomyInfo = data;
       }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
@@ -263,8 +326,25 @@
     // Switch back to overview tab after successful save
     activeTab = 'overview';
     // Refetch detection data to show updated status
-    if (detectionId) {
+    if (resolvedDetectionId) {
       fetchDetection();
+    }
+  }
+
+  // Keyboard navigation handler for tab buttons (arrow keys only - Enter/Space use native button behavior)
+  function handleTabKeydown(e: KeyboardEvent) {
+    const tabs: TabType[] = ['overview', 'taxonomy', 'history', 'notes'];
+    if (canReview) tabs.push('review');
+
+    const currentIndex = tabs.indexOf(activeTab);
+    if (currentIndex === -1) return;
+
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      activeTab = tabs[(currentIndex + 1) % tabs.length];
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      activeTab = tabs[(currentIndex - 1 + tabs.length) % tabs.length];
     }
   }
 
@@ -272,17 +352,24 @@
   $effect(() => {
     // Focus the active tab panel when tab changes for keyboard users
     const activePanel = document.getElementById(`tab-panel-${activeTab}`);
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
     if (activePanel && document.activeElement?.getAttribute('role') === 'tab') {
       // Small delay to ensure the panel is rendered
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         activePanel.focus();
-      }, 50);
+      }, TAB_FOCUS_DELAY_MS);
     }
+
+    // Cleanup: clear timeout when effect re-runs or component unmounts
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
   });
 
   // URL state management - update URL when tab changes
   $effect(() => {
-    if (typeof window !== 'undefined' && detectionId) {
+    if (typeof window !== 'undefined' && resolvedDetectionId) {
       const url = new URL(window.location.href);
 
       // Update or remove tab parameter based on active tab
@@ -336,14 +423,14 @@
 
 <!-- Snippets for better organization -->
 {#snippet heroSection(detection: Detection)}
-  <section class="card bg-base-100 shadow-sm" aria-labelledby="species-heading">
+  <section class="card bg-base-100 shadow-xs" aria-labelledby="species-heading">
     <div class="card-body">
       <!-- Species info container - similar to ReviewModal -->
-      <div class="bg-base-200/50 rounded-lg p-4" role="region" aria-label="Species information">
-        <!-- Single Row Layout: All 4 segments in one row using flex -->
-        <div class="flex gap-4 items-start">
+      <div class="bg-base-200 rounded-lg p-4" role="region" aria-label="Species information">
+        <!-- Responsive layout: stack on mobile, row on md+ -->
+        <div class="flex flex-col md:flex-row gap-4 items-start">
           <!-- Section 1: Thumbnail + Species Names (flex-grow for more space) -->
-          <div class="flex gap-4 items-center flex-1 min-w-0">
+          <div class="flex gap-3 md:gap-4 items-center flex-1 min-w-0 md:min-w-[240px] w-full">
             <SpeciesThumbnail
               scientificName={detection.scientificName}
               commonName={detection.commonName}
@@ -352,12 +439,15 @@
             <div class="flex-1 min-w-0">
               <h1
                 id="species-heading"
-                class="text-3xl font-semibold text-base-content mb-1 truncate"
+                class="text-2xl md:text-3xl font-semibold text-base-content mb-1 truncate"
               >
                 {detection.commonName}
                 <span class="sr-only">detection details</span>
               </h1>
-              <p class="text-lg text-base-content/60 italic truncate" aria-label="Scientific name">
+              <p
+                class="text-base md:text-lg text-base-content opacity-60 italic truncate"
+                aria-label="Scientific name"
+              >
                 {detection.scientificName}
               </p>
               <div class="mt-3" aria-label="Species classification badges">
@@ -366,88 +456,109 @@
             </div>
           </div>
 
-          <!-- Section 2: Date & Time (fixed width) -->
+          <!-- Mobile: 2-column grid; md+: flex row with fixed-width sections -->
           <div
-            class="flex-shrink-0 text-center"
-            style:min-width="120px"
-            role="region"
-            aria-labelledby="datetime-heading"
+            class="grid grid-cols-2 gap-4 w-full md:flex md:flex-row md:gap-4 md:w-auto md:shrink-0"
           >
-            <h2 id="datetime-heading" class="text-sm text-base-content/60 mb-2">
-              {t('detections.headers.dateTime')}
-            </h2>
-            <div class="text-base text-base-content" aria-label="Detection date">
-              {detection.date}
-            </div>
-            <div class="text-base text-base-content" aria-label="Detection time">
-              {detection.time}
-            </div>
-            {#if detection.timeOfDay}
-              <div class="text-sm text-base-content/60 mt-1 capitalize" aria-label="Time of day">
-                {detection.timeOfDay}
+            <!-- Section 2: Date & Time (fixed width) -->
+            <div
+              class="md:shrink-0 md:text-center md:min-w-[120px] w-full md:w-auto"
+              role="region"
+              aria-labelledby="datetime-heading"
+            >
+              <h2 id="datetime-heading" class="text-sm text-base-content opacity-60 mb-2">
+                {t('detections.headers.dateTime')}
+              </h2>
+              <div class="text-base text-base-content" aria-label="Detection date">
+                {detection.date}
               </div>
-            {/if}
-          </div>
-
-          <!-- Section 3: Weather Conditions (fixed width) -->
-          <div
-            class="flex-shrink-0 text-center"
-            style:min-width="180px"
-            role="region"
-            aria-labelledby="weather-heading"
-          >
-            <h2 id="weather-heading" class="text-sm text-base-content/60 mb-2">
-              {t('detections.headers.weather')}
-            </h2>
-            {#if detection.weather}
-              <div class="flex justify-center" aria-label="Weather conditions at time of detection">
-                <WeatherDetails
-                  weatherIcon={detection.weather.weatherIcon}
-                  weatherDescription={detection.weather.description}
-                  temperature={detection.weather.temperature}
-                  windSpeed={detection.weather.windSpeed}
-                  windGust={detection.weather.windGust}
-                  units={detection.weather.units}
-                  size="md"
-                  className="text-center"
-                />
+              <div class="text-base text-base-content" aria-label="Detection time">
+                {detection.time}
               </div>
-            {:else}
-              <div class="text-sm text-base-content/40 italic" role="status">
-                {t('detections.weather.noData')}
-              </div>
-            {/if}
-          </div>
-
-          <!-- Section 4: Confidence + Actions (fixed width) -->
-          <div
-            class="flex-shrink-0 flex flex-col items-center"
-            style:min-width="120px"
-            role="region"
-            aria-labelledby="confidence-heading"
-          >
-            <h2 id="confidence-heading" class="text-sm text-base-content/60 mb-2">
-              {t('common.labels.confidence')}
-            </h2>
-            <div aria-label="Detection confidence {detection.confidence}%">
-              <ConfidenceCircle confidence={detection.confidence} size="xl" />
-            </div>
-
-            <!-- Actions below confidence -->
-            <div class="flex flex-col gap-2 mt-4" role="group" aria-label="Detection actions">
-              {#if detection.clipName}
-                <a
-                  href={`/api/v2/media/audio/${detection.clipName}`}
-                  download
-                  class="btn btn-ghost btn-sm gap-2"
-                  aria-label="Download audio clip for {detection.commonName} detection"
+              {#if detection.timeOfDay}
+                <div
+                  class="text-sm text-base-content opacity-60 mt-1 capitalize"
+                  aria-label="Time of day"
                 >
-                  {@html mediaIcons.download}
-                  {t('common.actions.download')}
-                </a>
+                  {detection.timeOfDay}
+                </div>
               {/if}
             </div>
+
+            <!-- Section 3: Weather Conditions (fixed width) -->
+            <div
+              class="hidden md:block md:shrink-0 md:text-center md:min-w-[180px] w-full md:w-auto"
+              role="region"
+              aria-labelledby="weather-heading"
+            >
+              <h2 id="weather-heading" class="text-sm text-base-content opacity-60 mb-2">
+                {t('detections.headers.weather')}
+              </h2>
+              {#if detection.weather}
+                <div
+                  class="flex justify-start md:justify-center"
+                  aria-label="Weather conditions at time of detection"
+                >
+                  <WeatherDetails
+                    weatherIcon={detection.weather.weatherIcon}
+                    weatherDescription={detection.weather.description}
+                    temperature={detection.weather.temperature}
+                    windSpeed={detection.weather.windSpeed}
+                    windGust={detection.weather.windGust}
+                    units={detection.weather.units}
+                    size="md"
+                    className="text-left md:text-center"
+                  />
+                </div>
+              {:else}
+                <div class="text-sm text-base-content opacity-40 italic" role="status">
+                  {t('detections.weather.noData')}
+                </div>
+              {/if}
+            </div>
+
+            <!-- Section 4: Confidence + Actions (fixed width) -->
+            <div
+              class="md:shrink-0 flex flex-col md:items-center w-full md:w-auto md:min-w-[120px]"
+              role="region"
+              aria-labelledby="confidence-heading"
+            >
+              <div class="flex items-center gap-3 md:flex-col md:items-center">
+                <h2
+                  id="confidence-heading"
+                  class="text-sm text-base-content opacity-60 mb-0 md:mb-2"
+                >
+                  {t('common.labels.confidence')}
+                </h2>
+                <div
+                  aria-label="Detection confidence {detection.confidence}%"
+                  class="md:self-auto self-start md:scale-100 scale-90"
+                >
+                  <ConfidenceCircle confidence={detection.confidence} size="xl" />
+                </div>
+              </div>
+
+              <!-- Actions below confidence -->
+              <div
+                class="flex flex-row md:flex-col gap-2 mt-3"
+                role="group"
+                aria-label="Detection actions"
+              >
+                {#if detection.clipName}
+                  <a
+                    href={`/api/v2/media/audio/${detection.clipName}`}
+                    download
+                    class="btn btn-ghost btn-sm gap-2"
+                    aria-label="Download audio clip for {detection.commonName} detection"
+                  >
+                    <Download class="size-5" />
+                    {t('common.actions.download')}
+                  </a>
+                {/if}
+              </div>
+            </div>
           </div>
+          <!-- end mobile grid wrapper -->
         </div>
       </div>
     </div>
@@ -473,7 +584,7 @@
           className="bg-base-200 rounded-lg p-4"
         />
       {:else}
-        <p class="text-base-content/60 italic">{t('detections.weather.noData')}</p>
+        <p class="text-base-content opacity-60 italic">{t('detections.weather.noData')}</p>
       {/if}
     </section>
 
@@ -488,22 +599,22 @@
         aria-label="Detection metadata"
       >
         <div class="flex justify-between">
-          <span class="text-base-content/60">{t('detections.metadata.source')}:</span>
-          <span>{detection.source ?? 'Unknown'}</span>
+          <span class="text-base-content opacity-60">{t('detections.metadata.source')}:</span>
+          <span>{detection.source ?? t('common.values.unknown')}</span>
         </div>
         <div class="flex justify-between">
-          <span class="text-base-content/60">{t('detections.metadata.duration')}:</span>
-          <span>{parseFloat(detection.endTime) - parseFloat(detection.beginTime)}s</span>
+          <span class="text-base-content opacity-60">{t('detections.metadata.duration')}:</span>
+          <span>{calculateDuration(detection.endTime, detection.beginTime)}</span>
         </div>
         {#if detection.verified !== 'unverified'}
           <div class="flex justify-between">
-            <span class="text-base-content/60">{t('detections.metadata.status')}:</span>
+            <span class="text-base-content opacity-60">{t('detections.metadata.status')}:</span>
             <span class="capitalize">{detection.verified}</span>
           </div>
         {/if}
         {#if detection.locked}
           <div class="flex justify-between">
-            <span class="text-base-content/60">{t('detections.metadata.locked')}:</span>
+            <span class="text-base-content opacity-60">{t('detections.metadata.locked')}:</span>
             <span>{t('common.values.yes')}</span>
           </div>
         {/if}
@@ -517,15 +628,16 @@
         <div class="bg-base-200 rounded-lg p-4">
           <div class="flex items-center justify-between mb-2">
             <span class="text-lg font-medium capitalize">{speciesInfo.rarity.status}</span>
-            <span class="text-sm text-base-content/60">
-              Score: {(speciesInfo.rarity.score * 100).toFixed(1)}%
+            <span class="text-sm text-base-content opacity-60">
+              {t('species.rarity.score')}: {(speciesInfo.rarity.score * 100).toFixed(1)}%
             </span>
           </div>
           {#if speciesInfo.rarity.location_based}
-            <p class="text-sm text-base-content/60">
-              Based on location: {speciesInfo.rarity.latitude.toFixed(2)}, {speciesInfo.rarity.longitude.toFixed(
-                2
-              )}
+            <p class="text-sm text-base-content opacity-60">
+              {t('species.rarity.basedOnLocation', {
+                latitude: speciesInfo.rarity.latitude.toFixed(2),
+                longitude: speciesInfo.rarity.longitude.toFixed(2),
+              })}
             </p>
           {/if}
         </div>
@@ -542,60 +654,60 @@
         <section aria-labelledby="taxonomy-skeleton-heading">
           <div class="animate-pulse">
             <!-- Skeleton heading -->
-            <div class="h-6 bg-base-300 rounded w-48 mb-4"></div>
+            <div class="h-6 bg-base-300 rounded-sm w-48 mb-4"></div>
 
             <!-- Skeleton taxonomy hierarchy container -->
             <div class="bg-base-200 rounded-lg p-6">
               <div class="space-y-3">
                 <!-- Kingdom skeleton -->
                 <div class="flex items-center gap-3">
-                  <div class="h-4 bg-base-300 rounded w-16"></div>
-                  <div class="h-4 bg-base-300 rounded w-24"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-16"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-24"></div>
                 </div>
                 <!-- Phylum skeleton -->
                 <div class="flex items-center gap-3 ml-6">
-                  <div class="h-4 bg-base-300 rounded w-14"></div>
-                  <div class="h-4 bg-base-300 rounded w-20"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-14"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-20"></div>
                 </div>
                 <!-- Class skeleton -->
                 <div class="flex items-center gap-3 ml-12">
-                  <div class="h-4 bg-base-300 rounded w-10"></div>
-                  <div class="h-4 bg-base-300 rounded w-16"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-10"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-16"></div>
                 </div>
                 <!-- Order skeleton -->
                 <div class="flex items-center gap-3 ml-18">
-                  <div class="h-4 bg-base-300 rounded w-12"></div>
-                  <div class="h-4 bg-base-300 rounded w-28"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-12"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-28"></div>
                 </div>
                 <!-- Family skeleton -->
                 <div class="flex items-center gap-3 ml-24">
-                  <div class="h-4 bg-base-300 rounded w-14"></div>
-                  <div class="h-4 bg-base-300 rounded w-32"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-14"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-32"></div>
                 </div>
                 <!-- Genus skeleton -->
                 <div class="flex items-center gap-3 ml-30">
-                  <div class="h-4 bg-base-300 rounded w-12"></div>
-                  <div class="h-4 bg-base-300 rounded w-20"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-12"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-20"></div>
                 </div>
                 <!-- Species skeleton -->
                 <div class="flex items-center gap-3 ml-36">
-                  <div class="h-4 bg-base-300 rounded w-16"></div>
-                  <div class="h-4 bg-base-300 rounded w-24"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-16"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-24"></div>
                 </div>
               </div>
             </div>
 
             <!-- Skeleton subspecies section -->
             <div class="mt-6">
-              <div class="h-6 bg-base-300 rounded w-32 mb-4"></div>
+              <div class="h-6 bg-base-300 rounded-sm w-32 mb-4"></div>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div class="bg-base-200 rounded-lg p-3">
-                  <div class="h-4 bg-base-300 rounded w-full mb-2"></div>
-                  <div class="h-3 bg-base-300 rounded w-3/4"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-full mb-2"></div>
+                  <div class="h-3 bg-base-300 rounded-sm w-3/4"></div>
                 </div>
                 <div class="bg-base-200 rounded-lg p-3">
-                  <div class="h-4 bg-base-300 rounded w-full mb-2"></div>
-                  <div class="h-3 bg-base-300 rounded w-2/3"></div>
+                  <div class="h-4 bg-base-300 rounded-sm w-full mb-2"></div>
+                  <div class="h-3 bg-base-300 rounded-sm w-2/3"></div>
                 </div>
               </div>
             </div>
@@ -611,36 +723,52 @@
           <!-- Visual Family Tree -->
           <div class="space-y-3">
             <div class="flex items-center gap-3">
-              <span class="text-sm text-base-content/60 w-24">Kingdom:</span>
+              <span class="text-sm text-base-content opacity-60 w-24"
+                >{t('species.taxonomy.labels.kingdom')}:</span
+              >
               <span class="font-medium">{taxonomyInfo.taxonomy.kingdom}</span>
             </div>
             <div class="flex items-center gap-3 ml-6">
-              <span class="text-sm text-base-content/60 w-24">Phylum:</span>
+              <span class="text-sm text-base-content opacity-60 w-24"
+                >{t('species.taxonomy.labels.phylum')}:</span
+              >
               <span class="font-medium">{taxonomyInfo.taxonomy.phylum}</span>
             </div>
             <div class="flex items-center gap-3 ml-12">
-              <span class="text-sm text-base-content/60 w-24">Class:</span>
+              <span class="text-sm text-base-content opacity-60 w-24"
+                >{t('species.taxonomy.labels.class')}:</span
+              >
               <span class="font-medium">{taxonomyInfo.taxonomy.class}</span>
             </div>
             <div class="flex items-center gap-3 ml-18">
-              <span class="text-sm text-base-content/60 w-24">Order:</span>
+              <span class="text-sm text-base-content opacity-60 w-24"
+                >{t('species.taxonomy.labels.order')}:</span
+              >
               <span class="font-medium">{taxonomyInfo.taxonomy.order}</span>
             </div>
             <div class="flex items-center gap-3 ml-24">
-              <span class="text-sm text-base-content/60 w-24">Family:</span>
+              <span class="text-sm text-base-content opacity-60 w-24"
+                >{t('species.taxonomy.labels.family')}:</span
+              >
               <span class="font-medium">
                 {taxonomyInfo.taxonomy.family}
                 {#if taxonomyInfo.taxonomy.family_common}
-                  <span class="text-base-content/60"> ({taxonomyInfo.taxonomy.family_common})</span>
+                  <span class="text-base-content opacity-60">
+                    ({taxonomyInfo.taxonomy.family_common})</span
+                  >
                 {/if}
               </span>
             </div>
             <div class="flex items-center gap-3 ml-30">
-              <span class="text-sm text-base-content/60 w-24">Genus:</span>
+              <span class="text-sm text-base-content opacity-60 w-24"
+                >{t('species.taxonomy.labels.genus')}:</span
+              >
               <span class="font-medium">{taxonomyInfo.taxonomy.genus}</span>
             </div>
             <div class="flex items-center gap-3 ml-36">
-              <span class="text-sm text-base-content/60 w-24">Species:</span>
+              <span class="text-sm text-base-content opacity-60 w-24"
+                >{t('species.taxonomy.labels.species')}:</span
+              >
               <span class="font-medium italic">{taxonomyInfo.taxonomy.species}</span>
             </div>
           </div>
@@ -663,7 +791,7 @@
                   {subspecies.scientific_name}
                 </p>
                 {#if subspecies.common_name}
-                  <p class="text-sm text-base-content/60" aria-label="Common name">
+                  <p class="text-sm text-base-content opacity-60" aria-label="Common name">
                     {subspecies.common_name}
                   </p>
                 {/if}
@@ -673,7 +801,7 @@
         </section>
       {/if}
     {:else}
-      <p class="text-base-content/60 italic">{t('species.taxonomy.noData')}</p>
+      <p class="text-base-content opacity-60 italic">{t('species.taxonomy.noData')}</p>
     {/if}
   </div>
 {/snippet}
@@ -681,7 +809,9 @@
 {#snippet historyTab()}
   <section aria-labelledby="history-heading">
     <h3 id="history-heading" class="text-lg font-semibold mb-4">{t('detections.history.title')}</h3>
-    <p class="text-base-content/60 italic" role="status">{t('detections.history.comingSoon')}</p>
+    <p class="text-base-content opacity-60 italic" role="status">
+      {t('detections.history.comingSoon')}
+    </p>
   </section>
 {/snippet}
 
@@ -690,17 +820,19 @@
     <h3 id="notes-heading" class="text-lg font-semibold mb-4">{t('detections.notes.title')}</h3>
     {#if detection.comments && detection.comments.length > 0}
       <div class="space-y-3" role="list" aria-label="Detection comments">
-        {#each detection.comments as comment}
+        {#each detection.comments as comment (comment.id ?? comment.createdAt)}
           <article class="bg-base-200 rounded-lg p-4" role="listitem">
             <p aria-label="Comment text">{comment.entry}</p>
-            <p class="text-sm text-base-content/60 mt-2" aria-label="Comment timestamp">
+            <p class="text-sm text-base-content opacity-60 mt-2" aria-label="Comment timestamp">
               {formatLocalDateTime(new Date(comment.createdAt))}
             </p>
           </article>
         {/each}
       </div>
     {:else}
-      <p class="text-base-content/60 italic" role="status">{t('detections.notes.noComments')}</p>
+      <p class="text-base-content opacity-60 italic" role="status">
+        {t('detections.notes.noComments')}
+      </p>
     {/if}
   </section>
 {/snippet}
@@ -710,16 +842,16 @@
   <!-- Loading state with live region -->
   <div role="status" aria-live="polite" class="sr-only">
     {#if isLoadingDetection}
-      Loading detection details...
+      {t('detections.aria.loading')}
     {:else if detection}
-      Detection details loaded for {detection.commonName}
+      {t('detections.aria.loaded', { species: detection.commonName })}
     {:else if detectionError}
-      Error loading detection: {detectionError}
+      {t('detections.aria.error', { error: detectionError })}
     {/if}
   </div>
 
   {#if isLoadingDetection}
-    <div class="card bg-base-100 shadow-sm">
+    <div class="card bg-base-100 shadow-xs">
       <div class="card-body">
         <div class="flex justify-center items-center h-64" aria-label="Loading detection details">
           <LoadingSpinner size="lg" />
@@ -727,7 +859,7 @@
       </div>
     </div>
   {:else if detectionError}
-    <div class="card bg-base-100 shadow-sm">
+    <div class="card bg-base-100 shadow-xs">
       <div class="card-body">
         <div role="alert" aria-live="assertive">
           <ErrorAlert message={detectionError} />
@@ -739,7 +871,7 @@
     {@render heroSection(detection)}
 
     <!-- Media Section -->
-    <section class="card bg-base-100 shadow-sm" aria-labelledby="media-heading">
+    <section class="card bg-base-100 shadow-xs" aria-labelledby="media-heading">
       <div class="card-body">
         <h2 id="media-heading" class="text-xl font-semibold mb-4">{t('detections.media.title')}</h2>
         <div role="region" aria-label="Audio recording and spectrogram for {detection.commonName}">
@@ -759,11 +891,15 @@
     </section>
 
     <!-- Tabbed Content -->
-    <section class="card bg-base-100 shadow-sm" aria-labelledby="tabs-heading">
+    <section class="card bg-base-100 shadow-xs" aria-labelledby="tabs-heading">
       <div class="card-body">
         <h2 id="tabs-heading" class="sr-only">Detection information tabs</h2>
         <!-- Tab Navigation -->
-        <div class="tabs tabs-boxed mb-6" role="tablist" aria-label="Detection details tabs">
+        <div
+          class="tabs tabs-boxed mb-6 overflow-x-auto flex-nowrap"
+          role="tablist"
+          aria-label="Detection details tabs"
+        >
           <button
             id="tab-overview"
             role="tab"
@@ -773,30 +909,7 @@
             aria-controls="tab-panel-overview"
             tabindex={activeTab === 'overview' ? 0 : -1}
             onclick={() => (activeTab = 'overview')}
-            onkeydown={e => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                activeTab = 'overview';
-              } else if (e.key === 'ArrowRight') {
-                e.preventDefault();
-                // Move to next tab
-                const tabs = ['overview', 'taxonomy', 'history', 'notes'];
-                if (canReview) tabs.push('review');
-                const currentIndex = tabs.indexOf(activeTab);
-                const nextIndex = (currentIndex + 1) % tabs.length;
-                // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                activeTab = tabs[nextIndex] as typeof activeTab;
-              } else if (e.key === 'ArrowLeft') {
-                e.preventDefault();
-                // Move to previous tab
-                const tabs = ['overview', 'taxonomy', 'history', 'notes'];
-                if (canReview) tabs.push('review');
-                const currentIndex = tabs.indexOf(activeTab);
-                const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-                // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                activeTab = tabs[prevIndex] as typeof activeTab;
-              }
-            }}
+            onkeydown={handleTabKeydown}
           >
             {t('detections.tabs.overview')}
           </button>
@@ -809,28 +922,7 @@
             aria-controls="tab-panel-taxonomy"
             tabindex={activeTab === 'taxonomy' ? 0 : -1}
             onclick={() => (activeTab = 'taxonomy')}
-            onkeydown={e => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                activeTab = 'taxonomy';
-              } else if (e.key === 'ArrowRight') {
-                e.preventDefault();
-                const tabs = ['overview', 'taxonomy', 'history', 'notes'];
-                if (canReview) tabs.push('review');
-                const currentIndex = tabs.indexOf(activeTab);
-                const nextIndex = (currentIndex + 1) % tabs.length;
-                // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                activeTab = tabs[nextIndex] as typeof activeTab;
-              } else if (e.key === 'ArrowLeft') {
-                e.preventDefault();
-                const tabs = ['overview', 'taxonomy', 'history', 'notes'];
-                if (canReview) tabs.push('review');
-                const currentIndex = tabs.indexOf(activeTab);
-                const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-                // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                activeTab = tabs[prevIndex] as typeof activeTab;
-              }
-            }}
+            onkeydown={handleTabKeydown}
           >
             {t('detections.tabs.taxonomy')}
           </button>
@@ -843,28 +935,7 @@
             aria-controls="tab-panel-history"
             tabindex={activeTab === 'history' ? 0 : -1}
             onclick={() => (activeTab = 'history')}
-            onkeydown={e => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                activeTab = 'history';
-              } else if (e.key === 'ArrowRight') {
-                e.preventDefault();
-                const tabs = ['overview', 'taxonomy', 'history', 'notes'];
-                if (canReview) tabs.push('review');
-                const currentIndex = tabs.indexOf(activeTab);
-                const nextIndex = (currentIndex + 1) % tabs.length;
-                // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                activeTab = tabs[nextIndex] as typeof activeTab;
-              } else if (e.key === 'ArrowLeft') {
-                e.preventDefault();
-                const tabs = ['overview', 'taxonomy', 'history', 'notes'];
-                if (canReview) tabs.push('review');
-                const currentIndex = tabs.indexOf(activeTab);
-                const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-                // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                activeTab = tabs[prevIndex] as typeof activeTab;
-              }
-            }}
+            onkeydown={handleTabKeydown}
           >
             {t('detections.tabs.history')}
           </button>
@@ -877,28 +948,7 @@
             aria-controls="tab-panel-notes"
             tabindex={activeTab === 'notes' ? 0 : -1}
             onclick={() => (activeTab = 'notes')}
-            onkeydown={e => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                activeTab = 'notes';
-              } else if (e.key === 'ArrowRight') {
-                e.preventDefault();
-                const tabs = ['overview', 'taxonomy', 'history', 'notes'];
-                if (canReview) tabs.push('review');
-                const currentIndex = tabs.indexOf(activeTab);
-                const nextIndex = (currentIndex + 1) % tabs.length;
-                // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                activeTab = tabs[nextIndex] as typeof activeTab;
-              } else if (e.key === 'ArrowLeft') {
-                e.preventDefault();
-                const tabs = ['overview', 'taxonomy', 'history', 'notes'];
-                if (canReview) tabs.push('review');
-                const currentIndex = tabs.indexOf(activeTab);
-                const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-                // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                activeTab = tabs[prevIndex] as typeof activeTab;
-              }
-            }}
+            onkeydown={handleTabKeydown}
           >
             {t('detections.tabs.notes')}
           </button>
@@ -912,26 +962,7 @@
               aria-controls="tab-panel-review"
               tabindex={activeTab === 'review' ? 0 : -1}
               onclick={() => (activeTab = 'review')}
-              onkeydown={e => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  activeTab = 'review';
-                } else if (e.key === 'ArrowRight') {
-                  e.preventDefault();
-                  const tabs = ['overview', 'taxonomy', 'history', 'notes', 'review'];
-                  const currentIndex = tabs.indexOf(activeTab);
-                  const nextIndex = (currentIndex + 1) % tabs.length;
-                  // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                  activeTab = tabs[nextIndex] as typeof activeTab;
-                } else if (e.key === 'ArrowLeft') {
-                  e.preventDefault();
-                  const tabs = ['overview', 'taxonomy', 'history', 'notes', 'review'];
-                  const currentIndex = tabs.indexOf(activeTab);
-                  const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-                  // eslint-disable-next-line security/detect-object-injection -- Safe: hardcoded array with calculated index
-                  activeTab = tabs[prevIndex] as typeof activeTab;
-                }
-              }}
+              onkeydown={handleTabKeydown}
             >
               {t('common.actions.review')}
             </button>

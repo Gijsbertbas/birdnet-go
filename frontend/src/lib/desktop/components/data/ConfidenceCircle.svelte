@@ -15,7 +15,7 @@
   - className?: string - Additional CSS classes
 -->
 <script lang="ts">
-  import { alertIcons } from '$lib/utils/icons';
+  import { Check } from '@lucide/svelte';
   import { safeGet } from '$lib/utils/security';
 
   interface Props {
@@ -42,8 +42,8 @@
   }
 
   // Handle both decimal (0-1) and percentage (0-100) formats with validation
-  const confidencePercent = $derived(() => normalizeConfidence(confidence));
-  const isMaxConfidence = $derived(confidencePercent() === 100);
+  const confidencePercent = $derived.by(() => normalizeConfidence(confidence));
+  const isMaxConfidence = $derived(confidencePercent === 100);
 
   function getConfidenceClass(confidence: number): string {
     const clampedPercent = normalizeConfidence(confidence);
@@ -66,7 +66,7 @@
 
 <div
   class="confidence-circle {getConfidenceClass(confidence)} {className}"
-  style:--progress="{confidencePercent()}%"
+  style:--progress="{confidencePercent}%"
   style:width="{config.size}px"
   style:height="{config.size}px"
   style:min-width="{config.size}px"
@@ -83,18 +83,9 @@
   <div class="confidence-circle-progress"></div>
   <div class="confidence-circle-text" style:font-size={config.fontSize}>
     {#if isMaxConfidence}
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        style:width="{config.iconSize}px"
-        style:height="{config.iconSize}px"
-      >
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d={alertIcons.check}
-        ></path>
-      </svg>
+      <Check size={config.iconSize} strokeWidth={3} />
     {:else}
-      {confidencePercent()}%
+      {confidencePercent}%
     {/if}
   </div>
 </div>
@@ -147,10 +138,6 @@
     justify-content: center;
     width: 100%;
     height: 100%;
-  }
-
-  .confidence-circle-text svg {
-    stroke-width: 3;
   }
 
   /* Confidence level color schemes */

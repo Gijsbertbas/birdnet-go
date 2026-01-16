@@ -53,6 +53,12 @@ const (
 
 	// maxErrorBodySize limits error response body reading to prevent memory issues
 	maxErrorBodySize = 1024
+
+	// Webhook authentication type constants
+	authTypeNone   = "none"
+	authTypeBearer = "bearer"
+	authTypeBasic  = "basic"
+	authTypeCustom = "custom"
 )
 
 // WebhookProvider sends notifications to HTTP/HTTPS webhooks with customizable templates,
@@ -97,20 +103,20 @@ func resolveWebhookAuth(cfg *conf.WebhookAuthConfig) (*WebhookAuth, error) {
 	}
 
 	// Empty or "none" type needs no resolution
-	if auth.Type == "" || auth.Type == "none" {
+	if auth.Type == "" || auth.Type == authTypeNone {
 		return auth, nil
 	}
 
 	var err error
 
 	switch auth.Type {
-	case "bearer":
+	case authTypeBearer:
 		auth.Token, err = secrets.MustResolve("bearer token", cfg.TokenFile, cfg.Token)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve bearer token: %w", err)
 		}
 
-	case "basic":
+	case authTypeBasic:
 		auth.User, err = secrets.MustResolve("basic auth user", cfg.UserFile, cfg.User)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve basic auth user: %w", err)
@@ -120,7 +126,7 @@ func resolveWebhookAuth(cfg *conf.WebhookAuthConfig) (*WebhookAuth, error) {
 			return nil, fmt.Errorf("failed to resolve basic auth pass: %w", err)
 		}
 
-	case "custom":
+	case authTypeCustom:
 		auth.Header = cfg.Header // Header name is not a secret
 		auth.Value, err = secrets.MustResolve("custom header value", cfg.ValueFile, cfg.Value)
 		if err != nil {
@@ -140,13 +146,13 @@ func resolveWebhookAuth(cfg *conf.WebhookAuthConfig) (*WebhookAuth, error) {
 // LLM Note: `omitzero` is more precise than `omitempty` as it only omits
 // true zero values (0, false, nil, "") instead of all "empty-ish" values.
 type WebhookPayload struct {
-	ID        string                 `json:"id"`
-	Type      string                 `json:"type"`
-	Priority  string                 `json:"priority,omitzero"`
-	Title     string                 `json:"title"`
-	Message   string                 `json:"message"`
-	Component string                 `json:"component,omitzero"`
-	Timestamp string                 `json:"timestamp"`
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Priority  string         `json:"priority,omitzero"`
+	Title     string         `json:"title"`
+	Message   string         `json:"message"`
+	Component string         `json:"component,omitzero"`
+	Timestamp string         `json:"timestamp"`
 	Metadata  map[string]any `json:"metadata,omitzero"`
 }
 
@@ -203,7 +209,7 @@ func NewWebhookProvider(name string, enabled bool, endpoints []WebhookEndpoint, 
 			Timestamp: time.Now(),
 			Metadata: map[string]any{
 				"test_key":   "test_value",
-				"confidence": 0.95,
+				"confidence": TestConfidenceValue,
 				"species":    "Test Species",
 			},
 		}
@@ -263,46 +269,66 @@ func (w *WebhookProvider) ValidateConfig() error {
 		return fmt.Errorf("at least one webhook endpoint is required")
 	}
 
-	// Validate each endpoint (use index to avoid copying)
 	for i := range w.endpoints {
-		endpoint := &w.endpoints[i] // Use pointer to avoid copying
-		if endpoint.URL == "" {
-			return fmt.Errorf("endpoint %d: URL is required", i)
-		}
-
-		// Validate and normalize HTTP method
-		method := strings.ToUpper(strings.TrimSpace(endpoint.Method))
-		if method == "" {
-			method = http.MethodPost // Default to POST
-		}
-		endpoint.Method = method
-		if method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch {
-			return fmt.Errorf("endpoint %d: method must be POST, PUT, or PATCH, got %s", i, method)
-		}
-
-		// Validate URL and scheme using url.Parse
-		u, err := url.Parse(endpoint.URL)
-		if err != nil {
-			return fmt.Errorf("endpoint %d: invalid URL: %w", i, err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("endpoint %d: URL scheme must be http or https, got %s", i, u.Scheme)
-		}
-		if u.Host == "" {
-			return fmt.Errorf("endpoint %d: URL host is required", i)
-		}
-
-		// Validate timeout
-		if endpoint.Timeout < 0 {
-			return fmt.Errorf("endpoint %d: timeout must be >= 0", i)
-		}
-
-		// Validate auth configuration (secrets are already resolved at this point)
-		if err := validateResolvedWebhookAuth(&endpoint.Auth); err != nil {
-			return fmt.Errorf("endpoint %d: %w", i, err)
+		if err := w.validateEndpoint(i, &w.endpoints[i]); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// validateEndpoint validates a single webhook endpoint configuration.
+func (w *WebhookProvider) validateEndpoint(index int, endpoint *WebhookEndpoint) error {
+	if endpoint.URL == "" {
+		return fmt.Errorf("endpoint %d: URL is required", index)
+	}
+
+	if err := w.validateAndNormalizeMethod(index, endpoint); err != nil {
+		return err
+	}
+
+	if err := validateEndpointURL(index, endpoint.URL); err != nil {
+		return err
+	}
+
+	if endpoint.Timeout < 0 {
+		return fmt.Errorf("endpoint %d: timeout must be >= 0", index)
+	}
+
+	if err := validateResolvedWebhookAuth(&endpoint.Auth); err != nil {
+		return fmt.Errorf("endpoint %d: %w", index, err)
+	}
+
+	return nil
+}
+
+// validateAndNormalizeMethod validates and normalizes the HTTP method.
+func (w *WebhookProvider) validateAndNormalizeMethod(index int, endpoint *WebhookEndpoint) error {
+	method := strings.ToUpper(strings.TrimSpace(endpoint.Method))
+	if method == "" {
+		method = http.MethodPost
+	}
+	endpoint.Method = method
+
+	if method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch {
+		return fmt.Errorf("endpoint %d: method must be POST, PUT, or PATCH, got %s", index, method)
+	}
+	return nil
+}
+
+// validateEndpointURL validates the URL format and scheme.
+func validateEndpointURL(index int, urlStr string) error {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return fmt.Errorf("endpoint %d: invalid URL: %w", index, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("endpoint %d: URL scheme must be http or https, got %s", index, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("endpoint %d: URL host is required", index)
+	}
 	return nil
 }
 
@@ -311,22 +337,22 @@ func (w *WebhookProvider) ValidateConfig() error {
 func validateResolvedWebhookAuth(auth *WebhookAuth) error {
 	authType := strings.ToLower(auth.Type)
 	if authType == "" {
-		authType = "none"
+		authType = authTypeNone
 		auth.Type = authType
 	}
 
 	switch authType {
-	case "none":
+	case authTypeNone:
 		return nil
-	case "bearer":
+	case authTypeBearer:
 		if auth.Token == "" {
 			return fmt.Errorf("bearer auth requires token (secret resolution may have failed)")
 		}
-	case "basic":
+	case authTypeBasic:
 		if auth.User == "" || auth.Pass == "" {
 			return fmt.Errorf("basic auth requires user and pass (secret resolution may have failed)")
 		}
-	case "custom":
+	case authTypeCustom:
 		if auth.Header == "" {
 			return fmt.Errorf("custom auth requires header name")
 		}
@@ -529,13 +555,13 @@ func applyWebhookAuth(req *http.Request, auth *WebhookAuth) error {
 	authType := strings.ToLower(auth.Type)
 
 	switch authType {
-	case "none", "":
+	case authTypeNone, "":
 		return nil
-	case "bearer":
+	case authTypeBearer:
 		req.Header.Set("Authorization", "Bearer "+auth.Token)
-	case "basic":
+	case authTypeBasic:
 		req.SetBasicAuth(auth.User, auth.Pass)
-	case "custom":
+	case authTypeCustom:
 		req.Header.Set(auth.Header, auth.Value)
 	default:
 		return fmt.Errorf("unsupported auth type: %s", authType)

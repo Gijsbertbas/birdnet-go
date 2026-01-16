@@ -3,7 +3,6 @@ package myaudio
 
 import (
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -13,8 +12,21 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tphakala/birdnet-go/internal/errors"
-	"github.com/tphakala/birdnet-go/internal/logging"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/privacy"
+)
+
+// OS name constants for runtime.GOOS comparisons.
+const (
+	osLinux   = "linux"
+	osDarwin  = "darwin"
+	osWindows = "windows"
+)
+
+// Audio device constants.
+const (
+	deviceDefault            = "default"
+	deviceDefaultDisplayName = "Default Audio Device"
 )
 
 // SourceStats provides structured statistics about registered sources
@@ -22,6 +34,10 @@ type SourceStats struct {
 	Total  int `json:"total_sources"`
 	Active int `json:"active_sources"`
 	RTSP   int `json:"rtsp_sources"`
+	HTTP   int `json:"http_sources"`
+	HLS    int `json:"hls_sources"`
+	RTMP   int `json:"rtmp_sources"`
+	UDP    int `json:"udp_sources"`
 	Device int `json:"device_sources"`
 	File   int `json:"file_sources"`
 }
@@ -39,7 +55,7 @@ type AudioSourceRegistry struct {
 	mu sync.RWMutex
 
 	// Logger
-	logger *slog.Logger
+	logger logger.Logger
 }
 
 var (
@@ -56,16 +72,12 @@ var (
 // GetRegistry returns the singleton registry instance
 func GetRegistry() *AudioSourceRegistry {
 	registryOnce.Do(func() {
-		logger := logging.ForService("myaudio")
-		if logger == nil {
-			// Fallback for tests or when logging is not initialized
-			logger = slog.Default()
-		}
+		log := GetLogger()
 		registry = &AudioSourceRegistry{
 			sources:       make(map[string]*AudioSource),
 			connectionMap: make(map[string]string),
 			refCounts:     make(map[string]*int32),
-			logger:        logger.With("component", "registry"),
+			logger:        log.With(logger.String("component", "registry")),
 		}
 	})
 	return registry
@@ -127,10 +139,10 @@ func (r *AudioSourceRegistry) RegisterSource(connectionString string, config Sou
 	r.sources[source.ID] = source
 	r.connectionMap[connectionString] = source.ID
 
-	r.logger.With("id", source.ID).
-		With("display_name", source.DisplayName).
-		With("safe", source.SafeString).
-		Info("Registered audio source")
+	r.logger.Info("Registered audio source",
+		logger.String("id", source.ID),
+		logger.String("display_name", source.DisplayName),
+		logger.String("safe", source.SafeString))
 
 	return source, nil
 }
@@ -172,7 +184,7 @@ func (r *AudioSourceRegistry) GetOrCreateSource(connectionString string, sourceT
 		Type: actualType,
 	})
 	if err != nil {
-		r.logger.With("error", err).Error("Failed to register source")
+		r.logger.Error("Failed to register source", logger.Error(err))
 		return nil
 	}
 	return source
@@ -180,11 +192,35 @@ func (r *AudioSourceRegistry) GetOrCreateSource(connectionString string, sourceT
 
 // detectSourceTypeFromString determines source type from connection string
 func detectSourceTypeFromString(connectionString string) SourceType {
-	// RTSP URLs (including test URLs for testing)
+	// RTSP/RTSPS streams (including test URLs for testing)
 	if strings.HasPrefix(connectionString, "rtsp://") ||
 		strings.HasPrefix(connectionString, "rtsps://") ||
 		strings.HasPrefix(connectionString, "test://") {
 		return SourceTypeRTSP
+	}
+
+	// RTMP/RTMPS streams
+	if strings.HasPrefix(connectionString, "rtmp://") ||
+		strings.HasPrefix(connectionString, "rtmps://") {
+		return SourceTypeRTMP
+	}
+
+	// HLS streams (m3u8 playlists)
+	if strings.HasSuffix(connectionString, ".m3u8") ||
+		strings.Contains(connectionString, ".m3u8?") {
+		return SourceTypeHLS
+	}
+
+	// HTTP/HTTPS audio streams (check after HLS to prioritize .m3u8 detection)
+	if strings.HasPrefix(connectionString, "http://") ||
+		strings.HasPrefix(connectionString, "https://") {
+		return SourceTypeHTTP
+	}
+
+	// UDP/RTP streams
+	if strings.HasPrefix(connectionString, "udp://") ||
+		strings.HasPrefix(connectionString, "rtp://") {
+		return SourceTypeUDP
 	}
 
 	// Audio device patterns
@@ -194,7 +230,7 @@ func detectSourceTypeFromString(connectionString string) SourceType {
 		strings.Contains(connectionString, "pulse") ||
 		strings.Contains(connectionString, "dsnoop") ||
 		strings.Contains(connectionString, "sysdefault") ||
-		connectionString == "default" {
+		connectionString == deviceDefault {
 		return SourceTypeAudioCard
 	}
 
@@ -207,8 +243,8 @@ func detectSourceTypeFromString(connectionString string) SourceType {
 		return SourceTypeFile
 	}
 
-	// Default to audio card for unknown patterns
-	return SourceTypeAudioCard
+	// Default to unknown for unrecognized patterns
+	return SourceTypeUnknown
 }
 
 // ListSources returns all registered sources (without connection strings) in deterministic order
@@ -285,9 +321,9 @@ func (r *AudioSourceRegistry) ReleaseSourceReference(sourceID string) error {
 	if !refCountExists {
 		// No refCount entry means this source was never acquired, treat as 0 and remove
 		newCount = -1 // This will trigger removal below
-		r.logger.With("id", sourceID).
-			With("safe", source.SafeString).
-			Warn("Attempted to release reference for source without refCount entry")
+		r.logger.Warn("Attempted to release reference for source without refCount entry",
+			logger.String("id", sourceID),
+			logger.String("safe", source.SafeString))
 	} else {
 		// Decrement reference count (no need for atomic since we hold the mutex)
 		*refCountPtr--
@@ -300,9 +336,9 @@ func (r *AudioSourceRegistry) ReleaseSourceReference(sourceID string) error {
 		delete(r.connectionMap, source.connectionString)
 		delete(r.refCounts, sourceID)
 
-		r.logger.With("id", sourceID).
-			With("safe", source.SafeString).
-			Info("Removed unreferenced audio source")
+		r.logger.Info("Removed unreferenced audio source",
+			logger.String("id", sourceID),
+			logger.String("safe", source.SafeString))
 	}
 
 	return nil
@@ -324,9 +360,9 @@ func (r *AudioSourceRegistry) RemoveSource(sourceID string) error {
 	delete(r.connectionMap, source.connectionString)
 	delete(r.refCounts, sourceID)
 
-	r.logger.With("id", sourceID).
-		With("safe", source.SafeString).
-		Info("Removed audio source")
+	r.logger.Info("Removed audio source",
+		logger.String("id", sourceID),
+		logger.String("safe", source.SafeString))
 
 	return nil
 }
@@ -390,9 +426,9 @@ func (r *AudioSourceRegistry) RemoveSourceIfUnused(sourceID string, checkers ...
 	delete(r.connectionMap, source.connectionString)
 	delete(r.refCounts, sourceID)
 
-	r.logger.With("id", sourceID).
-		With("safe", source.SafeString).
-		Info("Removed unused audio source")
+	r.logger.Info("Removed unused audio source",
+		logger.String("id", sourceID),
+		logger.String("safe", source.SafeString))
 
 	return RemoveSourceSuccess, nil
 }
@@ -423,9 +459,9 @@ func (r *AudioSourceRegistry) RemoveSourceByConnection(connectionString string) 
 	delete(r.connectionMap, connectionString)
 	delete(r.refCounts, sourceID)
 
-	r.logger.With("id", sourceID).
-		With("safe", source.SafeString).
-		Info("Removed audio source by connection")
+	r.logger.Info("Removed audio source by connection",
+		logger.String("id", sourceID),
+		logger.String("safe", source.SafeString))
 
 	return nil
 }
@@ -446,15 +482,15 @@ func (r *AudioSourceRegistry) CleanupInactiveSources(inactiveDuration time.Durat
 		delete(r.connectionMap, source.connectionString)
 		delete(r.refCounts, id)
 		removedCount++
-		r.logger.With("id", id).
-			With("safe", source.SafeString).
-			With("last_seen", source.LastSeen).
-			Info("Cleaned up inactive source")
+		r.logger.Info("Cleaned up inactive source",
+			logger.String("id", id),
+			logger.String("safe", source.SafeString),
+			logger.Time("last_seen", source.LastSeen))
 	}
 
 	if removedCount > 0 {
-		r.logger.With("count", removedCount).
-			Info("Cleaned up inactive audio sources")
+		r.logger.Info("Cleaned up inactive audio sources",
+			logger.Int("count", removedCount))
 	}
 
 	return removedCount
@@ -479,8 +515,11 @@ func (r *AudioSourceRegistry) validateConnectionString(connectionString string, 
 	}
 
 	// Check for shell injection attempts - customize patterns based on source type
-	if sourceType == SourceTypeRTSP {
-		// For RTSP URLs, allow query parameters with ampersands (e.g., ?channel=1&subtype=0)
+	// Stream types (RTSP, HTTP, HLS, RTMP, UDP) allow query parameters with ampersands
+	isStreamType := sourceType == SourceTypeRTSP || sourceType == SourceTypeHTTP ||
+		sourceType == SourceTypeHLS || sourceType == SourceTypeRTMP || sourceType == SourceTypeUDP
+	if isStreamType {
+		// For stream URLs, allow query parameters with ampersands (e.g., ?channel=1&subtype=0)
 		// but still block dangerous shell injection patterns
 		if strings.ContainsAny(connectionString, ";\n\r`|") ||
 			strings.Contains(connectionString, "$(") ||
@@ -517,14 +556,20 @@ func (r *AudioSourceRegistry) validateConnectionString(connectionString string, 
 	switch sourceType {
 	case SourceTypeRTSP:
 		return r.validateRTSPURL(connectionString)
+	case SourceTypeHTTP, SourceTypeHLS:
+		return r.validateHTTPURL(connectionString)
+	case SourceTypeRTMP:
+		return r.validateRTMPURL(connectionString)
+	case SourceTypeUDP:
+		return r.validateUDPURL(connectionString)
 	case SourceTypeFile:
 		return r.validateFilePath(connectionString)
 	case SourceTypeAudioCard:
 		return r.validateAudioDevice(connectionString)
 	default:
 		// Unknown types are allowed but logged
-		// Unknown types are allowed but logged
-		r.logger.Warn("Unknown source type for validation", "type", sourceType)
+		r.logger.Warn("Unknown source type for validation",
+			logger.String("type", string(sourceType)))
 		return nil
 	}
 }
@@ -576,6 +621,63 @@ func (r *AudioSourceRegistry) validateRTSPURL(rtspURL string) error {
 	// when FFmpeg attempts to connect.
 
 	return nil
+}
+
+// validateStreamURL is a generic validator for stream URLs with scheme validation.
+// It checks for empty URLs, valid schemes, and content after the scheme.
+func (r *AudioSourceRegistry) validateStreamURL(streamURL, urlType, operation string, validSchemes []string) error {
+	if streamURL == "" {
+		return errors.Newf("%s URL cannot be empty", urlType).
+			Component("myaudio").
+			Category(errors.CategoryValidation).
+			Context("operation", operation).
+			Context("reason", "empty_url").
+			Build()
+	}
+
+	lowerURL := strings.ToLower(streamURL)
+	schemeValid := false
+	for _, scheme := range validSchemes {
+		if strings.HasPrefix(lowerURL, scheme) {
+			schemeValid = true
+			break
+		}
+	}
+	if !schemeValid {
+		return errors.Newf("invalid scheme, expected one of: %v", validSchemes).
+			Component("myaudio").
+			Category(errors.CategoryValidation).
+			Context("operation", operation).
+			Context("reason", "invalid_scheme").
+			Build()
+	}
+
+	schemeEnd := strings.Index(lowerURL, "://") + 3
+	if len(streamURL) <= schemeEnd {
+		return errors.Newf("%s URL must have content after scheme", urlType).
+			Component("myaudio").
+			Category(errors.CategoryValidation).
+			Context("operation", operation).
+			Context("reason", "missing_content_after_scheme").
+			Build()
+	}
+
+	return nil
+}
+
+// validateHTTPURL validates HTTP/HTTPS URLs for audio streams
+func (r *AudioSourceRegistry) validateHTTPURL(httpURL string) error {
+	return r.validateStreamURL(httpURL, "HTTP", "validate_http_url", []string{"http://", "https://"})
+}
+
+// validateRTMPURL validates RTMP/RTMPS URLs for audio streams
+func (r *AudioSourceRegistry) validateRTMPURL(rtmpURL string) error {
+	return r.validateStreamURL(rtmpURL, "RTMP", "validate_rtmp_url", []string{"rtmp://", "rtmps://"})
+}
+
+// validateUDPURL validates UDP/RTP URLs for audio streams
+func (r *AudioSourceRegistry) validateUDPURL(udpURL string) error {
+	return r.validateStreamURL(udpURL, "UDP", "validate_udp_url", []string{"udp://", "rtp://"})
 }
 
 // validateFilePath validates file paths for security
@@ -673,6 +775,14 @@ func (r *AudioSourceRegistry) GetSourceStats() SourceStats {
 		switch source.Type {
 		case SourceTypeRTSP:
 			stats.RTSP++
+		case SourceTypeHTTP:
+			stats.HTTP++
+		case SourceTypeHLS:
+			stats.HLS++
+		case SourceTypeRTMP:
+			stats.RTMP++
+		case SourceTypeUDP:
+			stats.UDP++
 		case SourceTypeAudioCard:
 			stats.Device++
 		case SourceTypeFile:
@@ -690,8 +800,9 @@ func (r *AudioSourceRegistry) GetSourceStats() SourceStats {
 
 func (r *AudioSourceRegistry) sanitizeConnectionString(conn string, sourceType SourceType) string {
 	switch sourceType {
-	case SourceTypeRTSP:
-		return privacy.SanitizeRTSPUrl(conn)
+	case SourceTypeRTSP, SourceTypeHTTP, SourceTypeHLS, SourceTypeRTMP, SourceTypeUDP:
+		// All stream types may contain credentials and should be sanitized
+		return privacy.SanitizeStreamUrl(conn)
 	case SourceTypeAudioCard, SourceTypeFile:
 		// These are generally safe to log as-is
 		return conn
@@ -709,8 +820,8 @@ func (r *AudioSourceRegistry) generateID(sourceType SourceType) string {
 		// Fallback to timestamp-based ID if UUID generation fails
 		// This is extremely rare but provides a safety net
 		r.logger.Error("Failed to generate UUID, using timestamp fallback",
-			"error", err,
-			"source_type", sourceType)
+			logger.Error(err),
+			logger.String("source_type", string(sourceType)))
 		// Use nanosecond timestamp for uniqueness
 		id := fmt.Sprintf("%d", time.Now().UnixNano())[:8]
 		return fmt.Sprintf("%s_%s", sourceType, id)
@@ -742,11 +853,11 @@ func (r *AudioSourceRegistry) generateDisplayName(source *AudioSource) string {
 // parseAudioDeviceName converts device strings to user-friendly names based on OS
 func (r *AudioSourceRegistry) parseAudioDeviceName(deviceString string) string {
 	switch runtime.GOOS {
-	case "linux":
+	case osLinux:
 		return r.parseLinuxDeviceName(deviceString)
-	case "darwin":
+	case osDarwin:
 		return r.parseDarwinDeviceName(deviceString)
-	case "windows":
+	case osWindows:
 		return r.parseWindowsDeviceName(deviceString)
 	default:
 		// Fallback for unknown OS
@@ -758,8 +869,8 @@ func (r *AudioSourceRegistry) parseAudioDeviceName(deviceString string) string {
 func (r *AudioSourceRegistry) parseLinuxDeviceName(deviceString string) string {
 	// Handle common simple cases first
 	switch deviceString {
-	case "default":
-		return "Default Audio Device"
+	case deviceDefault:
+		return deviceDefaultDisplayName
 	case "malgo":
 		// Legacy malgo usage - use generic name
 		return "Audio Device"
@@ -783,8 +894,8 @@ func (r *AudioSourceRegistry) parseLinuxDeviceName(deviceString string) string {
 func (r *AudioSourceRegistry) parseDarwinDeviceName(deviceString string) string {
 	// Common macOS audio device patterns
 	switch deviceString {
-	case "default":
-		return "Default Audio Device"
+	case deviceDefault:
+		return deviceDefaultDisplayName
 	case "Built-in Microphone":
 		return "Built-in Microphone"
 	case "Built-in Output":
@@ -811,8 +922,8 @@ func (r *AudioSourceRegistry) parseDarwinDeviceName(deviceString string) string 
 // parseWindowsDeviceName converts Windows audio device strings to user-friendly names
 func (r *AudioSourceRegistry) parseWindowsDeviceName(deviceString string) string {
 	// Common Windows audio device patterns
-	if deviceString == "default" {
-		return "Default Audio Device"
+	if deviceString == deviceDefault {
+		return deviceDefaultDisplayName
 	}
 
 	// Windows WASAPI patterns
@@ -895,6 +1006,25 @@ func (r *AudioSourceRegistry) parseLinuxPlugHWDeviceString(deviceString string) 
 	// Remove "plughw:" prefix and use shared parser
 	params := strings.TrimPrefix(deviceString, "plughw:")
 	return r.parseLinuxDeviceParams(params, deviceString)
+}
+
+// StreamTypeToSourceType converts a config StreamType string to myaudio SourceType.
+// This provides a centralized mapping between the conf and myaudio type systems.
+func StreamTypeToSourceType(streamType string) SourceType {
+	switch streamType {
+	case "rtsp":
+		return SourceTypeRTSP
+	case "http":
+		return SourceTypeHTTP
+	case "hls":
+		return SourceTypeHLS
+	case "rtmp":
+		return SourceTypeRTMP
+	case "udp":
+		return SourceTypeUDP
+	default:
+		return SourceTypeUnknown
+	}
 }
 
 // resolveFriendlyCardName maps ALSA card identifiers to friendly names

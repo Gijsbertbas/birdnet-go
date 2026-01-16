@@ -31,7 +31,7 @@
   import type { Snippet } from 'svelte';
   import type { HTMLAttributes } from 'svelte/elements';
   import type { Column, SortDirection } from './DataTable.types';
-  import { alertIconsSvg, navigationIcons } from '$lib/utils/icons';
+  import { XCircle, ChevronUp, ChevronDown } from '@lucide/svelte';
   import { t } from '$lib/i18n';
 
   interface Props<T extends Record<string, any>> extends Omit<HTMLAttributes<HTMLElement>, 'data'> {
@@ -48,6 +48,8 @@
     onSort?: (_column: string, _direction: SortDirection) => void;
     sortColumn?: string | null;
     sortDirection?: SortDirection;
+    /** Function to generate unique keys for each row. Defaults to item.id if present, otherwise index */
+    keyFn?: (_item: T, _index: number) => string | number;
     renderCell?: Snippet<[{ column: Column<T>; item: T; index: number }]>;
     renderEmpty?: Snippet;
     renderLoading?: Snippet;
@@ -68,6 +70,7 @@
     onSort,
     sortColumn = null,
     sortDirection = null,
+    keyFn = (item: T, index: number) => (item.id as string | number) ?? index,
     renderCell,
     renderEmpty,
     renderLoading,
@@ -109,14 +112,16 @@
     }
   }
 
-  const tableClasses = cn(
-    'table',
-    {
-      'table-zebra': striped,
-      'table-compact': compact,
-      'w-full': fullWidth,
-    },
-    className
+  const tableClasses = $derived(
+    cn(
+      'table',
+      {
+        'table-zebra': striped,
+        'table-compact': compact,
+        'w-full': fullWidth,
+      },
+      className
+    )
   );
 </script>
 
@@ -134,7 +139,7 @@
       {@render renderError({ error })}
     {:else}
       <div class="alert alert-error">
-        {@html alertIconsSvg.errorCircle}
+        <XCircle class="size-6" />
         <span>{error}</span>
       </div>
     {/if}
@@ -142,7 +147,7 @@
     <table class={tableClasses} {...rest}>
       <thead>
         <tr>
-          {#each columns as column}
+          {#each columns as column (column.key)}
             {#if column.sortable && onSort}
               {@const getSortState = () => {
                 if (sortColumn !== column.key) return 'none';
@@ -172,9 +177,9 @@
                   <span class="inline-block w-4" aria-hidden="true">
                     {#if sortColumn === column.key}
                       {#if sortDirection === 'asc'}
-                        {@html navigationIcons.sortUp}
+                        <ChevronUp class="size-4" />
                       {:else if sortDirection === 'desc'}
-                        {@html navigationIcons.sortDown}
+                        <ChevronDown class="size-4" />
                       {/if}
                     {/if}
                   </span>
@@ -204,9 +209,9 @@
             </td>
           </tr>
         {:else}
-          {#each data as item, index}
+          {#each data as item, index (keyFn(item, index))}
             <tr class={hoverable ? 'hover:bg-base-200/50 transition-colors' : ''}>
-              {#each columns as column}
+              {#each columns as column (column.key)}
                 <td class={cn(getAlignClass(column.align), column.className)}>
                   {#if renderCell}
                     {@render renderCell({ column, item, index })}

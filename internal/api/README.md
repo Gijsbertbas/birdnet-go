@@ -1,45 +1,120 @@
 # BirdNet-Go API Package
 
-This package implements the HTTP-based RESTful API for the BirdNET-Go application, providing endpoints for bird detection data management, analytics, system control, and more.
+This package implements the HTTP server and RESTful API for the BirdNET-Go application, providing endpoints for bird detection data management, analytics, system control, and more.
 
 ## Package Structure
 
 ```text
 internal/api/
-└── v2/
+├── config.go              - Server configuration from settings
+├── server.go              - Main HTTP server (Echo framework wrapper)
+├── spa.go                 - Single Page Application handler
+├── static.go              - Static file server for frontend assets
+├── auth/                  - Authentication service package
+│   ├── adapter.go         - Adapter for security package (OAuth2Server)
+│   ├── authmethod_string.go - Auto-generated AuthMethod stringer
+│   ├── middleware.go      - Authentication middleware enforcer
+│   └── service.go         - Authentication service interface & AuthMethod enum
+├── middleware/            - HTTP middleware
+│   ├── compression.go     - Gzip compression middleware (SSE-aware)
+│   ├── csrf.go            - CSRF token validation middleware
+│   ├── logging.go         - Structured request logging middleware
+│   └── security.go        - CORS, HSTS, secure headers middleware
+└── v2/                    - API v2 handlers and routes
+    ├── api.go             - API controller and route initialization
     ├── analytics.go       - Analytics and statistics endpoints
-    ├── analytics_test.go  - Tests for analytics endpoints
-    ├── api.go             - Main API controller and route initialization
-    ├── api_test.go        - Tests for main API functionality
-    ├── auth/              - Authentication package
-    │   ├── adapter.go     - Adapter for security package
-    │   ├── middleware.go  - Authentication middleware
-    │   └── service.go     - Authentication service interface
-    ├── auth.go            - Authentication endpoints and handlers
-    ├── auth_test.go       - Tests for authentication endpoints
-    ├── control.go         - System control actions (restart, reload model)
-    ├── detections.go      - Bird detection data endpoints
-    ├── integration.go     - External integration framework
-    ├── integrations.go    - External service integrations
-    ├── media.go           - Media (images, audio) management
+    ├── audio_hls.go       - HLS audio streaming endpoints
+    ├── audio_level.go     - Real-time audio level SSE streaming
+    ├── auth.go            - Authentication endpoints (login, logout, status)
+    ├── constants.go       - API-wide constants
+    ├── control.go         - System control actions (restart, reload, rebuild)
+    ├── debug.go           - Debug/testing endpoints
+    ├── detections.go      - Bird detection CRUD endpoints
+    ├── dynamic_thresholds.go - Dynamic detection threshold logic
+    ├── filesystem.go      - Secure filesystem browsing endpoint
+    ├── integrations.go    - External service integrations (MQTT, BirdWeather, Weather)
+    ├── media.go           - Media serving (audio, spectrograms, species images)
+    ├── notifications.go   - Notification management & SSE stream
     ├── range.go           - Range filter management and testing
-    ├── settings.go        - Application settings management
-    ├── streams.go         - Real-time data streaming
-    ├── system.go          - System information and monitoring
-    └── weather.go         - Weather data related to detections
+    ├── search.go          - Detection search with filtering
+    ├── settings.go        - Application settings management & hot reload
+    ├── settings_audio.go  - Audio settings hot reload logic
+    ├── species.go         - Species information endpoints
+    ├── species_taxonomy.go - Species taxonomy data endpoints
+    ├── sse.go             - Server-Sent Events broadcaster
+    ├── streams_health.go  - RTSP stream health monitoring
+    ├── support.go         - Support diagnostic bundle generation
+    ├── system.go          - System information and resource monitoring
+    ├── toast_helpers.go   - Toast notification helpers
+    ├── utils.go           - Utility functions
+    └── weather.go         - Weather data endpoints
 ```
+
+## Architecture Overview
+
+The API package is split into two layers:
+
+1. **HTTP Server Layer** (`internal/api/`) - Manages the Echo framework, middleware, static files, and SPA routing
+2. **API Controller Layer** (`internal/api/v2/`) - Handles all REST API endpoints under `/api/v2`
+
+## HTTP Server
+
+The main `Server` struct in `server.go` wraps the Echo framework and provides:
+
+- Middleware stack (recovery, logging, CORS, gzip, security headers)
+- Static file serving for frontend assets
+- SPA routing for Svelte frontend
+- TLS/AutoTLS support
+- Graceful shutdown
+
+### Server Initialization
+
+The server uses functional options pattern for configuration:
+
+```go
+import (
+    "github.com/tphakala/birdnet-go/internal/api"
+    "github.com/tphakala/birdnet-go/internal/conf"
+)
+
+// Create server with options
+server, err := api.New(
+    settings,
+    api.WithDataStore(dataStore),
+    api.WithBirdImageCache(imageCache),
+    api.WithProcessor(processor),
+    api.WithMetrics(metrics),
+    api.WithControlChannel(controlChan),
+    api.WithAudioLevelChannel(audioLevelChan),
+)
+if err != nil {
+    return err
+}
+
+// Start server (non-blocking)
+server.Start()
+
+// Later: graceful shutdown
+server.Shutdown()
+```
+
+### Available Options
+
+| Option | Purpose |
+|--------|---------|
+| `WithLogger(logger)` | Set standard logger |
+| `WithDataStore(ds)` | Set database interface |
+| `WithBirdImageCache(cache)` | Set species image cache |
+| `WithSunCalc(sc)` | Set sun calculator |
+| `WithProcessor(proc)` | Set analysis processor |
+| `WithOAuth2Server(oauth)` | Set OAuth2 server |
+| `WithMetrics(m)` | Set observability metrics |
+| `WithControlChannel(ch)` | Set control signal channel |
+| `WithAudioLevelChannel(ch)` | Set audio level channel |
 
 ## API Controller
 
-The API is organized around a central `Controller` struct in `v2/api.go` that manages all endpoints and dependencies. It's initialized with:
-
-- Echo web framework instance
-- Datastore interface for database operations
-- Application settings
-- Bird image cache for species images
-- Sun calculator for daylight information
-- Control channel for system commands
-- Logger for API operations
+The v2 API is organized around a central `Controller` struct in `v2/api.go` that manages all REST endpoints. Dependencies are injected from the parent server.
 
 ## API Versions
 
@@ -47,7 +122,7 @@ Currently, the package implements version 2 (`v2`) of the API with all endpoints
 
 ## Authentication
 
-The API implements a comprehensive, service-based authentication system managed by the `internal/api/v2/auth` sub-package. This package decouples authentication logic from API handlers and supports multiple authentication methods.
+The API implements a comprehensive, service-based authentication system managed by the `internal/api/auth` package. This package decouples authentication logic from API handlers and supports multiple authentication methods.
 
 Key components of the `auth` package:
 
@@ -67,9 +142,9 @@ Key components of the `auth` package:
 
 Protected endpoints use this auth middleware. The system handles browser clients (redirecting to login) and API clients (returning 401 JSON errors) appropriately.
 
-### Authentication Service Interface (Deprecated - See `auth/service.go`)
+### Authentication Service Interface
 
-The authentication service interface provides these key operations:
+The authentication service interface in `auth/service.go` provides these key operations:
 
 ```go
 // Service defines the interface for API service implementations.
@@ -104,9 +179,9 @@ type Service interface {
 }
 ```
 
-### Auth Middleware Implementation (Deprecated - See `auth/middleware.go`)
+### Auth Middleware Implementation
 
-The middleware follows this decision flow:
+The middleware in `auth/middleware.go` follows this decision flow:
 
 1. Checks for Bearer token and validates if present
 2. Falls back to session authentication for browser clients
@@ -127,6 +202,7 @@ The middleware follows this decision flow:
 
 - Statistics on detections by species, time, and confidence
 - Trends and patterns in detection data
+- Species taxonomy and classification data
 
 ### System Control
 
@@ -141,6 +217,8 @@ The middleware follows this decision flow:
 - `GET /api/v2/system/disks` - Retrieves information about disk partitions and usage
 - `GET /api/v2/system/jobs` - Retrieves statistics about the analysis job queue
 - `GET /api/v2/system/processes` - Retrieves information about running processes (application and children by default, or all with `?all=true`)
+- `GET /api/v2/system/temperature` - Retrieves system temperature sensors (CPU, GPU, etc.)
+- `GET /api/v2/system/audio-devices` - Lists available audio input devices
 
 ### Settings Management
 
@@ -161,9 +239,11 @@ The middleware follows this decision flow:
 
 ### Real-time Data Streaming
 
-- WebSocket connections for live detection updates
-- Event-based notification system
 - Server-Sent Events (SSE) for real-time detection streaming
+- Audio level SSE streaming for visualization
+- Stream health SSE for monitoring RTSP sources
+- Notification SSE for real-time alerts
+- HLS audio streaming for live audio playback
 - Structured detection data with species images and metadata
 
 ### Range Filter Management
@@ -378,20 +458,121 @@ eventSource.onerror = function (event) {
 - Heartbeat messages are sent every 30 seconds to maintain connections
 - Event frequency is controlled by the same event tracker used for other actions
 
+### HLS Audio Streaming API Endpoints
+
+The API provides HTTP Live Streaming (HLS) for real-time audio from configured sources:
+
+1. **Start Stream**:
+   - `POST /api/v2/streams/hls/start` - Starts an HLS stream for a specified audio source
+   - Request body includes `sourceUrl` (RTSP URL) and optional parameters
+   - Returns stream ID and playlist URL
+
+2. **Stop Stream**:
+   - `POST /api/v2/streams/hls/stop` - Stops an active HLS stream
+   - Request body includes `streamId`
+
+3. **Get Playlist**:
+   - `GET /api/v2/streams/hls/:streamId/playlist.m3u8` - Returns the HLS playlist for a stream
+   - Standard HLS format compatible with video.js and other players
+
+4. **Get Segment**:
+   - `GET /api/v2/streams/hls/:streamId/:segment` - Returns individual HLS segments
+
+5. **Heartbeat**:
+   - `POST /api/v2/streams/hls/heartbeat` - Keep stream alive (prevents auto-shutdown)
+
+**Features:**
+
+- FFmpeg-based transcoding for broad compatibility
+- Automatic stream cleanup on client disconnect
+- Configurable segment duration and playlist length
+
+### RTSP Stream Health Monitoring API Endpoints
+
+The API provides comprehensive health monitoring for RTSP audio streams:
+
+1. **Stream Health Summary**:
+   - `GET /api/v2/streams/health` - Returns health status for all configured streams
+   - Includes connection status, error counts, and last activity timestamps
+
+2. **Individual Stream Health**:
+   - `GET /api/v2/streams/health/:name` - Returns detailed health for a specific stream
+   - Includes error history, circuit breaker status, and recovery attempts
+
+3. **Stream Health SSE**:
+   - `GET /api/v2/streams/health/stream` - Real-time health updates via SSE
+   - Broadcasts status changes as they occur
+
+**Health Status Types:**
+
+- `healthy` - Stream is connected and receiving data
+- `degraded` - Stream has intermittent issues but is recovering
+- `unhealthy` - Stream is disconnected or has persistent errors
+- `unknown` - Stream status cannot be determined
+
+### Audio Level Streaming API Endpoints
+
+Real-time audio level monitoring via Server-Sent Events:
+
+1. **Audio Level Stream**:
+   - `GET /api/v2/streams/audio-level` - Opens an SSE connection for real-time audio levels
+   - Returns normalized audio levels (0.0-1.0) for visualization
+   - Includes peak detection and RMS values
+
+**Features:**
+
+- Connection limits to prevent resource exhaustion
+- Anonymized client tracking
+- Automatic cleanup on disconnect
+
+### Filesystem Browsing API Endpoints
+
+Secure filesystem browsing for configuration and file selection:
+
+1. **Browse Directory**:
+   - `GET /api/v2/filesystem/browse?path={path}` - Lists directory contents
+   - Returns files and subdirectories with metadata
+   - Protected endpoint requiring authentication
+
+**Security:**
+
+- Path traversal protection via SecureFS
+- Restricted to allowed directories only
+- Validates paths against configured roots
+
+### Debug API Endpoints
+
+Debug endpoints for testing and development (protected):
+
+1. **Trigger Test Notification**:
+   - `POST /api/v2/debug/notification` - Sends a test notification
+
+2. **Trigger Test Error**:
+   - `POST /api/v2/debug/error` - Triggers a test error for error handling verification
+
+3. **Debug Status**:
+   - `GET /api/v2/debug/status` - Returns debug mode status and configuration
+
+**Notes:**
+
+- All debug endpoints require authentication
+- Only available when debug mode is enabled
+
 ### Middleware Implementation
 
-The API uses a combination of standard Echo middleware and custom middleware for specific functionality:
+The `internal/api/middleware/` package provides HTTP middleware used by the server:
 
-1. **Standard Middleware**:
-   - Logger - For request logging
-   - Recover - For panic recovery
-   - CORS - For cross-origin resource sharing
+| Middleware | File | Purpose |
+|------------|------|---------|
+| Recovery | Echo built-in | Panic recovery |
+| RequestLogger | `logging.go` | Structured request logging |
+| CORS | `security.go` | Cross-origin resource sharing |
+| BodyLimit | `security.go` | Request body size limits |
+| Gzip | `compression.go` | Response compression (auto-skips SSE) |
+| SecureHeaders | `security.go` | Security headers (HSTS, X-Frame-Options) |
+| CSRF | `csrf.go` | CSRF token validation for state-changing operations |
 
-2. **Custom Middleware**:
-   - AuthMiddleware - Handles both session-based and token-based authentication
-   - Rate limiting for public endpoints
-
-Middleware is defined in the dedicated `middleware.go` file to maintain clean separation of concerns.
+The API uses authentication middleware from `auth/middleware.go` which handles Bearer token and session-based authentication.
 
 ### Handler Implementation
 
@@ -423,27 +604,30 @@ Handlers follow a consistent pattern:
    return ctx.JSON(http.StatusOK, detection)
    ```
 
-5. **Logging**: Handlers utilize structured logging via `c.apiLogger`:
+5. **Logging**: Handlers utilize structured logging via `c.log` (cached `logger.Logger`):
    - Log entry points with `Info` level, including relevant request parameters (e.g., date, species, ID) and context (IP address, request path).
    - Log successful outcomes with `Info` level, summarizing results (e.g., number of records fetched, action completed).
    - Log validation errors or expected issues (e.g., resource not found, invalid parameters) with `Warn` level.
    - Log unexpected errors (e.g., database failures, internal processing errors) with `Error` level, including the underlying error message and relevant context.
-   - Use `c.Debug` for verbose debugging information during development.
+   - Use `Debug` for verbose debugging information during development.
    - Example:
      ```go
-     if c.apiLogger != nil {
-         c.apiLogger.Info("Handling request for detection", "detection_id", id, "ip", ctx.RealIP(), "path", ctx.Request().URL.Path)
-     }
+     c.log.Info("handling request for detection",
+         logger.String("detection_id", id),
+         logger.String("ip", ctx.RealIP()),
+         logger.String("path", ctx.Request().URL.Path))
+
      // ... processing ...
      if err != nil {
-         if c.apiLogger != nil {
-             c.apiLogger.Error("Failed to fetch detection from datastore", "detection_id", id, "error", err.Error(), "ip", ctx.RealIP(), "path", ctx.Request().URL.Path)
-         }
+         c.log.Error("failed to fetch detection from datastore",
+             logger.String("detection_id", id),
+             logger.Error(err),
+             logger.String("ip", ctx.RealIP()))
          return c.HandleError(ctx, err, "Database error", http.StatusInternalServerError)
      }
-     if c.apiLogger != nil {
-         c.apiLogger.Info("Successfully retrieved detection", "detection_id", id, "ip", ctx.RealIP(), "path", ctx.Request().URL.Path)
-     }
+
+     c.log.Info("successfully retrieved detection",
+         logger.String("detection_id", id))
      ```
 
 ### Settings Management
@@ -471,6 +655,23 @@ The API includes comprehensive endpoints for managing application settings:
    - When important settings change, reconfigurations are triggered asynchronously
    - This prevents long-running operations from blocking API responses
    - A small delay is added between configuration actions to avoid overwhelming the system
+
+5. **Hot Reload Support**:
+   The following settings are automatically applied at runtime without restart:
+
+   | Category | Action | Notification |
+   |----------|--------|--------------|
+   | BirdNET model | `reload_birdnet` | ✅ |
+   | Range filter | `rebuild_range_filter` | ✅ |
+   | Species intervals | `update_detection_intervals` | ✅ |
+   | MQTT | `reconfigure_mqtt` | ✅ |
+   | BirdWeather | `reconfigure_birdweather` | ✅ |
+   | RTSP sources | `reconfigure_rtsp_sources` | ✅ |
+   | Telemetry | `reconfigure_telemetry` | ✅ |
+   | Species tracking | `reconfigure_species_tracking` | ✅ |
+   | Audio/Equalizer | Various | ✅ |
+
+   **Web server settings** (port, TLS, etc.) require a restart - users are notified via toast.
 
 ### Best Practices for API Development
 
@@ -517,42 +718,24 @@ The correlation ID allows tracking specific errors across logs and systems.
 
 The API package requires:
 
-1. Echo web framework
+1. Echo web framework (managed internally)
 2. Access to a datastore implementation
-3. Application configuration
-4. Other internal services like image provider
+3. Application configuration (`conf.Settings`)
+4. Optional services: image cache, processor, metrics
 
 ### Initialization
 
-To initialize the API in your application:
+See [Server Initialization](#server-initialization) above for the recommended approach using functional options.
 
-```go
-import (
-    "github.com/labstack/echo/v4"
-    "github.com/tphakala/birdnet-go/internal/api"
-    "github.com/tphakala/birdnet-go/internal/conf"
-    "github.com/tphakala/birdnet-go/internal/datastore"
-    "github.com/tphakala/birdnet-go/internal/imageprovider"
-    "github.com/tphakala/birdnet-go/internal/suncalc"
-)
+### Runtime Server Selection
 
-func setupAPI() {
-    // Initialize echo
-    e := echo.New()
+The HTTP server is configured via:
 
-    // Get dependencies
-    ds := datastore.NewSQLiteDatastore("path/to/database")
-    settings := conf.LoadSettings("path/to/config")
-    imageCache := imageprovider.NewBirdImageCache()
-    sunCalc := suncalc.New(settings.Location.Latitude, settings.Location.Longitude)
-    controlChan := make(chan string)
-
-    // Create API controller
-    apiController := api.New(e, ds, settings, imageCache, sunCalc, controlChan, nil)
-
-    // Start the server
-    e.Start(":8080")
-}
+```yaml
+webserver:
+  enabled: true
+  port: "8080"
+  debug: false
 ```
 
 ### Extending the API
@@ -642,16 +825,26 @@ When working with the API code, be mindful of these important considerations:
 #### Sensitive Data Handling
 
 - Never log sensitive information such as passwords, tokens, or PII
-- Mask sensitive data in error messages and logs
-- Use dedicated logging middleware to automatically redact sensitive fields
+- Use the dedicated sensitive field constructors from the logger package
+- These constructors automatically sanitize data using the privacy package
 - Example:
 
   ```go
-  // INCORRECT
-  c.logger.Printf("Login attempt with credentials: %s:%s", username, password)
+  // INCORRECT - exposes credentials
+  c.log.Info("login attempt", logger.String("username", username), logger.String("password", password))
 
-  // CORRECT
-  c.logger.Printf("Login attempt for user: %s", username)
+  // CORRECT - use semantic sensitive field constructors
+  c.log.Info("login attempt", logger.Username(username))
+
+  // Available sensitive field constructors:
+  // logger.Username(value)           - hashes username for safe log correlation
+  // logger.Password(value)           - always returns [REDACTED]
+  // logger.Token(key, value)         - redacts with length hint: [TOKEN:len=N]
+  // logger.URL(key, value)           - sanitizes URLs
+  // logger.CredentialURL(key, value) - sanitizes URLs with embedded credentials
+  // logger.SanitizedString(key, val) - applies full privacy scrubbing
+  // logger.SanitizedError(err)       - scrubs error messages
+  // logger.Credential(key)           - marks field as [REDACTED]
   ```
 
 ### Error Handling
@@ -670,11 +863,11 @@ When working with the API code, be mindful of these important considerations:
 
   // CORRECT
   if err := conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-      c.logger.Printf("Failed to set write deadline: %v", err)
+      c.log.Warn("failed to set write deadline", logger.Error(err))
       return err
   }
   if err := conn.WriteMessage(messageType, payload); err != nil {
-      c.logger.Printf("Failed to write message: %v", err)
+      c.log.Warn("failed to write message", logger.Error(err))
       return err
   }
   ```
@@ -692,7 +885,7 @@ When working with the API code, be mindful of these important considerations:
 
   // CORRECT
   if err := conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
-      c.logger.Printf("Failed to set read deadline: %v", err)
+      c.log.Warn("failed to set read deadline", logger.Error(err))
       return err
   }
   ```
@@ -814,11 +1007,25 @@ When working with the API code, be mindful of these important considerations:
 
 ## Testing
 
-Each module has corresponding test files (`*_test.go`) for unit testing. Run tests with:
+Each module has comprehensive test coverage with various test file patterns. Run tests with:
 
 ```bash
+go test -v ./internal/api/...
 go test -v ./internal/api/v2/...
+go test -v ./internal/api/auth/...
 ```
+
+### Test File Categories
+
+| Pattern | Purpose |
+|---------|---------|
+| `*_test.go` | Standard unit tests for each handler/feature |
+| `*_integration_test.go` | Integration tests combining multiple components |
+| `*_edge_test.go` | Edge case and boundary condition tests |
+| `*_concurrent_test.go` | Concurrency and race condition tests |
+| `*_malformed_test.go` | Malformed input validation tests |
+| `*_malicious_test.go` | Security and attack scenario tests |
+| `*_extreme_test.go` | Extreme value and stress tests |
 
 ### Testing Best Practices
 
@@ -827,6 +1034,7 @@ go test -v ./internal/api/v2/...
 3. **Validate Response Structures**: Ensure JSON responses match expected formats
 4. **Test Middleware Behavior**: Verify auth middleware correctly allows/denies requests
 5. **Use Table-Driven Tests**: For testing multiple input scenarios
+6. **Race Detection**: Run tests with `-race` flag during development
 
 ## Security Considerations
 

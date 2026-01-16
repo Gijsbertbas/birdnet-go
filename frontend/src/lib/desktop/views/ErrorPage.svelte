@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { cn } from '$lib/utils/cn.js';
+  import { t } from '$lib/i18n';
 
   interface Props {
     className?: string;
@@ -225,7 +226,7 @@
 </script>
 
 <svelte:head>
-  <title>404 - Page Not Found</title>
+  <title>{t('pageTitle.pageNotFound')}</title>
   <style>
     /* Custom binoculars cursor - black outline for light theme */
     .cursor-binoculars {
@@ -457,7 +458,7 @@
   </style>
 </svelte:head>
 
-<div class={cn('min-h-screen bg-base-200 flex items-center justify-center', className)}>
+<div class={cn('col-span-12 min-h-[60vh] flex items-center justify-center', className)}>
   <div class="text-center p-8 rounded-lg bg-base-100 shadow-lg">
     <h1 class="text-6xl font-bold text-base-content mb-4">
       4<span
@@ -469,14 +470,11 @@
         tabindex="0">0</span
       >4
     </h1>
-    <h2 class="text-3xl font-semibold text-base-content/70 mb-8">Page Not Found</h2>
+    <h2 class="text-3xl font-semibold text-base-content opacity-70 mb-8">{t('error.404.title')}</h2>
 
     <!-- Link Button -->
-    <a
-      href="/"
-      class="btn btn-primary normal-case text-base font-semibold hover:bg-primary-focus transition duration-300"
-    >
-      Go to Dashboard
+    <a href="/" class="btn btn-primary normal-case text-base font-semibold transition duration-300">
+      {t('common.goToDashboard')}
     </a>
   </div>
 

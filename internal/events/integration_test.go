@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/events"
-	"github.com/tphakala/birdnet-go/internal/logging"
 )
 
 // TestNoCircularDependency verifies that events package doesn't import errors package
@@ -18,21 +19,15 @@ func TestNoCircularDependency(t *testing.T) {
 	// This test primarily exists to ensure compilation succeeds
 	// If there's a circular dependency, this won't compile
 
-	// Initialize logging
-	logging.Init()
+	// No logging initialization needed for integration tests
 
 	// Reset state
 	events.ResetForTesting()
 
 	// Initialize event bus
 	eb, err := events.Initialize(nil)
-	if err != nil {
-		t.Fatalf("failed to initialize event bus: %v", err)
-	}
-
-	if eb == nil {
-		t.Fatal("expected non-nil event bus")
-	}
+	require.NoError(t, err, "failed to initialize event bus")
+	require.NotNil(t, eb, "expected non-nil event bus")
 
 	// The fact that this compiles proves no circular dependency
 	t.Log("No circular dependency detected")
@@ -47,8 +42,7 @@ func TestNoCircularDependency(t *testing.T) {
 func TestErrorEventIntegration(t *testing.T) {
 	// Remove t.Parallel() to ensure clean state for global error hooks
 
-	// Initialize logging
-	logging.Init()
+	// No logging initialization needed for integration tests
 
 	// Reset event bus state
 	events.ResetForTesting()
@@ -67,9 +61,7 @@ func TestErrorEventIntegration(t *testing.T) {
 	}
 
 	eb, err := events.Initialize(config)
-	if err != nil {
-		t.Fatalf("failed to initialize event bus: %v", err)
-	}
+	require.NoError(t, err, "failed to initialize event bus")
 
 	// Create a test consumer
 	consumer := &testConsumer{
@@ -77,9 +69,7 @@ func TestErrorEventIntegration(t *testing.T) {
 	}
 
 	err = eb.RegisterConsumer(consumer)
-	if err != nil {
-		t.Fatalf("failed to register consumer: %v", err)
-	}
+	require.NoError(t, err, "failed to register consumer")
 
 	// Set up the integration
 	err = events.InitializeErrorsIntegration(func(publisher any) {
@@ -87,9 +77,7 @@ func TestErrorEventIntegration(t *testing.T) {
 			errors.SetEventPublisher(p)
 		}
 	})
-	if err != nil {
-		t.Fatalf("failed to initialize integration: %v", err)
-	}
+	require.NoError(t, err, "failed to initialize integration")
 
 	// Enable error reporting by adding a hook
 	// This ensures hasActiveReporting is true
@@ -125,29 +113,23 @@ func TestErrorEventIntegration(t *testing.T) {
 		consumer.mu.Lock()
 		count := len(consumer.events)
 		consumer.mu.Unlock()
-		t.Fatalf("timeout waiting for event, got %d events", count)
+		require.Failf(t, "timeout waiting for event", "got %d events", count)
 	}
 
 	// Check that the consumer received the event
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
 
-	if len(consumer.events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(consumer.events))
-	}
+	require.Len(t, consumer.events, 1)
 
 	event := consumer.events[0]
-	if event.GetComponent() != "test-component" {
-		t.Errorf("expected component 'test-component', got %s", event.GetComponent())
-	}
-	if event.GetCategory() != string(errors.CategoryNetwork) {
-		t.Errorf("expected category 'network', got %s", event.GetCategory())
-	}
+	assert.Equal(t, "test-component", event.GetComponent())
+	assert.Equal(t, string(errors.CategoryNetwork), event.GetCategory())
 
 	ctx := event.GetContext()
-	if op, ok := ctx["operation"].(string); !ok || op != "test_operation" {
-		t.Errorf("expected operation 'test_operation', got %v", ctx["operation"])
-	}
+	op, ok := ctx["operation"].(string)
+	require.True(t, ok, "operation should be a string")
+	assert.Equal(t, "test_operation", op)
 
 	// Cleanup
 	t.Cleanup(func() {

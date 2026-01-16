@@ -206,3 +206,170 @@ export function formatFileSize(bytes: number): string {
 export function parseISODate(isoString: string): Date | null {
   return parseLocalDateString(isoString);
 }
+
+/**
+ * Temperature unit types
+ */
+export type TemperatureUnit = 'metric' | 'imperial' | 'standard';
+
+/**
+ * Convert temperature from Celsius to the specified unit system.
+ * All temperatures are stored internally in Celsius.
+ *
+ * @param celsius - Temperature in Celsius
+ * @param unit - Target unit system: 'metric' (Celsius), 'imperial' (Fahrenheit), 'standard' (Kelvin)
+ * @returns Temperature converted to the target unit
+ */
+export function convertTemperature(celsius: number, unit: TemperatureUnit): number {
+  switch (unit) {
+    case 'imperial':
+      // Celsius to Fahrenheit: C * 9/5 + 32
+      return celsius * (9 / 5) + 32;
+    case 'standard':
+      // Celsius to Kelvin: C + 273.15
+      return celsius + 273.15;
+    case 'metric':
+      // Celsius, no conversion needed
+      return celsius;
+  }
+}
+
+/**
+ * Get the temperature unit symbol for display.
+ *
+ * @param unit - Unit system: 'metric', 'imperial', or 'standard'
+ * @returns Unit symbol (°C, °F, or K)
+ */
+export function getTemperatureSymbol(unit: TemperatureUnit): string {
+  switch (unit) {
+    case 'imperial':
+      return '°F';
+    case 'standard':
+      return 'K';
+    case 'metric':
+      return '°C';
+  }
+}
+
+/**
+ * Format temperature for display with conversion and unit symbol.
+ * All temperatures are stored internally in Celsius and converted for display.
+ *
+ * @param celsius - Temperature in Celsius (as stored in database)
+ * @param unit - Display unit system: 'metric', 'imperial', or 'standard'
+ * @param decimals - Number of decimal places (default: 1)
+ * @returns Formatted temperature string with unit (e.g., "72.5°F")
+ */
+export function formatTemperature(
+  celsius: number | undefined | null,
+  unit: TemperatureUnit = 'metric',
+  decimals: number = 1
+): string {
+  if (celsius === undefined || celsius === null || isNaN(celsius)) {
+    return 'N/A';
+  }
+
+  const converted = convertTemperature(celsius, unit);
+  const symbol = getTemperatureSymbol(unit);
+
+  return `${converted.toFixed(decimals)}${symbol}`;
+}
+
+/**
+ * Format temperature for compact display (rounded, no decimals).
+ * Useful for badges and small UI elements.
+ *
+ * @param celsius - Temperature in Celsius
+ * @param unit - Display unit system
+ * @returns Formatted temperature string (e.g., "73°F")
+ */
+export function formatTemperatureCompact(
+  celsius: number | undefined | null,
+  unit: TemperatureUnit = 'metric'
+): string {
+  if (celsius === undefined || celsius === null || isNaN(celsius)) {
+    return '';
+  }
+
+  const converted = convertTemperature(celsius, unit);
+  const symbol = getTemperatureSymbol(unit);
+
+  return `${Math.round(converted)}${symbol}`;
+}
+
+/**
+ * Wind speed conversion constant: 1 m/s = 2.23694 mph
+ */
+const MS_TO_MPH = 2.23694;
+
+/**
+ * Convert wind speed from m/s to the specified unit system.
+ * All wind speeds are stored internally in meters per second (m/s).
+ *
+ * @param metersPerSecond - Wind speed in m/s
+ * @param unit - Target unit system: 'metric'/'standard' (m/s), 'imperial' (mph)
+ * @returns Wind speed converted to the target unit
+ */
+export function convertWindSpeed(metersPerSecond: number, unit: TemperatureUnit): number {
+  switch (unit) {
+    case 'imperial':
+      // m/s to mph: m/s * 2.23694
+      return metersPerSecond * MS_TO_MPH;
+    case 'metric':
+    case 'standard':
+      // m/s, no conversion needed
+      return metersPerSecond;
+    default: {
+      // Exhaustive check - ensures all TemperatureUnit cases are handled
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _exhaustiveCheck: never = unit;
+      return metersPerSecond;
+    }
+  }
+}
+
+/**
+ * Get the wind speed unit label for display.
+ *
+ * @param unit - Unit system: 'metric', 'imperial', or 'standard'
+ * @returns Unit label (m/s or mph)
+ */
+export function getWindSpeedUnit(unit: TemperatureUnit): string {
+  switch (unit) {
+    case 'imperial':
+      return 'mph';
+    case 'metric':
+    case 'standard':
+      return 'm/s';
+    default: {
+      // Exhaustive check - ensures all TemperatureUnit cases are handled
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _exhaustiveCheck: never = unit;
+      return 'm/s';
+    }
+  }
+}
+
+/**
+ * Format wind speed for display with conversion and unit label.
+ * All wind speeds are stored internally in m/s and converted for display.
+ *
+ * @param metersPerSecond - Wind speed in m/s (as stored in database)
+ * @param unit - Display unit system: 'metric', 'imperial', or 'standard'
+ * @param decimals - Number of decimal places (default: 0 for whole numbers)
+ * @returns Formatted wind speed string with unit (e.g., "11 mph")
+ */
+export function formatWindSpeed(
+  metersPerSecond: number | undefined | null,
+  unit: TemperatureUnit = 'metric',
+  decimals: number = 0
+): string {
+  if (metersPerSecond === undefined || metersPerSecond === null || isNaN(metersPerSecond)) {
+    return 'N/A';
+  }
+
+  const converted = convertWindSpeed(metersPerSecond, unit);
+  const unitLabel = getWindSpeedUnit(unit);
+
+  return `${converted.toFixed(decimals)} ${unitLabel}`;
+}

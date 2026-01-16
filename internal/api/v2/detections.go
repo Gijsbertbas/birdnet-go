@@ -3,12 +3,10 @@ package api
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -16,7 +14,18 @@ import (
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/suncalc"
+)
+
+// Detection constants (file-local)
+const (
+	detectionCacheExpiry  = 5 * time.Minute  // Default cache expiration
+	detectionCacheCleanup = 10 * time.Minute // Cache cleanup interval
+	defaultNumResults     = 100              // Default number of results
+	maxNumResults         = 1000             // Maximum number of results
+	sunEventWindowMinutes = 30               // Minutes before/after sunrise/sunset
+	minHourRangeParts     = 2                // Minimum parts for hour range parsing
 )
 
 // Regex to validate YYYY-MM-DD format and check for unwanted characters
@@ -48,10 +57,57 @@ func validateDateParam(dateStr, paramName string) error {
 	return nil
 }
 
+// verificationStatus represents the result of parsing a verification string.
+type verificationStatus struct {
+	IsSet    bool // whether verification was requested
+	Verified bool // the verification value (true=correct, false=false_positive)
+}
+
+// parseVerificationStatus converts a verification string to a structured result.
+// Returns (status, nil) for valid inputs, or (empty, error) for invalid status.
+func parseVerificationStatus(status string) (verificationStatus, error) {
+	if status == "" {
+		return verificationStatus{IsSet: false}, nil
+	}
+	switch status {
+	case "correct":
+		return verificationStatus{IsSet: true, Verified: true}, nil
+	case "false_positive":
+		return verificationStatus{IsSet: true, Verified: false}, nil
+	default:
+		return verificationStatus{}, fmt.Errorf("invalid verification status: %s", status)
+	}
+}
+
+// checkDetectionNotLocked verifies a detection is not locked, checking both in-memory and database.
+// Returns true if locked (error response already sent), false if unlocked.
+func (c *Controller) checkDetectionNotLocked(ctx echo.Context, idStr string, inMemoryLocked bool) bool {
+	// Check in-memory lock state first
+	if inMemoryLocked {
+		_ = c.HandleError(ctx, fmt.Errorf("detection is locked"),
+			"Detection is locked and status cannot be changed", http.StatusConflict)
+		return true
+	}
+
+	// Check database for race condition (another process may have locked it)
+	isLocked, err := c.DS.IsNoteLocked(idStr)
+	if err != nil {
+		_ = c.HandleError(ctx, err, "Failed to check lock status", http.StatusInternalServerError)
+		return true
+	}
+	if isLocked {
+		_ = c.HandleError(ctx, fmt.Errorf("detection is locked"),
+			"Detection is locked and status cannot be changed", http.StatusConflict)
+		return true
+	}
+
+	return false
+}
+
 // initDetectionRoutes registers all detection-related API endpoints
 func (c *Controller) initDetectionRoutes() {
 	// Initialize the cache with a 5-minute default expiration and 10-minute cleanup interval
-	c.detectionCache = cache.New(5*time.Minute, 10*time.Minute)
+	c.detectionCache = cache.New(detectionCacheExpiry, detectionCacheCleanup)
 
 	// Detection endpoints - publicly accessible
 	//
@@ -64,39 +120,48 @@ func (c *Controller) initDetectionRoutes() {
 	c.Group.GET("/detections/:id/time-of-day", c.GetDetectionTimeOfDay)
 
 	// Protected detection management endpoints
-	detectionGroup := c.Group.Group("/detections", c.AuthMiddleware)
+	detectionGroup := c.Group.Group("/detections", c.authMiddleware)
 	detectionGroup.DELETE("/:id", c.DeleteDetection)
 	detectionGroup.POST("/:id/review", c.ReviewDetection)
 	detectionGroup.POST("/:id/lock", c.LockDetection)
 	detectionGroup.POST("/ignore", c.IgnoreSpecies)
+	detectionGroup.GET("/ignored", c.GetExcludedSpecies)
+}
+
+// CommentResponse represents a comment on a detection in the API response
+type CommentResponse struct {
+	ID        uint   `json:"id"`
+	Entry     string `json:"entry"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 // DetectionResponse represents a detection in the API response
 type DetectionResponse struct {
-	ID                 uint         `json:"id"`
-	Date               string       `json:"date"`
-	Time               string       `json:"time"`
-	Source             string       `json:"source"`
-	BeginTime          string       `json:"beginTime"`
-	EndTime            string       `json:"endTime"`
-	SpeciesCode        string       `json:"speciesCode"`
-	ScientificName     string       `json:"scientificName"`
-	CommonName         string       `json:"commonName"`
-	Confidence         float64      `json:"confidence"`
-	Verified           string       `json:"verified"`
-	Locked             bool         `json:"locked"`
-	Comments           []string     `json:"comments,omitempty"`
-	Weather            *WeatherInfo `json:"weather,omitempty"`
-	TimeOfDay          string       `json:"timeOfDay,omitempty"`
-	IsNewSpecies       bool         `json:"isNewSpecies,omitempty"`       // First seen within tracking window
-	DaysSinceFirstSeen int          `json:"daysSinceFirstSeen,omitempty"` // Days since species was first detected
-	
+	ID                 uint              `json:"id"`
+	Date               string            `json:"date"`
+	Time               string            `json:"time"`
+	Source             string            `json:"source"`
+	BeginTime          string            `json:"beginTime"`
+	EndTime            string            `json:"endTime"`
+	SpeciesCode        string            `json:"speciesCode"`
+	ScientificName     string            `json:"scientificName"`
+	CommonName         string            `json:"commonName"`
+	Confidence         float64           `json:"confidence"`
+	Verified           string            `json:"verified"`
+	Locked             bool              `json:"locked"`
+	Comments           []CommentResponse `json:"comments,omitempty"`
+	Weather            *WeatherInfo      `json:"weather,omitempty"`
+	TimeOfDay          string            `json:"timeOfDay,omitempty"`
+	IsNewSpecies       bool              `json:"isNewSpecies,omitempty"`       // First seen within tracking window
+	DaysSinceFirstSeen int               `json:"daysSinceFirstSeen,omitempty"` // Days since species was first detected
+
 	// Multi-period tracking metadata
-	IsNewThisYear      bool         `json:"isNewThisYear,omitempty"`      // First time this year
-	IsNewThisSeason    bool         `json:"isNewThisSeason,omitempty"`    // First time this season  
-	DaysThisYear       int          `json:"daysThisYear,omitempty"`       // Days since first this year
-	DaysThisSeason     int          `json:"daysThisSeason,omitempty"`     // Days since first this season
-	CurrentSeason      string       `json:"currentSeason,omitempty"`      // Current season name
+	IsNewThisYear   bool   `json:"isNewThisYear,omitempty"`   // First time this year
+	IsNewThisSeason bool   `json:"isNewThisSeason,omitempty"` // First time this season
+	DaysThisYear    int    `json:"daysThisYear,omitempty"`    // Days since first this year
+	DaysThisSeason  int    `json:"daysThisSeason,omitempty"`  // Days since first this season
+	CurrentSeason   string `json:"currentSeason,omitempty"`   // Current season name
 }
 
 // WeatherInfo represents weather data for a detection
@@ -158,6 +223,16 @@ type detectionQueryParams struct {
 	IncludeWeather bool
 }
 
+// advancedSearchCacheKey generates a deterministic cache key for advanced search queries.
+// Includes all filter parameters to avoid cache collisions.
+func (p *detectionQueryParams) advancedSearchCacheKey() string {
+	return fmt.Sprintf("adv_search:%s:%d:%d:%s:%s:%s:%s:%s:%s:%s:%s:%s",
+		p.Search, p.NumResults, p.Offset,
+		p.Confidence, p.TimeOfDay, p.HourRange,
+		p.Verified, p.Location, p.Locked,
+		p.Species, p.Date, p.StartDate+":"+p.EndDate)
+}
+
 // parseDetectionQueryParams extracts and validates query parameters from the request
 func (c *Controller) parseDetectionQueryParams(ctx echo.Context) (*detectionQueryParams, error) {
 	params := &detectionQueryParams{
@@ -176,7 +251,7 @@ func (c *Controller) parseDetectionQueryParams(ctx echo.Context) (*detectionQuer
 		Location:   ctx.QueryParam("location"),
 		Locked:     ctx.QueryParam("locked"),
 		// Include weather data
-		IncludeWeather: ctx.QueryParam("includeWeather") == "true",
+		IncludeWeather: ctx.QueryParam("includeWeather") == QueryValueTrue,
 	}
 
 	// Parse duration
@@ -210,48 +285,26 @@ func (c *Controller) parseDetectionQueryParams(ctx echo.Context) (*detectionQuer
 
 // validateDateParameters validates start_date and end_date parameters
 func (c *Controller) validateDateParameters(startDateStr, endDateStr string, ctx echo.Context) error {
-	if err := validateDateParam(startDateStr, "start_date"); err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Invalid date parameter",
-				"parameter", "start_date",
-				"value", startDateStr,
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
+	// Validate individual date formats
+	for _, dp := range []struct{ value, name string }{{startDateStr, "start_date"}, {endDateStr, "end_date"}} {
+		if err := validateDateParam(dp.value, dp.name); err != nil {
+			c.logErrorIfEnabled("Invalid date parameter",
+				logger.String("parameter", dp.name),
+				logger.String("value", dp.value),
+				logger.String("path", ctx.Request().URL.Path),
+				logger.String("ip", ctx.RealIP()))
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
-	if err := validateDateParam(endDateStr, "end_date"); err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Invalid date parameter",
-				"parameter", "end_date",
-				"value", endDateStr,
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
-
-	// Check if start_date is after end_date
-	if startDateStr != "" && endDateStr != "" {
-		startDate, _ := time.Parse("2006-01-02", startDateStr)
-		endDate, _ := time.Parse("2006-01-02", endDateStr)
-		if startDate.After(endDate) {
-			if c.apiLogger != nil {
-				c.apiLogger.Error("Invalid date range",
-					"start_date", startDateStr,
-					"end_date", endDateStr,
-					"error", "start_date cannot be after end_date",
-					"path", ctx.Request().URL.Path,
-					"ip", ctx.RealIP(),
-				)
-			}
-			return echo.NewHTTPError(http.StatusBadRequest, "start_date cannot be after end_date")
-		}
+	// Check date order
+	if err := validateDateOrder(startDateStr, endDateStr); err != nil {
+		c.logErrorIfEnabled("Invalid date range",
+			logger.String("start_date", startDateStr),
+			logger.String("end_date", endDateStr),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()))
+		return echo.NewHTTPError(http.StatusBadRequest, "start_date cannot be after end_date")
 	}
 
 	return nil
@@ -260,13 +313,18 @@ func (c *Controller) validateDateParameters(startDateStr, endDateStr string, ctx
 // parseNumResults parses and validates the numResults parameter
 func (c *Controller) parseNumResults(numResultsStr string) (int, error) {
 	if numResultsStr == "" {
-		return 100, nil // Default value
+		return defaultNumResults, nil // Default value
 	}
 
-	log.Printf("[DEBUG] GetDetections: Raw numResults string: '%s'", numResultsStr)
+	c.logDebugIfEnabled("GetDetections: Raw numResults string",
+		logger.String("value", numResultsStr),
+	)
 	numResults, err := strconv.Atoi(numResultsStr)
 	if err != nil {
-		log.Printf("[DEBUG] GetDetections: Invalid numResults string '%s', error: %v", numResultsStr, err)
+		c.logDebugIfEnabled("GetDetections: Invalid numResults string",
+			logger.String("value", numResultsStr),
+			logger.Error(err),
+		)
 		// Log the enhanced error for telemetry while returning a simpler error for HTTP response
 		// This pattern allows detailed internal tracking without exposing complex error structures to API clients
 		_ = errors.Newf("invalid numeric value for numResults: %v", err).
@@ -278,9 +336,13 @@ func (c *Controller) parseNumResults(numResultsStr string) (int, error) {
 		return 0, fmt.Errorf("Invalid numeric value for numResults: %w", err) //nolint:staticcheck // matches test expectations
 	}
 
-	log.Printf("[DEBUG] GetDetections: Parsed numResults value: %d", numResults)
+	c.logDebugIfEnabled("GetDetections: Parsed numResults value",
+		logger.Int("value", numResults),
+	)
 	if numResults <= 0 {
-		log.Printf("[DEBUG] GetDetections: Zero or negative numResults value: %d", numResults)
+		c.logDebugIfEnabled("GetDetections: Zero or negative numResults value",
+			logger.Int("value", numResults),
+		)
 		// Log the enhanced error for telemetry while returning a simpler error for HTTP response
 		// This pattern allows detailed internal tracking without exposing complex error structures to API clients
 		_ = errors.New(errors.NewStd("numResults must be greater than zero")).
@@ -292,8 +354,10 @@ func (c *Controller) parseNumResults(numResultsStr string) (int, error) {
 		return 0, errors.NewStd("numResults must be greater than zero")
 	}
 
-	if numResults > 1000 {
-		log.Printf("[DEBUG] GetDetections: Too large numResults value: %d", numResults)
+	if numResults > maxNumResults {
+		c.logDebugIfEnabled("GetDetections: Too large numResults value",
+			logger.Int("value", numResults),
+		)
 		// Log the enhanced error for telemetry while returning a simpler error for HTTP response
 		// This pattern allows detailed internal tracking without exposing complex error structures to API clients
 		_ = errors.New(errors.NewStd("numResults exceeds maximum allowed value (1000)")).
@@ -314,10 +378,15 @@ func (c *Controller) parseOffset(offsetStr string) (int, error) {
 		return 0, nil // Default value
 	}
 
-	log.Printf("[DEBUG] GetDetections: Raw offset string: '%s'", offsetStr)
+	c.logDebugIfEnabled("GetDetections: Raw offset string",
+		logger.String("value", offsetStr),
+	)
 	offset, err := strconv.Atoi(offsetStr)
 	if err != nil {
-		log.Printf("[DEBUG] GetDetections: Invalid offset string '%s', error: %v", offsetStr, err)
+		c.logDebugIfEnabled("GetDetections: Invalid offset string",
+			logger.String("value", offsetStr),
+			logger.Error(err),
+		)
 		// Log the enhanced error for telemetry
 		_ = errors.Newf("invalid numeric value for offset: %v", err).
 			Component("api").
@@ -328,9 +397,13 @@ func (c *Controller) parseOffset(offsetStr string) (int, error) {
 		return 0, fmt.Errorf("Invalid numeric value for offset: %w", err) //nolint:staticcheck // matches test expectations
 	}
 
-	log.Printf("[DEBUG] GetDetections: Parsed offset value: %d", offset)
+	c.logDebugIfEnabled("GetDetections: Parsed offset value",
+		logger.Int("value", offset),
+	)
 	if offset < 0 {
-		log.Printf("[DEBUG] GetDetections: Negative offset value: %d", offset)
+		c.logDebugIfEnabled("GetDetections: Negative offset value",
+			logger.Int("value", offset),
+		)
 		// Log the enhanced error for telemetry
 		_ = errors.New(errors.NewStd("offset cannot be negative")).
 			Component("api").
@@ -343,7 +416,9 @@ func (c *Controller) parseOffset(offsetStr string) (int, error) {
 
 	const maxOffset = 1000000
 	if offset > maxOffset {
-		log.Printf("[DEBUG] GetDetections: Too large offset value: %d", offset)
+		c.logDebugIfEnabled("GetDetections: Too large offset value",
+			logger.Int("value", offset),
+		)
 		// Log the enhanced error for telemetry
 		_ = errors.Newf("offset exceeds maximum allowed value (%d)", maxOffset).
 			Component("api").
@@ -363,45 +438,39 @@ func (c *Controller) GetDetections(ctx echo.Context) error {
 	// Parse and validate query parameters
 	params, err := c.parseDetectionQueryParams(ctx)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to parse query parameters",
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to parse query parameters",
+			logger.Error(err),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
 	// Log the retrieval attempt
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieving detections",
-			"queryType", params.QueryType,
-			"date", params.Date,
-			"hour", params.Hour,
-			"duration", params.Duration,
-			"species", params.Species,
-			"search", params.Search,
-			"start_date", params.StartDate,
-			"end_date", params.EndDate,
-			"limit", params.NumResults,
-			"offset", params.Offset,
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Retrieving detections",
+		logger.String("queryType", params.QueryType),
+		logger.String("date", params.Date),
+		logger.String("hour", params.Hour),
+		logger.Int("duration", params.Duration),
+		logger.String("species", params.Species),
+		logger.String("search", params.Search),
+		logger.String("start_date", params.StartDate),
+		logger.String("end_date", params.EndDate),
+		logger.Int("limit", params.NumResults),
+		logger.Int("offset", params.Offset),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	// Get notes based on query type
 	notes, totalResults, err := c.getDetectionsByQueryType(params)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to retrieve detections",
-				"queryType", params.QueryType,
-				"error", err.Error(),
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to retrieve detections",
+			logger.String("queryType", params.QueryType),
+			logger.Error(err),
+			logger.String("path", ctx.Request().URL.Path),
+			logger.String("ip", ctx.RealIP()),
+		)
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
@@ -412,17 +481,15 @@ func (c *Controller) GetDetections(ctx echo.Context) error {
 	response := c.createPaginatedResponse(detections, totalResults, params.NumResults, params.Offset)
 
 	// Log the successful response
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Detections retrieved successfully",
-			"queryType", params.QueryType,
-			"count", len(detections),
-			"total", response.Total,
-			"pages", response.TotalPages,
-			"currentPage", response.CurrentPage,
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
+	c.logInfoIfEnabled("Detections retrieved successfully",
+		logger.String("queryType", params.QueryType),
+		logger.Int("count", len(detections)),
+		logger.Int64("total", response.Total),
+		logger.Int("pages", response.TotalPages),
+		logger.Int("currentPage", response.CurrentPage),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
 
 	return ctx.JSON(http.StatusOK, response)
 }
@@ -485,90 +552,126 @@ func (c *Controller) noteToDetectionResponse(note *datastore.Note, includeWeathe
 		Locked:         note.Locked,
 	}
 
-	// Add species tracking metadata if processor has tracker
-	if c.Processor != nil && c.Processor.NewSpeciesTracker != nil {
-		status := c.Processor.NewSpeciesTracker.GetSpeciesStatus(note.ScientificName, time.Now())
-		detection.IsNewSpecies = status.IsNew
-		detection.DaysSinceFirstSeen = status.DaysSinceFirst
-		
-		// Multi-period tracking metadata
-		detection.IsNewThisYear = status.IsNewThisYear
-		detection.IsNewThisSeason = status.IsNewThisSeason
-		detection.DaysThisYear = status.DaysThisYear
-		detection.DaysThisSeason = status.DaysThisSeason
-		detection.CurrentSeason = status.CurrentSeason
-	}
-
-	// Handle verification status
+	c.applySpeciesTrackingMetadata(&detection, note.ScientificName)
 	detection.Verified = c.mapVerificationStatus(note.Verified)
+	detection.Comments = extractNoteComments(note.Comments)
 
-	// Get comments if any
-	if len(note.Comments) > 0 {
-		comments := make([]string, 0, len(note.Comments))
-		for _, comment := range note.Comments {
-			comments = append(comments, comment.Entry)
-		}
-		detection.Comments = comments
-	}
-
-	// Add weather and time of day if requested
 	if includeWeather {
-		// Parse detection time
-		// IMPORTANT: Database stores local time strings, parse as local time
-		detectionTimeStr := note.Date + " " + note.Time
-		detectionTime, err := time.ParseInLocation("2006-01-02 15:04:05", detectionTimeStr, time.Local)
-		if err == nil {
-			// Calculate time of day
-			if c.SunCalc != nil {
-				sunTimes, err := c.SunCalc.GetSunEventTimes(detectionTime)
-				if err == nil {
-					detection.TimeOfDay = calculateTimeOfDay(detectionTime, &sunTimes)
-				}
-			}
-
-			// Get weather data
-			if weatherCache != nil {
-				// Check if we have weather data for this date in cache
-				if _, exists := weatherCache[note.Date]; !exists {
-					// Fetch weather data for this date
-					hourlyWeather, err := c.DS.GetHourlyWeather(note.Date)
-					if err == nil {
-						weatherCache[note.Date] = hourlyWeather
-					}
-				}
-
-				// Find closest weather data
-				if weatherData, exists := weatherCache[note.Date]; exists && len(weatherData) > 0 {
-					closestWeather := c.findClosestHourlyWeather(detectionTime, weatherData)
-					if closestWeather.WeatherIcon != "" {
-						detection.Weather = &WeatherInfo{
-							WeatherIcon: closestWeather.WeatherIcon,
-							WeatherMain: closestWeather.WeatherMain,
-							Description: closestWeather.WeatherDesc,
-							Temperature: closestWeather.Temperature,
-							WindSpeed:   closestWeather.WindSpeed,
-							WindGust:    closestWeather.WindGust,
-							Humidity:    closestWeather.Humidity,
-							Units:       c.getWeatherUnits(),
-						}
-					}
-				}
-			}
-		}
+		c.populateWeatherData(&detection, note, weatherCache)
 	}
 
 	return detection
 }
 
+// applySpeciesTrackingMetadata adds species tracking info to detection response
+func (c *Controller) applySpeciesTrackingMetadata(detection *DetectionResponse, scientificName string) {
+	if c.Processor == nil || c.Processor.NewSpeciesTracker == nil {
+		return
+	}
+	status := c.Processor.NewSpeciesTracker.GetSpeciesStatus(scientificName, time.Now())
+	detection.IsNewSpecies = status.IsNew
+	detection.DaysSinceFirstSeen = status.DaysSinceFirst
+	detection.IsNewThisYear = status.IsNewThisYear
+	detection.IsNewThisSeason = status.IsNewThisSeason
+	detection.DaysThisYear = status.DaysThisYear
+	detection.DaysThisSeason = status.DaysThisSeason
+	detection.CurrentSeason = status.CurrentSeason
+}
+
+// extractNoteComments converts datastore comments to API response format
+func extractNoteComments(noteComments []datastore.NoteComment) []CommentResponse {
+	if len(noteComments) == 0 {
+		return nil
+	}
+	comments := make([]CommentResponse, 0, len(noteComments))
+	for _, comment := range noteComments {
+		comments = append(comments, CommentResponse{
+			ID:        comment.ID,
+			Entry:     comment.Entry,
+			CreatedAt: comment.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: comment.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+	return comments
+}
+
+// populateWeatherData adds weather and time of day info to detection response
+func (c *Controller) populateWeatherData(detection *DetectionResponse, note *datastore.Note, weatherCache map[string][]datastore.HourlyWeather) {
+	// Parse detection time (database stores local time strings)
+	detectionTimeStr := note.Date + " " + note.Time
+	detectionTime, err := time.ParseInLocation("2006-01-02 15:04:05", detectionTimeStr, time.Local)
+	if err != nil {
+		return
+	}
+
+	detection.TimeOfDay = c.calculateDetectionTimeOfDay(detectionTime)
+	detection.Weather = c.getWeatherForDetectionTime(detectionTime, note.Date, weatherCache)
+}
+
+// calculateDetectionTimeOfDay calculates time of day based on sun position
+func (c *Controller) calculateDetectionTimeOfDay(detectionTime time.Time) string {
+	if c.SunCalc == nil {
+		return ""
+	}
+	sunTimes, err := c.SunCalc.GetSunEventTimes(detectionTime)
+	if err != nil {
+		return ""
+	}
+	return calculateTimeOfDay(detectionTime, &sunTimes)
+}
+
+// getWeatherForDetectionTime retrieves weather data for a detection time
+func (c *Controller) getWeatherForDetectionTime(detectionTime time.Time, date string, weatherCache map[string][]datastore.HourlyWeather) *WeatherInfo {
+	if weatherCache == nil {
+		return nil
+	}
+
+	// Ensure weather data is cached for this date
+	c.ensureWeatherCached(date, weatherCache)
+
+	// Find and return closest weather data
+	weatherData, exists := weatherCache[date]
+	if !exists || len(weatherData) == 0 {
+		return nil
+	}
+
+	closestWeather := c.findClosestHourlyWeather(detectionTime, weatherData)
+	if closestWeather.WeatherIcon == "" {
+		return nil
+	}
+
+	return &WeatherInfo{
+		WeatherIcon: closestWeather.WeatherIcon,
+		WeatherMain: closestWeather.WeatherMain,
+		Description: closestWeather.WeatherDesc,
+		Temperature: closestWeather.Temperature,
+		WindSpeed:   closestWeather.WindSpeed,
+		WindGust:    closestWeather.WindGust,
+		Humidity:    closestWeather.Humidity,
+		Units:       c.getWeatherUnits(),
+	}
+}
+
+// ensureWeatherCached fetches weather data for a date if not already cached
+func (c *Controller) ensureWeatherCached(date string, weatherCache map[string][]datastore.HourlyWeather) {
+	if _, exists := weatherCache[date]; exists {
+		return
+	}
+	hourlyWeather, err := c.DS.GetHourlyWeather(date)
+	if err == nil {
+		weatherCache[date] = hourlyWeather
+	}
+}
+
 // mapVerificationStatus maps the database verification status to API response format
 func (c *Controller) mapVerificationStatus(status string) string {
 	switch status {
-	case "correct":
-		return "correct"
-	case "false_positive":
-		return "false_positive"
+	case VerificationStatusCorrect:
+		return VerificationStatusCorrect
+	case VerificationStatusFalsePositive:
+		return VerificationStatusFalsePositive
 	default:
-		return "unverified"
+		return VerificationStatusUnverified
 	}
 }
 
@@ -604,29 +707,25 @@ func (c *Controller) getHourlyDetections(date, hour string, duration, numResults
 	// If not in cache, query the database
 	notes, err := c.DS.GetHourlyDetections(date, hour, duration, numResults, offset)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to get hourly detections",
-				"date", date,
-				"hour", hour,
-				"duration", duration,
-				"limit", numResults,
-				"offset", offset,
-				"error", err.Error(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to get hourly detections",
+			logger.String("date", date),
+			logger.String("hour", hour),
+			logger.Int("duration", duration),
+			logger.Int("limit", numResults),
+			logger.Int("offset", offset),
+			logger.Error(err),
+		)
 		return nil, 0, err
 	}
 
 	totalCount, err := c.DS.CountHourlyDetections(date, hour, duration)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to count hourly detections",
-				"date", date,
-				"hour", hour,
-				"duration", duration,
-				"error", err.Error(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to count hourly detections",
+			logger.String("date", date),
+			logger.String("hour", hour),
+			logger.Int("duration", duration),
+			logger.Error(err),
+		)
 		return nil, 0, err
 	}
 
@@ -636,15 +735,13 @@ func (c *Controller) getHourlyDetections(date, hour string, duration, numResults
 		Total int64
 	}{notes, totalCount}, cache.DefaultExpiration)
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved hourly detections",
-			"date", date,
-			"hour", hour,
-			"duration", duration,
-			"count", len(notes),
-			"total", totalCount,
-		)
-	}
+	c.logInfoIfEnabled("Retrieved hourly detections",
+		logger.String("date", date),
+		logger.String("hour", hour),
+		logger.Int("duration", duration),
+		logger.Int("count", len(notes)),
+		logger.Int64("total", totalCount),
+	)
 
 	return notes, totalCount, nil
 }
@@ -666,31 +763,27 @@ func (c *Controller) getSpeciesDetections(species, date, hour string, duration, 
 	// If not in cache, query the database
 	notes, err := c.DS.SpeciesDetections(species, date, hour, duration, false, numResults, offset)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to get species detections",
-				"species", species,
-				"date", date,
-				"hour", hour,
-				"duration", duration,
-				"limit", numResults,
-				"offset", offset,
-				"error", err.Error(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to get species detections",
+			logger.String("species", species),
+			logger.String("date", date),
+			logger.String("hour", hour),
+			logger.Int("duration", duration),
+			logger.Int("limit", numResults),
+			logger.Int("offset", offset),
+			logger.Error(err),
+		)
 		return nil, 0, err
 	}
 
 	totalCount, err := c.DS.CountSpeciesDetections(species, date, hour, duration)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to count species detections",
-				"species", species,
-				"date", date,
-				"hour", hour,
-				"duration", duration,
-				"error", err.Error(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to count species detections",
+			logger.String("species", species),
+			logger.String("date", date),
+			logger.String("hour", hour),
+			logger.Int("duration", duration),
+			logger.Error(err),
+		)
 		return nil, 0, err
 	}
 
@@ -700,161 +793,102 @@ func (c *Controller) getSpeciesDetections(species, date, hour string, duration, 
 		Total int64
 	}{notes, totalCount}, cache.DefaultExpiration)
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved species detections",
-			"species", species,
-			"date", date,
-			"hour", hour,
-			"duration", duration,
-			"count", len(notes),
-			"total", totalCount,
-		)
-	}
+	c.logInfoIfEnabled("Retrieved species detections",
+		logger.String("species", species),
+		logger.String("date", date),
+		logger.String("hour", hour),
+		logger.Int("duration", duration),
+		logger.Int("count", len(notes)),
+		logger.Int64("total", totalCount),
+	)
 
 	return notes, totalCount, nil
 }
 
 // getSearchDetectionsAdvanced handles advanced search with filters
 func (c *Controller) getSearchDetectionsAdvanced(params *detectionQueryParams) ([]datastore.Note, int64, error) {
-	// Parse advanced filters from query parameters
-	filters := datastore.AdvancedSearchFilters{
-		TextQuery:     params.Search,
-		Limit:         params.NumResults,
-		Offset:        params.Offset,
-		SortAscending: false, // Default to descending
-	}
-
-	// Parse confidence filter
-	if confidenceParam := params.Confidence; confidenceParam != "" {
-		// Parse operator and value (e.g., ">85", ">=90")
-		var operator string
-		var value string
-
-		switch {
-		case strings.HasPrefix(confidenceParam, ">="):
-			operator = ">="
-			value = confidenceParam[2:]
-		case strings.HasPrefix(confidenceParam, "<="):
-			operator = "<="
-			value = confidenceParam[2:]
-		case strings.HasPrefix(confidenceParam, ">"):
-			operator = ">"
-			value = confidenceParam[1:]
-		case strings.HasPrefix(confidenceParam, "<"):
-			operator = "<"
-			value = confidenceParam[1:]
-		default:
-			operator = "="
-			value = confidenceParam
-		}
-
-		if confValue, err := strconv.ParseFloat(value, 64); err == nil {
-			filters.Confidence = &datastore.ConfidenceFilter{
-				Operator: operator,
-				Value:    confValue / 100.0, // Convert percentage to decimal
-			}
-		}
-	}
-
-	// Parse time of day filter
-	if timeOfDay := params.TimeOfDay; timeOfDay != "" {
-		filters.TimeOfDay = []string{timeOfDay}
-	}
-
-	// Parse hour filter (from hourRange parameter or hour parameter)
-	hourParam := params.HourRange
-	if hourParam == "" {
-		hourParam = params.Hour
-	}
-
-	if hourParam != "" {
-		if strings.Contains(hourParam, "-") {
-			// Range format: "6-9"
-			parts := strings.Split(hourParam, "-")
-			if len(parts) == 2 {
-				if start, err := strconv.Atoi(parts[0]); err == nil {
-					if end, err := strconv.Atoi(parts[1]); err == nil {
-						filters.Hour = &datastore.HourFilter{
-							Start: start,
-							End:   end,
-						}
-					}
-				}
-			}
-		} else {
-			// Single hour
-			if hourVal, err := strconv.Atoi(hourParam); err == nil {
-				filters.Hour = &datastore.HourFilter{
-					Start: hourVal,
-					End:   hourVal,
-				}
-			}
-		}
-	}
-
-	// Parse date range
-	if params.Date != "" {
-		// Handle date shortcuts
-		if date, err := datastore.ParseDateShortcut(params.Date); err == nil {
-			filters.DateRange = &datastore.DateRange{
-				Start: date,
-				End:   date.AddDate(0, 0, 1).Add(-time.Second), // End of day
-			}
-		}
-	} else if params.StartDate != "" && params.EndDate != "" {
-		// Explicit date range
-		if start, err := time.Parse("2006-01-02", params.StartDate); err == nil {
-			if end, err := time.Parse("2006-01-02", params.EndDate); err == nil {
-				filters.DateRange = &datastore.DateRange{
-					Start: start,
-					End:   end.AddDate(0, 0, 1).Add(-time.Second), // End of day
-				}
-			}
-		}
-	}
-
-	// Parse species filter
-	if params.Species != "" {
-		filters.Species = []string{params.Species}
-	}
-
-	// Parse verified filter
-	if params.Verified != "" {
-		verified := params.Verified == "true" || params.Verified == "human"
-		filters.Verified = &verified
-	}
-
-	// Parse locked filter
-	if params.Locked != "" {
-		locked := params.Locked == "true"
-		filters.Locked = &locked
-	}
-
-	// Parse location filter
-	if params.Location != "" {
-		filters.Location = []string{params.Location}
-	}
+	filters := c.buildAdvancedSearchFilters(params)
 
 	// Use the advanced search method
 	notes, totalCount, err := c.DS.SearchNotesAdvanced(&filters)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to perform advanced search",
-				"filters", fmt.Sprintf("%+v", filters),
-				"error", err.Error(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to perform advanced search",
+			logger.String("filters", fmt.Sprintf("%+v", filters)),
+			logger.Error(err),
+		)
 		return nil, 0, err
 	}
 
-	// Cache the results
-	cacheKey := fmt.Sprintf("adv_search:%s:%d:%d", params.Search, params.NumResults, params.Offset)
-	c.detectionCache.Set(cacheKey, struct {
+	// Cache the results with key that includes all filter parameters
+	c.detectionCache.Set(params.advancedSearchCacheKey(), struct {
 		Notes []datastore.Note
 		Total int64
 	}{notes, totalCount}, cache.DefaultExpiration)
 
 	return notes, totalCount, nil
+}
+
+// buildAdvancedSearchFilters constructs search filters from query parameters
+func (c *Controller) buildAdvancedSearchFilters(params *detectionQueryParams) datastore.AdvancedSearchFilters {
+	filters := datastore.AdvancedSearchFilters{
+		TextQuery:     params.Search,
+		Limit:         params.NumResults,
+		Offset:        params.Offset,
+		SortAscending: false,
+	}
+
+	// Apply confidence filter using shared helper
+	if confFilter := parseConfidenceFilter(params.Confidence); confFilter != nil {
+		filters.Confidence = &datastore.ConfidenceFilter{
+			Operator: confFilter.Operator,
+			Value:    confFilter.Value,
+		}
+	}
+
+	// Apply time of day filter
+	if params.TimeOfDay != "" {
+		filters.TimeOfDay = []string{params.TimeOfDay}
+	}
+
+	// Apply hour filter using shared helper
+	hourParam := params.HourRange
+	if hourParam == "" {
+		hourParam = params.Hour
+	}
+	if hourFilter := parseHourFilter(hourParam); hourFilter != nil {
+		filters.Hour = &datastore.HourFilter{
+			Start: hourFilter.Start,
+			End:   hourFilter.End,
+		}
+	}
+
+	// Apply date range filter using shared helper
+	if dateRange := parseDateRangeFilter(params.Date, params.StartDate, params.EndDate); dateRange != nil {
+		filters.DateRange = &datastore.DateRange{
+			Start: dateRange.Start,
+			End:   dateRange.End,
+		}
+	}
+
+	// Apply simple string filters
+	if params.Species != "" {
+		filters.Species = []string{params.Species}
+	}
+	if params.Location != "" {
+		filters.Location = []string{params.Location}
+	}
+
+	// Apply boolean filters
+	if params.Verified != "" {
+		verified := params.Verified == QueryValueTrue || params.Verified == "human"
+		filters.Verified = &verified
+	}
+	if params.Locked != "" {
+		locked := params.Locked == QueryValueTrue
+		filters.Locked = &locked
+	}
+
+	return filters
 }
 
 // getSearchDetections handles search query type logic
@@ -874,25 +908,21 @@ func (c *Controller) getSearchDetections(search string, numResults, offset int) 
 	// If not in cache, query the database
 	notes, err := c.DS.SearchNotes(search, false, numResults, offset)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to search notes",
-				"query", search,
-				"limit", numResults,
-				"offset", offset,
-				"error", err.Error(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to search notes",
+			logger.String("query", search),
+			logger.Int("limit", numResults),
+			logger.Int("offset", offset),
+			logger.Error(err),
+		)
 		return nil, 0, err
 	}
 
 	totalCount, err := c.DS.CountSearchResults(search)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to count search results",
-				"query", search,
-				"error", err.Error(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to count search results",
+			logger.String("query", search),
+			logger.Error(err),
+		)
 		return nil, 0, err
 	}
 
@@ -902,13 +932,11 @@ func (c *Controller) getSearchDetections(search string, numResults, offset int) 
 		Total int64
 	}{notes, totalCount}, cache.DefaultExpiration)
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved search results",
-			"query", search,
-			"count", len(notes),
-			"total", totalCount,
-		)
-	}
+	c.logInfoIfEnabled("Retrieved search results",
+		logger.String("query", search),
+		logger.Int("count", len(notes)),
+		logger.Int64("total", totalCount),
+	)
 
 	return notes, totalCount, nil
 }
@@ -930,13 +958,11 @@ func (c *Controller) getAllDetections(numResults, offset int) ([]datastore.Note,
 	// Use the datastore.SearchNotes method with an empty query to get all notes
 	notes, err := c.DS.SearchNotes("", false, numResults, offset)
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("Failed to get all detections",
-				"limit", numResults,
-				"offset", offset,
-				"error", err.Error(),
-			)
-		}
+		c.logErrorIfEnabled("Failed to get all detections",
+			logger.Int("limit", numResults),
+			logger.Int("offset", offset),
+			logger.Error(err),
+		)
 		return nil, 0, err
 	}
 
@@ -953,12 +979,10 @@ func (c *Controller) getAllDetections(numResults, offset int) ([]datastore.Note,
 		Total int64
 	}{notes, totalResults}, cache.DefaultExpiration)
 
-	if c.apiLogger != nil {
-		c.apiLogger.Info("Retrieved all detections",
-			"count", len(notes),
-			"total", totalResults,
-		)
-	}
+	c.logInfoIfEnabled("Retrieved all detections",
+		logger.Int("count", len(notes)),
+		logger.Int64("total", totalResults),
+	)
 
 	return notes, totalResults, nil
 }
@@ -988,7 +1012,7 @@ func (c *Controller) GetRecentDetections(ctx echo.Context) error {
 	}
 
 	// Check if weather data should be included
-	includeWeather := ctx.QueryParam("includeWeather") == "true"
+	includeWeather := ctx.QueryParam("includeWeather") == QueryValueTrue
 
 	notes, err := c.DS.GetLastDetections(limit)
 	if err != nil {
@@ -1080,20 +1104,9 @@ func (c *Controller) ReviewDetection(ctx echo.Context) error {
 		return c.HandleError(ctx, err, "Invalid request format", http.StatusBadRequest)
 	}
 
-	// If detection was already locked when modal opened, prevent review state change unless we're unlocking
-	if note.Locked {
-		return c.HandleError(ctx, fmt.Errorf("detection is locked"), "Detection is locked and status cannot be changed", http.StatusConflict)
-	}
-
-	// Check if the detection is locked in the database (race condition check)
-	isLocked, err := c.DS.IsNoteLocked(idStr)
-	if err != nil {
-		return c.HandleError(ctx, err, "Failed to check lock status", http.StatusInternalServerError)
-	}
-
-	// If became locked by another process, prevent modification
-	if isLocked {
-		return c.HandleError(ctx, fmt.Errorf("detection is locked"), "Detection is locked and status cannot be changed", http.StatusConflict)
+	// Check lock status (both in-memory and database for race condition)
+	if c.checkDetectionNotLocked(ctx, idStr, note.Locked) {
+		return nil // Response already handled by checkDetectionNotLocked
 	}
 
 	// Handle comment if provided
@@ -1106,20 +1119,14 @@ func (c *Controller) ReviewDetection(ctx echo.Context) error {
 	}
 
 	// Handle verification if provided
-	if req.Verified != "" {
-		var verified bool
-		switch req.Verified {
-		case "correct":
-			verified = true
-		case "false_positive":
-			verified = false
-		default:
-			return c.HandleError(ctx, fmt.Errorf("invalid verification status"), "Invalid verification status", http.StatusBadRequest)
-		}
+	verification, err := parseVerificationStatus(req.Verified)
+	if err != nil {
+		return c.HandleError(ctx, err, "Invalid verification status", http.StatusBadRequest)
+	}
 
+	if verification.IsSet {
 		// Save review using the datastore method for reviews
-		err = c.AddReview(note.ID, verified)
-		if err != nil {
+		if err := c.AddReview(note.ID, verification.Verified); err != nil {
 			return c.HandleError(ctx, err, fmt.Sprintf("Failed to update verification: %v", err), http.StatusInternalServerError)
 		}
 
@@ -1131,26 +1138,22 @@ func (c *Controller) ReviewDetection(ctx echo.Context) error {
 
 	// Handle lock/unlock request separately
 	if req.LockDetection != note.Locked {
-		if c.apiLogger != nil {
-			c.apiLogger.Info("Updating lock status",
-				"detection_id", idStr,
-				"current_locked", note.Locked,
-				"new_locked", req.LockDetection,
-				"ip", ctx.RealIP(),
-			)
-		}
+		c.logInfoIfEnabled("Updating lock status",
+			logger.String("detection_id", idStr),
+			logger.Bool("current_locked", note.Locked),
+			logger.Bool("new_locked", req.LockDetection),
+			logger.String("ip", ctx.RealIP()),
+		)
 
 		err = c.AddLock(note.ID, req.LockDetection)
 		if err != nil {
 			// Log the lock operation failure
-			if c.apiLogger != nil {
-				c.apiLogger.Error("Failed to update lock status",
-					"detection_id", idStr,
-					"attempted_lock_state", req.LockDetection,
-					"error", err.Error(),
-					"ip", ctx.RealIP(),
-				)
-			}
+			c.logErrorIfEnabled("Failed to update lock status",
+				logger.String("detection_id", idStr),
+				logger.Bool("attempted_lock_state", req.LockDetection),
+				logger.Error(err),
+				logger.String("ip", ctx.RealIP()),
+			)
 			return c.HandleError(ctx, err, fmt.Sprintf("Failed to update lock status: %v", err), http.StatusInternalServerError)
 		}
 	}
@@ -1168,16 +1171,24 @@ func (c *Controller) ReviewDetection(ctx echo.Context) error {
 func (c *Controller) LockDetection(ctx echo.Context) error {
 	idStr := ctx.Param("id")
 
-	// Use the shared lock helper without acquiring a lock
-	note, err := c.checkAndHandleLock(idStr, false)
-	if err != nil {
-		return ctx.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
-	}
-
-	// Parse request
+	// Parse request first to determine if we're locking or unlocking
 	req := &DetectionRequest{}
 	if err := ctx.Bind(req); err != nil {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request format"})
+	}
+
+	// Get the note to verify it exists
+	note, err := c.DS.Get(idStr)
+	if err != nil {
+		return ctx.JSON(http.StatusNotFound, map[string]string{"error": "Detection not found"})
+	}
+
+	// Only check lock status when trying to LOCK (not unlock)
+	// This allows unlocking a locked detection
+	if req.Locked {
+		if c.checkDetectionNotLocked(ctx, idStr, note.Locked) {
+			return nil // Response already handled by checkDetectionNotLocked
+		}
 	}
 
 	// Lock/unlock the detection
@@ -1197,7 +1208,20 @@ type IgnoreSpeciesRequest struct {
 	CommonName string `json:"common_name"`
 }
 
-// IgnoreSpecies adds a species to the ignored list
+// IgnoreSpeciesResponse represents the response for the ignore species endpoint
+type IgnoreSpeciesResponse struct {
+	CommonName string `json:"common_name"`
+	Action     string `json:"action"` // "added" or "removed"
+	IsExcluded bool   `json:"is_excluded"`
+}
+
+// ExcludedSpeciesResponse represents the response for the get excluded species endpoint
+type ExcludedSpeciesResponse struct {
+	Species []string `json:"species"`
+	Count   int      `json:"count"`
+}
+
+// IgnoreSpecies toggles a species in the ignored list (adds if not present, removes if present)
 func (c *Controller) IgnoreSpecies(ctx echo.Context) error {
 	// Parse request body
 	req := &IgnoreSpeciesRequest{}
@@ -1210,13 +1234,41 @@ func (c *Controller) IgnoreSpecies(ctx echo.Context) error {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "Missing species name"})
 	}
 
-	// Add to ignored species list
-	err := c.addSpeciesToIgnoredList(req.CommonName)
+	// Toggle the species in ignored list
+	action, isExcluded, err := c.toggleSpeciesInIgnoredList(req.CommonName)
 	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	return ctx.NoContent(http.StatusNoContent)
+	// Log the action
+	c.logInfoIfEnabled("Species exclusion toggled",
+		logger.String("species", req.CommonName),
+		logger.String("action", action),
+		logger.Bool("is_excluded", isExcluded),
+		logger.String("ip", ctx.RealIP()),
+	)
+
+	return ctx.JSON(http.StatusOK, IgnoreSpeciesResponse{
+		CommonName: req.CommonName,
+		Action:     action,
+		IsExcluded: isExcluded,
+	})
+}
+
+// GetExcludedSpecies returns the list of excluded species
+func (c *Controller) GetExcludedSpecies(ctx echo.Context) error {
+	settings := conf.GetSettings()
+
+	// Create a copy of the slice to avoid race conditions
+	c.speciesExcludeMutex.Lock()
+	species := make([]string, len(settings.Realtime.Species.Exclude))
+	copy(species, settings.Realtime.Species.Exclude)
+	c.speciesExcludeMutex.Unlock()
+
+	return ctx.JSON(http.StatusOK, ExcludedSpeciesResponse{
+		Species: species,
+		Count:   len(species),
+	})
 }
 
 // addToIgnoredSpecies handles the logic for adding species to the ignore list
@@ -1227,15 +1279,55 @@ func (c *Controller) addToIgnoredSpecies(verified, ignoreSpecies string) error {
 	return nil
 }
 
-// addSpeciesToIgnoredList adds a species to the ignore list with proper concurrency control.
-// It uses a mutex to ensure thread-safety when multiple requests try to modify the
-// excluded species list simultaneously. The function:
-// 1. Locks the controller's mutex to prevent concurrent modifications
-// 2. Gets the latest settings from the settings package
-// 3. Checks if the species is already in the excluded list
-// 4. If not excluded, creates a copy of the exclude list to avoid race conditions
-// 5. Adds the species to the new list and updates the settings
-// 6. Saves the settings using the package's thread-safe function
+// toggleSpeciesInIgnoredList toggles a species in the ignore list with proper concurrency control.
+// If the species is already excluded, it removes it. If not excluded, it adds it.
+// Returns the action taken ("added" or "removed"), the new excluded state, and any error.
+func (c *Controller) toggleSpeciesInIgnoredList(species string) (action string, isExcluded bool, err error) {
+	if species == "" {
+		return "", false, nil
+	}
+
+	// Use the controller's mutex to protect this operation
+	c.speciesExcludeMutex.Lock()
+	defer c.speciesExcludeMutex.Unlock()
+
+	// Access the latest settings using the settings accessor function
+	settings := conf.GetSettings()
+
+	// Check if species is already in the excluded list
+	wasExcluded := slices.Contains(settings.Realtime.Species.Exclude, species)
+
+	if wasExcluded {
+		// Remove from excluded list
+		newExcludeList := make([]string, 0, len(settings.Realtime.Species.Exclude)-1)
+		for _, s := range settings.Realtime.Species.Exclude {
+			if s != species {
+				newExcludeList = append(newExcludeList, s)
+			}
+		}
+		settings.Realtime.Species.Exclude = newExcludeList
+		action = "removed"
+		isExcluded = false
+	} else {
+		// Add to excluded list
+		newExcludeList := make([]string, len(settings.Realtime.Species.Exclude))
+		copy(newExcludeList, settings.Realtime.Species.Exclude)
+		newExcludeList = append(newExcludeList, species)
+		settings.Realtime.Species.Exclude = newExcludeList
+		action = "added"
+		isExcluded = true
+	}
+
+	// Save settings using the package function that handles concurrency
+	if err := conf.SaveSettings(); err != nil {
+		return "", wasExcluded, fmt.Errorf("failed to save settings: %w", err)
+	}
+
+	return action, isExcluded, nil
+}
+
+// addSpeciesToIgnoredList adds a species to the ignore list (used by review endpoint).
+// This is a simplified version that only adds, used when marking as false positive.
 func (c *Controller) addSpeciesToIgnoredList(species string) error {
 	if species == "" {
 		return nil
@@ -1364,10 +1456,10 @@ func calculateTimeOfDay(detectionTime time.Time, sunEvents *suncalc.SunEventTime
 	sunsetTime := sunEvents.Sunset.Format("15:04:05")
 
 	// Define sunrise/sunset window (30 minutes before and after)
-	sunriseStart := sunEvents.Sunrise.Add(-30 * time.Minute).Format("15:04:05")
-	sunriseEnd := sunEvents.Sunrise.Add(30 * time.Minute).Format("15:04:05")
-	sunsetStart := sunEvents.Sunset.Add(-30 * time.Minute).Format("15:04:05")
-	sunsetEnd := sunEvents.Sunset.Add(30 * time.Minute).Format("15:04:05")
+	sunriseStart := sunEvents.Sunrise.Add(-sunEventWindowMinutes * time.Minute).Format("15:04:05")
+	sunriseEnd := sunEvents.Sunrise.Add(sunEventWindowMinutes * time.Minute).Format("15:04:05")
+	sunsetStart := sunEvents.Sunset.Add(-sunEventWindowMinutes * time.Minute).Format("15:04:05")
+	sunsetEnd := sunEvents.Sunset.Add(sunEventWindowMinutes * time.Minute).Format("15:04:05")
 
 	switch {
 	case detTime >= sunriseStart && detTime <= sunriseEnd:
@@ -1381,22 +1473,23 @@ func calculateTimeOfDay(detectionTime time.Time, sunEvents *suncalc.SunEventTime
 	}
 }
 
-// getWeatherUnits returns the weather units based on the provider and configuration
+// getWeatherUnits returns the temperature display unit based on user preference.
+// All temperatures are stored in Celsius internally; this determines display format.
+// Returns "imperial" for Fahrenheit or "metric" for Celsius to match frontend expectations.
 func (c *Controller) getWeatherUnits() string {
 	// Read settings with mutex
 	c.settingsMutex.RLock()
 	defer c.settingsMutex.RUnlock()
 
-	// Check the weather provider
-	switch c.Settings.Realtime.Weather.Provider {
-	case "openweather":
-		// Return the configured units for OpenWeather
-		return c.Settings.Realtime.Weather.OpenWeather.Units
-	case "yrno":
-		// yr.no always provides metric units
-		return "metric"
+	// Use dashboard temperature unit preference for display
+	// All temperatures are now stored in Celsius internally
+	switch c.Settings.Realtime.Dashboard.TemperatureUnit {
+	case conf.TemperatureUnitFahrenheit:
+		return "imperial"
+	case conf.TemperatureUnitCelsius:
+		return WeatherUnitMetric
 	default:
-		// Default to metric if provider is unknown
-		return "metric"
+		// Default to Celsius if not set
+		return WeatherUnitMetric
 	}
 }

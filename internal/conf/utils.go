@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +16,13 @@ import (
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
+)
+
+// OS name constants for runtime.GOOS comparisons.
+const (
+	osLinux   = "linux"
+	osWindows = "windows"
 )
 
 // getDefaultConfigPaths returns a list of default configuration paths for the current operating system.
@@ -46,7 +52,7 @@ func GetDefaultConfigPaths() ([]string, error) {
 
 	// Define default paths based on the operating system.
 	switch runtime.GOOS {
-	case "windows":
+	case osWindows:
 		// For Windows, use the executable directory and the AppData Roaming directory.
 		configPaths = []string{
 			exeDir,
@@ -108,7 +114,7 @@ func GetBasePath(path string) string {
 	// Check if the directory exists.
 	if _, err := os.Stat(basePath); os.IsNotExist(err) {
 		// Attempt to create the directory if it doesn't exist.
-		if err := os.MkdirAll(basePath, 0o755); err != nil {
+		if err := os.MkdirAll(basePath, 0o750); err != nil {
 			fmt.Printf("failed to create directory '%s': %v\n", basePath, err)
 			// Note: In a robust application, you might want to handle this error more gracefully.
 		}
@@ -149,7 +155,7 @@ func GetHLSDirectory() (string, error) {
 	}
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll(absPath, 0o755); err != nil {
+	if err := os.MkdirAll(absPath, 0o750); err != nil {
 		return "", errors.New(err).
 			Category(errors.CategoryFileIO).
 			Context("operation", "hls-create-directory").
@@ -166,7 +172,7 @@ func PrintUserInfo() {
 	var audioMember = false
 
 	// Check if the operating system is Linux
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == osLinux {
 		// Get current user information
 		currentUser, err := user.Current()
 		if err != nil {
@@ -182,7 +188,7 @@ func PrintUserInfo() {
 		// Get group memberships for the current user
 		groupIDs, err := currentUser.GroupIds()
 		if err != nil {
-			log.Printf("Failed to get group memberships: %v\n", err)
+			GetLogger().Warn("Failed to get group memberships", logger.Error(err))
 			return
 		}
 
@@ -191,7 +197,7 @@ func PrintUserInfo() {
 			// Look up the group information for each group ID
 			group, err := user.LookupGroupId(gid)
 			if err != nil {
-				log.Printf("Failed to lookup group for ID %s: %v\n", gid, err)
+				GetLogger().Warn("Failed to lookup group", logger.String("gid", gid), logger.Error(err))
 				continue
 			}
 			// Uncomment the following line to print group information
@@ -205,8 +211,9 @@ func PrintUserInfo() {
 
 		// If the user is not a member of the 'audio' group, print an error message
 		if !audioMember {
-			log.Printf("ERROR: User '%s' is not member of audio group, add user to audio group by executing", currentUser.Username)
-			log.Println("sudo usermod -a -G audio", currentUser.Username)
+			GetLogger().Error("User is not member of audio group",
+				logger.String("username", currentUser.Username),
+				logger.String("fix_command", fmt.Sprintf("sudo usermod -a -G audio %s", currentUser.Username)))
 		}
 	}
 }
@@ -236,7 +243,7 @@ func RunningInContainer() bool {
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			log.Printf("Failed to close /proc/self/cgroup: %v", err)
+			GetLogger().Warn("Failed to close /proc/self/cgroup", logger.Error(err))
 		}
 	}()
 
@@ -253,7 +260,7 @@ func RunningInContainer() bool {
 
 // isLinuxArm64 checks if the operating system is Linux and the architecture is arm64.
 func IsLinuxArm64() bool {
-	return runtime.GOOS == "linux" && runtime.GOARCH == "arm64"
+	return runtime.GOOS == osLinux && runtime.GOARCH == "arm64"
 }
 
 // getBoardModel reads the SBC board model from the device tree.
@@ -347,11 +354,6 @@ func ParseWeekday(day string) (time.Weekday, error) {
 	}
 }
 
-// GetRotationDay returns the time.Weekday representation of RotationDay
-func (lc *LogConfig) GetRotationDay() (time.Weekday, error) {
-	return ParseWeekday(lc.RotationDay)
-}
-
 // GetLocalTimezone returns the local time zone of the system.
 func GetLocalTimezone() (*time.Location, error) {
 	return time.Local, nil
@@ -368,7 +370,7 @@ func ConvertUTCToLocal(utcTime time.Time) (time.Time, error) {
 
 // GetFfmpegBinaryName returns the binary name for ffmpeg based on the current OS.
 func GetFfmpegBinaryName() string {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		return "ffmpeg.exe"
 	}
 	return "ffmpeg"
@@ -376,7 +378,7 @@ func GetFfmpegBinaryName() string {
 
 // GetSoxBinaryName returns the binary name for sox based on the current OS.
 func GetSoxBinaryName() string {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		return "sox.exe"
 	}
 	return "sox"
@@ -384,7 +386,7 @@ func GetSoxBinaryName() string {
 
 // GetFfprobeBinaryName returns the binary name for ffprobe based on the current OS.
 func GetFfprobeBinaryName() string {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		return "ffprobe.exe"
 	}
 	return "ffprobe"
@@ -415,7 +417,7 @@ func GetFfmpegVersion() (version string, major, minor int) {
 	}
 
 	// Execute ffmpeg -version
-	cmd := exec.Command(ffmpegPath, "-version")
+	cmd := exec.Command(ffmpegPath, "-version") //nolint:gosec // G204: ffmpegPath resolved via exec.LookPath()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", 0, 0
@@ -552,7 +554,7 @@ func IsSoxAvailable() (isAvailable bool, formats []string) {
 	}
 
 	// Execute SoX with the help flag to get its output
-	cmd := exec.Command(soxPath, "-h")
+	cmd := exec.Command(soxPath, "-h") //nolint:gosec // G204: soxPath resolved via exec.LookPath()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, nil // Failed to execute SoX
@@ -588,7 +590,9 @@ func ValidateToolPath(configuredPath, toolName string) (string, error) {
 			return configuredPath, nil
 		}
 		// If configured path is invalid, log a warning but still check PATH as a fallback
-		log.Printf("Warning: Configured path '%s' for tool '%s' is invalid or not found. Checking system PATH.", configuredPath, toolName)
+		GetLogger().Warn("Configured tool path invalid or not found, checking system PATH",
+			logger.String("configured_path", configuredPath),
+			logger.String("tool", toolName))
 	}
 
 	// If no configured path or the configured path was invalid, check the system PATH
@@ -622,23 +626,23 @@ func moveFile(src, dst string) error {
 		return fmt.Errorf("error resolving destination path: %w", err)
 	}
 
-	srcFile, err := os.Open(srcAbs)
+	srcFile, err := os.Open(srcAbs) //nolint:gosec // G304: srcAbs is filepath.Abs resolved path
 	if err != nil {
 		return fmt.Errorf("error opening source file: %w", err)
 	}
 	defer func() {
 		if err := srcFile.Close(); err != nil {
-			log.Printf("Failed to close source file: %v", err)
+			GetLogger().Warn("Failed to close source file", logger.Error(err))
 		}
 	}() // Ensure the source file is closed when we're done
 
-	dstFile, err := os.Create(dstAbs)
+	dstFile, err := os.Create(dstAbs) //nolint:gosec // G304: dstAbs is filepath.Abs resolved path
 	if err != nil {
 		return fmt.Errorf("error creating destination file: %w", err)
 	}
 	defer func() {
 		if err := dstFile.Close(); err != nil {
-			log.Printf("Failed to close destination file: %v", err)
+			GetLogger().Warn("Failed to close destination file", logger.Error(err))
 		}
 	}() // Ensure the destination file is closed when we're done
 
@@ -723,7 +727,7 @@ func resolveGatewayFromRoute() net.IP {
 	defer func() {
 		if err := file.Close(); err != nil {
 			// Log error but don't fail - this is a best-effort operation
-			log.Printf("warning: failed to close /proc/net/route: %v", err)
+			GetLogger().Warn("Failed to close /proc/net/route", logger.Error(err))
 		}
 	}()
 
@@ -783,7 +787,7 @@ func IsInHostSubnet(clientIP net.IP) bool {
 	// Get the host IP
 	hostIP, err := GetHostIP()
 	if err != nil {
-		log.Printf("Error getting host IP: %v", err)
+		GetLogger().Warn("Error getting host IP", logger.Error(err))
 		return false
 	}
 

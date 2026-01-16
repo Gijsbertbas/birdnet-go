@@ -3,23 +3,28 @@ package notification
 import (
 	"bytes"
 	"fmt"
-	"log/slog"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/events"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 type DetectionNotificationConsumer struct {
 	service *Service
-	logger  *slog.Logger
+	logger  logger.Logger
+	// speciesCooldowns tracks the last notification time for each species
+	speciesCooldowns map[string]time.Time
+	cooldownMu       sync.RWMutex
 }
 
 func NewDetectionNotificationConsumer(service *Service) *DetectionNotificationConsumer {
 	return &DetectionNotificationConsumer{
-		service: service,
-		logger:  service.logger,
+		service:          service,
+		logger:           service.logger,
+		speciesCooldowns: make(map[string]time.Time),
 	}
 }
 
@@ -44,80 +49,158 @@ func (c *DetectionNotificationConsumer) ProcessDetectionEvent(event events.Detec
 		return nil
 	}
 
-	var title, message string
-	var titleSet, messageSet bool
-	var templateData *TemplateData
-
+	// Get settings for filtering
 	settings := conf.GetSettings()
-	if settings != nil {
-		// Build base URL for links
-		baseURL := BuildBaseURL(settings.Security.Host, settings.WebServer.Port, settings.Security.AutoTLS)
 
-		// Create template data from event
-		templateData = NewTemplateData(event, baseURL, settings.Main.TimeAs24h)
-
-		// Render title template
-		titleTemplate := settings.Notification.Templates.NewSpecies.Title
-		if titleTemplate != "" {
-			var err error
-			title, err = renderTemplate("title", titleTemplate, templateData)
-			if err != nil {
-				c.logger.Error("failed to render title template, using default",
-					"error", err,
-					"template", titleTemplate,
-				)
-			} else {
-				titleSet = true
-			}
-		} else {
-			// Empty template means user wants no title
-			titleSet = true
+	// Check confidence threshold (if configured)
+	if settings != nil && settings.Notification.Push.MinConfidenceThreshold > 0 {
+		if event.GetConfidence() < settings.Notification.Push.MinConfidenceThreshold {
+			c.logger.Debug("detection below confidence threshold, skipping notification",
+				logger.String("species", event.GetSpeciesName()),
+				logger.Float64("confidence", event.GetConfidence()),
+				logger.Float64("threshold", settings.Notification.Push.MinConfidenceThreshold))
+			return nil
 		}
+	}
 
-		// Render message template
-		messageTemplate := settings.Notification.Templates.NewSpecies.Message
-		if messageTemplate != "" {
-			var err error
-			message, err = renderTemplate("message", messageTemplate, templateData)
-			if err != nil {
-				c.logger.Error("failed to render message template, using default",
-					"error", err,
-					"template", messageTemplate,
-				)
-			} else {
-				messageSet = true
-			}
-		} else {
-			// Empty template means user wants no message (unlikely but allowed)
-			messageSet = true
+	// Check species cooldown (if configured)
+	if settings != nil && settings.Notification.Push.SpeciesCooldownMinutes > 0 {
+		if c.isWithinCooldown(event.GetSpeciesName(), settings.Notification.Push.SpeciesCooldownMinutes) {
+			c.logger.Debug("species within cooldown period, skipping notification",
+				logger.String("species", event.GetSpeciesName()),
+				logger.Int("cooldownMinutes", settings.Notification.Push.SpeciesCooldownMinutes))
+			return nil
 		}
-	} else {
-		// Fallback: create template data with placeholder base URL when settings not available.
-		// This should only occur during:
-		// - Early startup before settings are fully initialized
-		// - Unit tests that don't initialize settings
-		// URLs will use "http://localhost" as fallback, indicating incomplete configuration.
-		// Detection notifications will still be created but with generic localhost URLs.
+	}
+
+	templateData := c.createTemplateData(event)
+	title, message := c.renderTitleAndMessage(event, templateData)
+	notification := c.buildDetectionNotification(event, title, message, templateData)
+
+	if err := c.service.store.Save(notification); err != nil {
+		c.logger.Error("failed to save new species notification",
+			logger.String("species", event.GetSpeciesName()),
+			logger.Error(err))
+		return fmt.Errorf("failed to save notification: %w", err)
+	}
+
+	c.service.broadcast(notification)
+
+	// Record cooldown after successful notification
+	if settings != nil && settings.Notification.Push.SpeciesCooldownMinutes > 0 {
+		c.recordCooldown(event.GetSpeciesName())
+	}
+
+	c.logger.Info("created new species notification",
+		logger.String("species", event.GetSpeciesName()),
+		logger.Float64("confidence", event.GetConfidence()),
+		logger.String("location", event.GetLocation()))
+
+	return nil
+}
+
+// isWithinCooldown checks if the species is still within the cooldown period.
+// Also performs lazy cleanup of expired cooldowns.
+// Uses a single write lock to ensure atomicity and prevent race conditions
+// between concurrent goroutines checking the same species.
+func (c *DetectionNotificationConsumer) isWithinCooldown(species string, cooldownMinutes int) bool {
+	cooldownDuration := time.Duration(cooldownMinutes) * time.Minute
+	now := time.Now()
+
+	c.cooldownMu.Lock()
+	defer c.cooldownMu.Unlock()
+
+	lastNotification, exists := c.speciesCooldowns[species]
+	if !exists {
+		return false
+	}
+
+	// Check if still within cooldown
+	if now.Sub(lastNotification) < cooldownDuration {
+		return true
+	}
+
+	// Cooldown expired, clean up entry
+	delete(c.speciesCooldowns, species)
+
+	return false
+}
+
+// recordCooldown records the current time as the last notification time for a species.
+func (c *DetectionNotificationConsumer) recordCooldown(species string) {
+	c.cooldownMu.Lock()
+	c.speciesCooldowns[species] = time.Now()
+	c.cooldownMu.Unlock()
+}
+
+// createTemplateData creates template data from event and settings.
+func (c *DetectionNotificationConsumer) createTemplateData(event events.DetectionEvent) *TemplateData {
+	settings := conf.GetSettings()
+	if settings == nil {
 		c.logger.Warn("Settings unavailable during detection notification, using localhost for URL fields",
-			"species", event.GetSpeciesName(),
-			"confidence", event.GetConfidence())
-		// Use localhost fallback and default 24h time format
-		templateData = NewTemplateData(event, "http://localhost", true)
+			logger.String("species", event.GetSpeciesName()),
+			logger.Float64("confidence", event.GetConfidence()))
+		return NewTemplateData(event, "http://localhost", true)
 	}
 
-	// Use defaults only if settings not available or template rendering failed
-	if !titleSet {
-		title = fmt.Sprintf("New Species Detected: %s", event.GetSpeciesName())
+	baseURL := settings.Security.GetBaseURL(settings.WebServer.Port)
+	return NewTemplateData(event, baseURL, settings.Main.TimeAs24h)
+}
+
+// renderTitleAndMessage renders title and message from templates, with fallbacks.
+func (c *DetectionNotificationConsumer) renderTitleAndMessage(event events.DetectionEvent, templateData *TemplateData) (title, message string) {
+	title = c.renderTemplateField("title", event, templateData)
+	message = c.renderTemplateField("message", event, templateData)
+	return title, message
+}
+
+// renderTemplateField renders a single template field (title or message) with fallback.
+func (c *DetectionNotificationConsumer) renderTemplateField(field string, event events.DetectionEvent, templateData *TemplateData) string {
+	settings := conf.GetSettings()
+	if settings == nil {
+		return c.getDefaultValue(field, event)
 	}
-	if !messageSet {
-		message = fmt.Sprintf(
-			"First detection of %s (%s) at %s",
+
+	var templateStr string
+	switch field {
+	case "title":
+		templateStr = settings.Notification.Templates.NewSpecies.Title
+	case "message":
+		templateStr = settings.Notification.Templates.NewSpecies.Message
+	}
+
+	// Empty template means user explicitly wants empty value
+	if templateStr == "" {
+		return ""
+	}
+
+	rendered, err := renderTemplate(field, templateStr, templateData)
+	if err != nil {
+		c.logger.Error("failed to render "+field+" template, using default",
+			logger.Error(err),
+			logger.String("template", templateStr))
+		return c.getDefaultValue(field, event)
+	}
+	return rendered
+}
+
+// getDefaultValue returns the default title or message for a detection event.
+func (c *DetectionNotificationConsumer) getDefaultValue(field string, event events.DetectionEvent) string {
+	switch field {
+	case "title":
+		return fmt.Sprintf("New Species Detected: %s", event.GetSpeciesName())
+	case "message":
+		return fmt.Sprintf("First detection of %s (%s) at %s",
 			event.GetSpeciesName(),
 			event.GetScientificName(),
-			event.GetLocation(),
-		)
+			event.GetLocation())
+	default:
+		return ""
 	}
+}
 
+// buildDetectionNotification creates a notification with all metadata.
+func (c *DetectionNotificationConsumer) buildDetectionNotification(event events.DetectionEvent, title, message string, templateData *TemplateData) *Notification {
 	notification := NewNotification(TypeDetection, PriorityHigh, title, message).
 		WithComponent("detection").
 		WithMetadata("species", event.GetSpeciesName()).
@@ -126,36 +209,19 @@ func (c *DetectionNotificationConsumer) ProcessDetectionEvent(event events.Detec
 		WithMetadata("location", event.GetLocation()).
 		WithMetadata("is_new_species", true).
 		WithMetadata("days_since_first_seen", event.GetDaysSinceFirstSeen()).
-		WithExpiry(24 * time.Hour)
+		WithExpiry(DefaultDetectionExpiry)
 
 	// Expose all TemplateData fields with bg_ prefix for use in provider templates
-	// See: https://github.com/tphakala/birdnet-go/issues/1457
 	notification = EnrichWithTemplateData(notification, templateData)
 
-	// Add note_id from event metadata if available for navigation to detection detail
+	// Add note_id from event metadata if available
 	if eventMetadata := event.GetMetadata(); eventMetadata != nil {
 		if noteID, ok := eventMetadata["note_id"]; ok {
 			notification = notification.WithMetadata("note_id", noteID)
 		}
 	}
 
-	if err := c.service.store.Save(notification); err != nil {
-		c.logger.Error("failed to save new species notification",
-			"species", event.GetSpeciesName(),
-			"error", err,
-		)
-		return fmt.Errorf("failed to save notification: %w", err)
-	}
-
-	c.service.broadcast(notification)
-
-	c.logger.Info("created new species notification",
-		"species", event.GetSpeciesName(),
-		"confidence", event.GetConfidence(),
-		"location", event.GetLocation(),
-	)
-
-	return nil
+	return notification
 }
 
 // RenderTemplate renders a Go template string with the provided data.

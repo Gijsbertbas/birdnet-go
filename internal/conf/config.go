@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,17 +88,16 @@ type SoundLevelSettings struct {
 }
 
 type AudioSettings struct {
-	Source          string             `yaml:"source" mapstructure:"source" json:"source"`                   // audio source to use for analysis
-	FfmpegPath      string             `yaml:"ffmpegpath" mapstructure:"ffmpegpath" json:"ffmpegPath"`       // path to ffmpeg, runtime value
-	FfmpegVersion   string             `yaml:"-" json:"ffmpegVersion,omitempty"`                             // ffmpeg version string, runtime value
-	FfmpegMajor     int                `yaml:"-" json:"ffmpegMajor,omitempty"`                               // ffmpeg major version number, runtime value
-	FfmpegMinor     int                `yaml:"-" json:"ffmpegMinor,omitempty"`                               // ffmpeg minor version number, runtime value
-	SoxPath         string             `yaml:"soxpath" mapstructure:"soxpath" json:"soxPath"`                // path to sox, runtime value
-	SoxAudioTypes   []string           `yaml:"-" json:"-"`                                                   // supported audio types of sox, runtime value
-	StreamTransport string             `json:"streamTransport"`                                              // preferred transport for audio streaming: "auto", "sse", or "ws"
-	Export          ExportSettings     `json:"export"`                                                       // export settings
-	SoundLevel      SoundLevelSettings `json:"soundLevel"`                                                   // sound level monitoring settings
-	UseAudioCore    bool               `yaml:"useaudiocore" mapstructure:"useaudiocore" json:"useAudioCore"` // true to use new audiocore package instead of myaudio
+	Source          string             `yaml:"source" mapstructure:"source" json:"source"`             // audio source to use for analysis
+	FfmpegPath      string             `yaml:"ffmpegpath" mapstructure:"ffmpegpath" json:"ffmpegPath"` // path to ffmpeg, runtime value
+	FfmpegVersion   string             `yaml:"-" json:"ffmpegVersion,omitempty"`                       // ffmpeg version string, runtime value
+	FfmpegMajor     int                `yaml:"-" json:"ffmpegMajor,omitempty"`                         // ffmpeg major version number, runtime value
+	FfmpegMinor     int                `yaml:"-" json:"ffmpegMinor,omitempty"`                         // ffmpeg minor version number, runtime value
+	SoxPath         string             `yaml:"soxpath" mapstructure:"soxpath" json:"soxPath"`          // path to sox, runtime value
+	SoxAudioTypes   []string           `yaml:"-" json:"-"`                                             // supported audio types of sox, runtime value
+	StreamTransport string             `json:"streamTransport"`                                        // preferred transport for audio streaming: "auto", "sse", or "ws"
+	Export          ExportSettings     `json:"export"`                                                 // export settings
+	SoundLevel      SoundLevelSettings `json:"soundLevel"`                                             // sound level monitoring settings
 
 	Equalizer EqualizerSettings `json:"equalizer"` // equalizer settings
 }
@@ -125,13 +124,19 @@ type Thumbnails struct {
 	FallbackPolicy string `json:"fallbackPolicy"` // fallback policy: "none", "all" - try all available providers if preferred fails
 }
 
+// Temperature unit constants for display preference
+const (
+	TemperatureUnitCelsius    = "celsius"
+	TemperatureUnitFahrenheit = "fahrenheit"
+)
+
 // Dashboard contains settings for the web dashboard.
 type Dashboard struct {
-	Thumbnails   Thumbnails           `json:"thumbnails"`       // thumbnails settings
-	SummaryLimit int                  `json:"summaryLimit"`     // limit for the number of species shown in the summary table
-	Locale       string               `json:"locale,omitempty"` // UI locale setting
-	NewUI        bool                 `json:"newUI"`            // Enable redirect from old HTMX UI to new Svelte UI
-	Spectrogram  SpectrogramPreRender `json:"spectrogram"`      // Spectrogram pre-rendering settings
+	Thumbnails      Thumbnails           `json:"thumbnails"`       // thumbnails settings
+	SummaryLimit    int                  `json:"summaryLimit"`     // limit for the number of species shown in the summary table
+	Locale          string               `json:"locale,omitempty"` // UI locale setting
+	Spectrogram     SpectrogramPreRender `json:"spectrogram"`      // Spectrogram pre-rendering settings
+	TemperatureUnit string               `json:"temperatureUnit"`  // display unit for temperature: "celsius" or "fahrenheit"
 }
 
 // Spectrogram generation mode constants
@@ -141,16 +146,35 @@ const (
 	SpectrogramModeUserRequested = "user-requested"
 )
 
+// Spectrogram style preset constants
+const (
+	SpectrogramStyleDefault          = "default"
+	SpectrogramStyleScientificDark   = "scientific_dark"
+	SpectrogramStyleHighContrastDark = "high_contrast_dark"
+	SpectrogramStyleScientific       = "scientific"
+)
+
+// Spectrogram dynamic range preset constants (dB values for Sox -z parameter).
+// Lower values increase contrast, making weak signals stand out better.
+// Higher values show more detail but with lower contrast.
+const (
+	SpectrogramDynamicRangeHighContrast = "80"  // High contrast - weak signals visible
+	SpectrogramDynamicRangeStandard     = "100" // Standard - balanced (default)
+	SpectrogramDynamicRangeExtended     = "120" // Extended - more detail, Sox default
+)
+
 // SpectrogramPreRender contains settings for spectrogram generation modes.
 // Three modes control when and how spectrograms are generated:
 //   - "auto": Generate on-demand when API is called (default, suitable for most systems)
 //   - "prerender": Background worker generates during audio clip save (continuous CPU usage)
 //   - "user-requested": Only generate when user clicks button in UI (zero automatic overhead)
 type SpectrogramPreRender struct {
-	Mode    string `json:"mode"    mapstructure:"mode"`    // Generation mode: "auto" (default), "prerender", "user-requested"
-	Enabled bool   `json:"enabled" mapstructure:"enabled"` // DEPRECATED: Use Mode instead. Kept for backward compatibility (true = "prerender", false = "auto")
-	Size    string `json:"size"    mapstructure:"size"`    // Default size for all modes (see recommendations below)
-	Raw     bool   `json:"raw"     mapstructure:"raw"`     // Generate raw spectrogram without axes/legend (default: true)
+	Mode         string `json:"mode"         mapstructure:"mode"`         // Generation mode: "auto" (default), "prerender", "user-requested"
+	Enabled      bool   `json:"enabled"      mapstructure:"enabled"`      // DEPRECATED: Use Mode instead. Kept for backward compatibility (true = "prerender", false = "auto")
+	Size         string `json:"size"         mapstructure:"size"`         // Default size for all modes (see recommendations below)
+	Raw          bool   `json:"raw"          mapstructure:"raw"`          // Generate raw spectrogram without axes/legend (default: true)
+	Style        string `json:"style"        mapstructure:"style"`        // Visual style preset: "default", "scientific_dark", "high_contrast_dark", "scientific"
+	DynamicRange string `json:"dynamicRange" mapstructure:"dynamicRange"` // Dynamic range in dB: "80" (high contrast), "100" (standard), "120" (extended)
 }
 
 // GetMode returns the effective spectrogram generation mode, handling backward compatibility.
@@ -270,6 +294,9 @@ type PushSettings struct {
 	HealthCheck    HealthCheckConfig    `json:"health_check" mapstructure:"health_check"`
 	RateLimiting   RateLimitingConfig   `json:"rate_limiting" mapstructure:"rate_limiting"`
 	Providers      []PushProviderConfig `json:"providers"`
+	// Detection filtering settings
+	MinConfidenceThreshold float64 `json:"minConfidenceThreshold" mapstructure:"min_confidence_threshold"` // 0.0-1.0, 0 = disabled
+	SpeciesCooldownMinutes int     `json:"speciesCooldownMinutes" mapstructure:"species_cooldown_minutes"` // 0 = disabled
 }
 
 // CircuitBreakerConfig holds circuit breaker configuration.
@@ -289,9 +316,9 @@ type HealthCheckConfig struct {
 
 // RateLimitingConfig holds rate limiting configuration.
 type RateLimitingConfig struct {
-	Enabled            bool `json:"enabled"`
-	RequestsPerMinute  int  `json:"requests_per_minute" mapstructure:"requests_per_minute"`
-	BurstSize          int  `json:"burst_size" mapstructure:"burst_size"`
+	Enabled           bool `json:"enabled"`
+	RequestsPerMinute int  `json:"requests_per_minute" mapstructure:"requests_per_minute"`
+	BurstSize         int  `json:"burst_size" mapstructure:"burst_size"`
 }
 
 // PushProviderConfig configures a single push provider instance.
@@ -315,11 +342,11 @@ type PushProviderConfig struct {
 
 // WebhookEndpointConfig configures a single webhook endpoint.
 type WebhookEndpointConfig struct {
-	URL     string                 `json:"url"`
-	Method  string                 `json:"method"`  // POST, PUT, PATCH (default: POST)
-	Headers map[string]string      `json:"headers"` // Custom HTTP headers
-	Timeout time.Duration          `json:"timeout"` // Per-endpoint timeout (default: use provider timeout)
-	Auth    WebhookAuthConfig      `json:"auth"`    // Authentication configuration
+	URL     string            `json:"url"`
+	Method  string            `json:"method"`  // POST, PUT, PATCH (default: POST)
+	Headers map[string]string `json:"headers"` // Custom HTTP headers
+	Timeout time.Duration     `json:"timeout"` // Per-endpoint timeout (default: use provider timeout)
+	Auth    WebhookAuthConfig `json:"auth"`    // Authentication configuration
 }
 
 // WebhookAuthConfig configures authentication for webhook requests.
@@ -330,7 +357,7 @@ type WebhookEndpointConfig struct {
 //
 // File fields take precedence over value fields when both are set.
 type WebhookAuthConfig struct {
-	Type   string `json:"type"`   // "none", "bearer", "basic", "custom"
+	Type string `json:"type"` // "none", "bearer", "basic", "custom"
 
 	// Bearer authentication
 	Token     string `json:"token"`      // Token value or ${ENV_VAR}
@@ -343,9 +370,9 @@ type WebhookAuthConfig struct {
 	PassFile string `json:"pass_file"` // Path to file containing password
 
 	// Custom header authentication
-	Header     string `json:"header"`       // Header name
-	Value      string `json:"value"`        // Header value or ${ENV_VAR}
-	ValueFile  string `json:"value_file"`   // Path to file containing header value
+	Header    string `json:"header"`     // Header name
+	Value     string `json:"value"`      // Header value or ${ENV_VAR}
+	ValueFile string `json:"value_file"` // Path to file containing header value
 }
 
 // PushFilterConfig limits which notifications a provider receives.
@@ -395,25 +422,49 @@ type RTSPHealthSettings struct {
 	MonitoringInterval   int `json:"monitoringInterval"`   // health check interval in seconds (default: 30)
 }
 
-// RTSPSettings contains settings for RTSP streaming.
-type RTSPSettings struct {
-	Transport        string             `json:"transport"`        // RTSP Transport Protocol
-	URLs             []string           `json:"urls"`             // RTSP stream URL
-	Health           RTSPHealthSettings `json:"health"`           // health monitoring settings
-	FFmpegParameters []string           `json:"ffmpegParameters"` // optional custom FFmpeg parameters
+// StreamType constants for supported streaming protocols
+const (
+	StreamTypeRTSP = "rtsp" // RTSP/RTSPS - IP cameras
+	StreamTypeHTTP = "http" // HTTP/HTTPS - Direct streams, Icecast
+	StreamTypeHLS  = "hls"  // HLS - .m3u8 playlists
+	StreamTypeRTMP = "rtmp" // RTMP/RTMPS - OBS, push streams
+	StreamTypeUDP  = "udp"  // UDP/RTP - Low-latency LAN
+)
+
+// StreamConfig represents a single audio stream source
+type StreamConfig struct {
+	Name      string `yaml:"name" json:"name" mapstructure:"name"`                // Required: descriptive name like "Front Yard"
+	URL       string `yaml:"url" json:"url" mapstructure:"url"`                   // Required: stream URL
+	Type      string `yaml:"type" json:"type" mapstructure:"type"`                // Stream type: rtsp, http, hls, rtmp, udp
+	Transport string `yaml:"transport" json:"transport" mapstructure:"transport"` // Transport: tcp or udp (for RTSP/RTMP)
 }
+
+// RTSPSettings contains settings for audio streaming (supports multiple protocols).
+// Note: Struct name kept for backward compatibility with existing code.
+type RTSPSettings struct {
+	Streams          []StreamConfig     `yaml:"streams" json:"streams" mapstructure:"streams"`                                   // Stream configurations
+	URLs             []string           `yaml:"urls,omitempty" json:"urls,omitempty" mapstructure:"urls"`                        // Legacy: accepts old format, migrated on load
+	Transport        string             `yaml:"transport,omitempty" json:"transport,omitempty" mapstructure:"transport"`         // Legacy: global default, migrated on load
+	Health           RTSPHealthSettings `yaml:"health" json:"health" mapstructure:"health"`                                      // Health monitoring settings
+	FFmpegParameters []string           `yaml:"ffmpegParameters" json:"ffmpegParameters" mapstructure:"ffmpegParameters"`        // Custom FFmpeg parameters
+}
+
+// CRITICAL: Legacy fields (URLs, Transport) MUST include json tags to accept
+// payloads from older frontends. Without this, saving from a cached old frontend
+// would wipe the user's stream configuration. The migration runs on Load().
 
 // MQTTSettings contains settings for MQTT integration.
 type MQTTSettings struct {
-	Enabled       bool            `json:"enabled"`       // true to enable MQTT
-	Debug         bool            `json:"debug"`         // true to enable MQTT debug
-	Broker        string          `json:"broker"`        // MQTT broker URL
-	Topic         string          `json:"topic"`         // MQTT topic
-	Username      string          `json:"username"`      // MQTT username
-	Password      string          `json:"password"`      // MQTT password
-	Retain        bool            `json:"retain"`        // true to retain messages
-	RetrySettings RetrySettings   `json:"retrySettings"` // settings for retry mechanism
-	TLS           MQTTTLSSettings `json:"tls"`           // TLS/SSL configuration
+	Enabled       bool                  `json:"enabled"`       // true to enable MQTT
+	Debug         bool                  `json:"debug"`         // true to enable MQTT debug
+	Broker        string                `json:"broker"`        // MQTT broker URL
+	Topic         string                `json:"topic"`         // MQTT topic
+	Username      string                `json:"username"`      // MQTT username
+	Password      string                `json:"password"`      // MQTT password
+	Retain        bool                  `json:"retain"`        // true to retain messages
+	RetrySettings RetrySettings         `json:"retrySettings"` // settings for retry mechanism
+	TLS           MQTTTLSSettings       `json:"tls"`           // TLS/SSL configuration
+	HomeAssistant HomeAssistantSettings `yaml:"homeassistant" mapstructure:"homeassistant" json:"homeAssistant"` // Home Assistant auto-discovery settings
 }
 
 // MQTTTLSSettings contains TLS/SSL configuration for secure MQTT connections
@@ -423,6 +474,13 @@ type MQTTTLSSettings struct {
 	CACert             string `yaml:"cacert,omitempty" json:"caCert,omitempty"`         // path to CA certificate file (managed internally)
 	ClientCert         string `yaml:"clientcert,omitempty" json:"clientCert,omitempty"` // path to client certificate file (managed internally)
 	ClientKey          string `yaml:"clientkey,omitempty" json:"clientKey,omitempty"`   // path to client key file (managed internally)
+}
+
+// HomeAssistantSettings contains settings for Home Assistant MQTT auto-discovery.
+type HomeAssistantSettings struct {
+	Enabled         bool   `yaml:"enabled" mapstructure:"enabled" json:"enabled"`                                    // true to enable HA auto-discovery
+	DiscoveryPrefix string `yaml:"discovery_prefix" mapstructure:"discovery_prefix" json:"discoveryPrefix"`          // HA discovery topic prefix (default: homeassistant)
+	DeviceName      string `yaml:"device_name" mapstructure:"device_name" json:"deviceName"`                         // base name for devices (default: BirdNET-Go)
 }
 
 // TelemetrySettings contains settings for telemetry.
@@ -481,12 +539,12 @@ func (f *FalsePositiveFilterSettings) Validate() error {
 
 // RealtimeSettings contains all settings related to realtime processing.
 type RealtimeSettings struct {
-	Interval            int                          `json:"interval"`            // minimum interval between log messages in seconds
-	ProcessingTime      bool                         `json:"processingTime"`      // true to report processing time for each prediction
-	Audio               AudioSettings                `json:"audio"`               // Audio processing settings
-	Dashboard           Dashboard                    `json:"dashboard"`           // Dashboard settings
-	DynamicThreshold    DynamicThresholdSettings     `json:"dynamicThreshold"`    // Dynamic threshold settings
-	FalsePositiveFilter FalsePositiveFilterSettings  `json:"falsePositiveFilter"` // False positive filtering aggressivity settings
+	Interval            int                         `json:"interval"`            // minimum interval between log messages in seconds
+	ProcessingTime      bool                        `json:"processingTime"`      // true to report processing time for each prediction
+	Audio               AudioSettings               `json:"audio"`               // Audio processing settings
+	Dashboard           Dashboard                   `json:"dashboard"`           // Dashboard settings
+	DynamicThreshold    DynamicThresholdSettings    `json:"dynamicThreshold"`    // Dynamic threshold settings
+	FalsePositiveFilter FalsePositiveFilterSettings `json:"falsePositiveFilter"` // False positive filtering aggressivity settings
 	Log                 struct {
 		Enabled bool   `json:"enabled"` // true to enable OBS chat log
 		Path    string `json:"path"`    // path to OBS chat log
@@ -521,11 +579,15 @@ type SpeciesConfig struct {
 	Actions   []SpeciesAction `yaml:"actions" json:"actions"`     // List of actions to execute
 }
 
-// RealtimeSpeciesSettings contains all species-specific settings
+// SpeciesSettings contains all species-specific settings.
+// Note: Config map keys are normalized to lowercase during config load
+// and API updates to ensure case-insensitive matching. Users can enter
+// species names in any case (e.g., "American Robin", "american robin")
+// and they will all resolve to the same lowercase key.
 type SpeciesSettings struct {
 	Include []string                 `yaml:"include" json:"include"` // Always include these species
 	Exclude []string                 `yaml:"exclude" json:"exclude"` // Always exclude these species
-	Config  map[string]SpeciesConfig `yaml:"config" json:"config"`   // Per-species configuration
+	Config  map[string]SpeciesConfig `yaml:"config" json:"config"`   // Per-species configuration (keys normalized to lowercase)
 }
 
 // LogDeduplicationSettings contains settings for log deduplication
@@ -579,12 +641,68 @@ func DetectHemisphere(latitude float64) string {
 
 // GetSeasonalTrackingWithHemisphere returns seasonal tracking configuration adjusted for hemisphere
 // For southern hemisphere, seasons are shifted by 6 months
+//
+// This function handles three scenarios:
+// 1. No seasons defined (len == 0): Uses defaults for detected hemisphere
+// 2. Default seasons from wrong hemisphere: Updates to correct hemisphere
+// 3. Custom seasons (non-default names): Preserves user customizations
+//
+// Issue #1524 fix: Previously only updated when len(Seasons) == 0, which caused
+// users with pre-existing Northern hemisphere defaults to keep wrong seasons
+// even when their latitude indicated Southern hemisphere.
 func GetSeasonalTrackingWithHemisphere(settings SeasonalTrackingSettings, latitude float64) SeasonalTrackingSettings {
-	// If no custom seasons are defined, use defaults based on hemisphere
+	// If no seasons defined, use defaults based on hemisphere
 	if len(settings.Seasons) == 0 {
 		settings.Seasons = GetDefaultSeasons(latitude)
+		return settings
 	}
+
+	// Check if current seasons are default seasons (not custom)
+	// If they are default seasons, update them to match the user's hemisphere
+	if isDefaultSeasonConfiguration(settings.Seasons) {
+		settings.Seasons = GetDefaultSeasons(latitude)
+	}
+
 	return settings
+}
+
+// isDefaultSeasonConfiguration checks if the given seasons map contains
+// default season names (spring/summer/fall/winter or wet1/dry1/wet2/dry2).
+// This helps distinguish between:
+// - Default seasons that should be updated based on hemisphere
+// - Custom seasons that should be preserved
+//
+// Returns true if the seasons appear to be a default configuration,
+// false if they appear to be custom user-defined seasons.
+func isDefaultSeasonConfiguration(seasons map[string]Season) bool {
+	if len(seasons) != 4 {
+		return false
+	}
+
+	// Check for traditional season names (Northern/Southern hemisphere)
+	traditionalSeasons := []string{"spring", "summer", "fall", "winter"}
+	hasTraditional := true
+	for _, name := range traditionalSeasons {
+		if _, exists := seasons[name]; !exists {
+			hasTraditional = false
+			break
+		}
+	}
+	if hasTraditional {
+		return true
+	}
+
+	// Check for equatorial season names
+	equatorialSeasons := []string{"wet1", "dry1", "wet2", "dry2"}
+	hasEquatorial := true
+	for _, name := range equatorialSeasons {
+		if _, exists := seasons[name]; !exists {
+			hasEquatorial = false
+			break
+		}
+	}
+
+	return hasEquatorial
 }
 
 // GetDefaultSeasons returns default seasons based on hemisphere
@@ -794,19 +912,19 @@ type InputConfig struct {
 }
 
 type BirdNETConfig struct {
-	Debug       bool                `json:"debug"`       // true to enable debug mode
-	Sensitivity float64             `json:"sensitivity"` // birdnet analysis sigmoid sensitivity
-	Threshold   float64             `json:"threshold"`   // threshold for prediction confidence to report
-	Overlap     float64             `json:"overlap"`     // birdnet analysis overlap between chunks
-	Longitude   float64             `json:"longitude"`   // longitude of recording location for prediction filtering
-	Latitude    float64             `json:"latitude"`    // latitude of recording location for prediction filtering
-	Threads     int                 `json:"threads"`     // number of CPU threads to use for analysis
-	Locale      string              `json:"locale"`      // language to use for labels
-	RangeFilter RangeFilterSettings `json:"rangeFilter"` // range filter settings
-	ModelPath   string              `json:"modelPath,omitempty" yaml:"modelPath,omitempty"`   // path to external model file (empty for embedded)
-	LabelPath   string              `json:"labelPath,omitempty" yaml:"labelPath,omitempty"`   // path to external label file (empty for embedded)
-	Labels      []string            `yaml:"-" json:"-"`  // list of available species labels, runtime value
-	UseXNNPACK  bool                `json:"useXnnpack"`  // true to use XNNPACK delegate for inference acceleration
+	Debug       bool                `json:"debug"`                                          // true to enable debug mode
+	Sensitivity float64             `json:"sensitivity"`                                    // birdnet analysis sigmoid sensitivity
+	Threshold   float64             `json:"threshold"`                                      // threshold for prediction confidence to report
+	Overlap     float64             `json:"overlap"`                                        // birdnet analysis overlap between chunks
+	Longitude   float64             `json:"longitude"`                                      // longitude of recording location for prediction filtering
+	Latitude    float64             `json:"latitude"`                                       // latitude of recording location for prediction filtering
+	Threads     int                 `json:"threads"`                                        // number of CPU threads to use for analysis
+	Locale      string              `json:"locale"`                                         // language to use for labels
+	RangeFilter RangeFilterSettings `json:"rangeFilter"`                                    // range filter settings
+	ModelPath   string              `json:"modelPath,omitempty" yaml:"modelPath,omitempty"` // path to external model file (empty for embedded)
+	LabelPath   string              `json:"labelPath,omitempty" yaml:"labelPath,omitempty"` // path to external label file (empty for embedded)
+	Labels      []string            `yaml:"-" json:"-"`                                     // list of available species labels, runtime value
+	UseXNNPACK  bool                `json:"useXnnpack"`                                     // true to use XNNPACK delegate for inference acceleration
 }
 
 // RangeFilterSettings contains settings for the range filter
@@ -844,6 +962,17 @@ type AllowSubnetBypass struct {
 	Subnet  string `json:"subnet"`  // disable OAuth2 in subnet
 }
 
+// OAuthProviderConfig holds settings for a single OAuth2 provider in the new array-based format.
+// This replaces the individual GoogleAuth, GithubAuth, MicrosoftAuth fields.
+type OAuthProviderConfig struct {
+	Provider     string `yaml:"provider" json:"provider"`                 // Provider ID: "google", "github", "microsoft"
+	Enabled      bool   `yaml:"enabled" json:"enabled"`                   // true to enable this provider
+	ClientID     string `yaml:"clientId" json:"clientId"`                 // OAuth2 client ID
+	ClientSecret string `yaml:"clientSecret" json:"clientSecret"`         // OAuth2 client secret
+	RedirectURI  string `yaml:"redirectUri,omitempty" json:"redirectUri"` // OAuth2 redirect URI (optional, auto-generated if empty)
+	UserID       string `yaml:"userId,omitempty" json:"userId"`           // Allowed user ID/email for this provider
+}
+
 // SecurityConfig handles all security-related settings and validations
 // for the application, including authentication, TLS, and access control.
 type Security struct {
@@ -872,17 +1001,26 @@ type Security struct {
 	RedirectToHTTPS   bool              `json:"redirectToHttps"`   // true to redirect to HTTPS
 	AllowSubnetBypass AllowSubnetBypass `json:"allowSubnetBypass"` // subnet bypass configuration
 	BasicAuth         BasicAuth         `json:"basicAuth"`         // password authentication configuration
-	GoogleAuth        SocialProvider    `json:"googleAuth"`        // Google OAuth2 configuration
-	GithubAuth        SocialProvider    `json:"githubAuth"`        // Github OAuth2 configuration
-	SessionSecret     string            `json:"sessionSecret"`     // secret for session cookie
-	SessionDuration   time.Duration     `json:"sessionDuration"`   // duration for browser session cookies
+
+	// OAuthProviders is the new array-based OAuth configuration.
+	// This is the preferred format for configuring OAuth providers.
+	OAuthProviders []OAuthProviderConfig `yaml:"oauthProviders,omitempty" json:"oauthProviders"`
+
+	// Legacy OAuth fields - kept for backwards compatibility.
+	// These are migrated to OAuthProviders on startup and ignored thereafter.
+	// Will be removed in a future version.
+	GoogleAuth    SocialProvider `yaml:"googleAuth,omitempty" json:"googleAuth,omitempty"`       //nolint:modernize // Deprecated: use OAuthProviders, yaml.v3 doesn't support omitzero
+	GithubAuth    SocialProvider `yaml:"githubAuth,omitempty" json:"githubAuth,omitempty"`       //nolint:modernize // Deprecated: use OAuthProviders, yaml.v3 doesn't support omitzero
+	MicrosoftAuth SocialProvider `yaml:"microsoftAuth,omitempty" json:"microsoftAuth,omitempty"` //nolint:modernize // Deprecated: use OAuthProviders, yaml.v3 doesn't support omitzero
+
+	SessionSecret   string        `json:"sessionSecret"`   // secret for session cookie
+	SessionDuration time.Duration `json:"sessionDuration"` // duration for browser session cookies
 }
 
 type WebServerSettings struct {
 	Debug      bool               `json:"debug"`      // true to enable debug mode
 	Enabled    bool               `json:"enabled"`    // true to enable web server
 	Port       string             `json:"port"`       // port for web server
-	Log        LogConfig          `json:"log"`        // logging configuration for web server
 	LiveStream LiveStreamSettings `json:"liveStream"` // live stream configuration
 }
 
@@ -1067,10 +1205,12 @@ type Settings struct {
 	SystemID           string   `yaml:"-" json:"systemId,omitempty"`           // Unique system identifier for telemetry
 	ValidationWarnings []string `yaml:"-" json:"validationWarnings,omitempty"` // Configuration validation warnings for telemetry
 
+	// Logging configuration
+	Logging logger.LoggingConfig `json:"logging"` // centralized logging configuration
+
 	Main struct {
-		Name      string    `json:"name"`      // name of BirdNET-Go node, can be used to identify source of notes
-		TimeAs24h bool      `json:"timeAs24h"` // true 24-hour time format, false 12-hour time format
-		Log       LogConfig `json:"log"`       // logging configuration
+		Name      string `json:"name"`      // name of BirdNET-Go node, can be used to identify source of notes
+		TimeAs24h bool   `json:"timeAs24h"` // true 24-hour time format, false 12-hour time format
 	} `json:"main"`
 
 	BirdNET BirdNETConfig `json:"birdnet"` // BirdNET configuration
@@ -1109,24 +1249,6 @@ type Settings struct {
 	Notification NotificationConfig `json:"notification"` // Configuration for push notifications
 }
 
-// LogConfig defines the configuration for a log file
-type LogConfig struct {
-	Enabled     bool         `json:"enabled"`     // true to enable this log
-	Path        string       `json:"path"`        // Path to the log file
-	Rotation    RotationType `json:"rotation"`    // Type of log rotation
-	MaxSize     int64        `json:"maxSize"`     // Max size in bytes for RotationSize
-	RotationDay string       `json:"rotationDay"` // Day of the week for RotationWeekly (as a string: "Sunday", "Monday", etc.)
-}
-
-// RotationType defines different types of log rotations.
-type RotationType string
-
-const (
-	RotationDaily  RotationType = "daily"
-	RotationWeekly RotationType = "weekly"
-	RotationSize   RotationType = "size"
-)
-
 // settingsInstance is the current settings instance
 var (
 	settingsInstance *Settings
@@ -1158,6 +1280,39 @@ func Load() (*Settings, error) {
 			Build()
 	}
 
+	// Normalize species config keys to lowercase for case-insensitive matching
+	// This ensures that config keys like "American Robin" are converted to "american robin"
+	// to match the lowercase species names used in detection lookup (fixes #1701)
+	if settings.Realtime.Species.Config != nil {
+		settings.Realtime.Species.Config = NormalizeSpeciesConfigKeys(settings.Realtime.Species.Config)
+	}
+
+	// Migrate legacy OAuth configuration to new array format
+	// This must happen before validation and saving
+	if settings.MigrateOAuthConfig() {
+		// Save the migrated config back to file
+		configFile := viper.ConfigFileUsed()
+		if configFile != "" {
+			if err := SaveYAMLConfig(configFile, settings); err != nil {
+				GetLogger().Warn("Failed to save migrated OAuth config", logger.Error(err))
+			} else {
+				GetLogger().Info("Saved migrated OAuth configuration", logger.String("path", configFile))
+			}
+		}
+	}
+
+	// Migrate legacy RTSP URLs to new streams format
+	if settings.MigrateRTSPConfig() {
+		configFile := viper.ConfigFileUsed()
+		if configFile != "" {
+			if err := SaveYAMLConfig(configFile, settings); err != nil {
+				GetLogger().Warn("Failed to save migrated RTSP config", logger.Error(err))
+			} else {
+				GetLogger().Info("Saved migrated RTSP configuration", logger.String("path", configFile))
+			}
+		}
+	}
+
 	// Auto-generate SessionSecret if not set (for backward compatibility)
 	if settings.Security.SessionSecret == "" {
 		// Generate a new session secret
@@ -1176,7 +1331,7 @@ func Load() (*Settings, error) {
 		viper.Set("security.sessionsecret", sessionSecret)
 
 		// Log that we generated a new session secret
-		log.Printf("Generated new SessionSecret for existing configuration")
+		GetLogger().Info("Generated new SessionSecret for existing configuration")
 
 		// Save the updated config back to file to persist the generated secret
 		// This ensures the secret remains the same across restarts
@@ -1184,11 +1339,11 @@ func Load() (*Settings, error) {
 		if configFile != "" {
 			if err := SaveYAMLConfig(configFile, settings); err != nil {
 				// Log the error but don't fail - the generated secret will work for this session
-				log.Printf("Warning: Failed to save generated SessionSecret to config file: %v", err)
+				GetLogger().Warn("Failed to save generated SessionSecret to config file", logger.Error(err))
 			} else {
 				// Set secure file permissions after saving
 				if err := os.Chmod(configFile, 0o600); err != nil {
-					log.Printf("Warning: Failed to set secure permissions on config file: %v", err)
+					GetLogger().Warn("Failed to set secure permissions on config file", logger.Error(err))
 				}
 			}
 		}
@@ -1204,7 +1359,7 @@ func Load() (*Settings, error) {
 				if strings.Contains(errMsg, "fallback") || strings.Contains(errMsg, "not supported") ||
 					strings.Contains(errMsg, "OAuth authentication warning") {
 					// This is a warning - report to telemetry but don't fail
-					log.Printf("Configuration warning: %s", errMsg)
+					GetLogger().Warn("Configuration warning", logger.String("message", errMsg))
 					// Store the warning for later telemetry reporting
 					settings.ValidationWarnings = append(settings.ValidationWarnings, errMsg)
 					// Note: Telemetry reporting will happen later in birdnet package when Sentry is initialized
@@ -1240,7 +1395,7 @@ func initViper() error {
 	if err := configureEnvironmentVariables(); err != nil {
 		// Log any validation warnings but don't fail startup
 		// This allows the application to continue with config file/default values
-		log.Printf("Environment variable configuration warning: %v", err)
+		GetLogger().Warn("Environment variable configuration warning", logger.Error(err))
 	}
 
 	// Get OS specific config paths
@@ -1310,7 +1465,7 @@ func createDefaultConfig() error {
 	}
 
 	// Create directories for config file
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o750); err != nil {
 		return errors.New(err).
 			Category(errors.CategoryFileIO).
 			Context("operation", "create-config-dirs").
@@ -1336,7 +1491,8 @@ func createDefaultConfig() error {
 func getDefaultConfig() string {
 	data, err := fs.ReadFile(configFiles, "config.yaml")
 	if err != nil {
-		log.Fatalf("Error reading config file: %v", err)
+		GetLogger().Error("Error reading config file", logger.Error(err))
+		os.Exit(1)
 	}
 	return string(data)
 }
@@ -1346,6 +1502,191 @@ func GetSettings() *Settings {
 	settingsMutex.RLock()
 	defer settingsMutex.RUnlock()
 	return settingsInstance
+}
+
+// migrateLegacyProvider converts a legacy SocialProvider to the new OAuthProviderConfig format.
+// Returns nil if the legacy provider is not configured (no ClientID).
+func migrateLegacyProvider(providerName string, legacy SocialProvider) *OAuthProviderConfig {
+	if legacy.ClientID == "" {
+		return nil
+	}
+	return &OAuthProviderConfig{
+		Provider:     providerName,
+		Enabled:      legacy.Enabled,
+		ClientID:     legacy.ClientID,
+		ClientSecret: legacy.ClientSecret,
+		RedirectURI:  legacy.RedirectURI,
+		UserID:       legacy.UserId,
+	}
+}
+
+// MigrateOAuthConfig migrates legacy OAuth configuration (GoogleAuth, GithubAuth, MicrosoftAuth)
+// to the new OAuthProviders array format. This migration:
+// - Skips if OAuthProviders already has entries (already migrated)
+// - Only migrates providers that have a ClientID configured
+// - Preserves all settings from the legacy format
+// - Returns true if migration occurred, false if skipped
+func (s *Settings) MigrateOAuthConfig() bool {
+	// Skip if already migrated (new array has entries)
+	if len(s.Security.OAuthProviders) > 0 {
+		return false
+	}
+
+	// Define legacy providers to migrate
+	legacyProviders := []struct {
+		name   string
+		config SocialProvider
+	}{
+		{"google", s.Security.GoogleAuth},
+		{"github", s.Security.GithubAuth},
+		{"microsoft", s.Security.MicrosoftAuth},
+	}
+
+	var migrated bool
+	for _, legacy := range legacyProviders {
+		if cfg := migrateLegacyProvider(legacy.name, legacy.config); cfg != nil {
+			s.Security.OAuthProviders = append(s.Security.OAuthProviders, *cfg)
+			migrated = true
+			GetLogger().Info("Migrated OAuth configuration to new format", logger.String("provider", legacy.name))
+		}
+	}
+
+	if migrated {
+		GetLogger().Info("OAuth configuration migration complete", logger.String("note", "Legacy fields will be ignored"))
+	}
+
+	return migrated
+}
+
+// inferStreamType detects the stream type from URL scheme.
+// Returns StreamTypeRTSP as default for unknown schemes.
+func inferStreamType(url string) string {
+	urlLower := strings.ToLower(url)
+
+	switch {
+	case strings.HasPrefix(urlLower, "rtsp://"), strings.HasPrefix(urlLower, "rtsps://"):
+		return StreamTypeRTSP
+	case strings.HasPrefix(urlLower, "rtmp://"), strings.HasPrefix(urlLower, "rtmps://"):
+		return StreamTypeRTMP
+	case strings.HasPrefix(urlLower, "udp://"), strings.HasPrefix(urlLower, "rtp://"):
+		return StreamTypeUDP
+	case strings.HasPrefix(urlLower, "http://"), strings.HasPrefix(urlLower, "https://"):
+		// Check for HLS (.m3u8) vs generic HTTP
+		if strings.Contains(urlLower, ".m3u8") {
+			return StreamTypeHLS
+		}
+		return StreamTypeHTTP
+	default:
+		return StreamTypeRTSP // Default to RTSP for unknown schemes
+	}
+}
+
+// MigrateRTSPConfig migrates legacy URLs []string to Streams []StreamConfig.
+// This migration:
+// - Skips if Streams already has entries (already migrated)
+// - Only migrates if URLs has data
+// - Trims whitespace and skips empty URLs
+// - Infers stream type from URL scheme
+// - Preserves the global Transport setting for RTSP/RTMP streams
+// - Returns true if migration occurred, false if skipped
+func (s *Settings) MigrateRTSPConfig() bool {
+	rtsp := &s.Realtime.RTSP
+
+	// Skip if already migrated (new format has streams)
+	if len(rtsp.Streams) > 0 {
+		return false
+	}
+
+	// Skip if no legacy URLs to migrate
+	if len(rtsp.URLs) == 0 {
+		return false
+	}
+
+	// Get global transport, default to tcp
+	globalTransport := rtsp.Transport
+	if globalTransport == "" {
+		globalTransport = "tcp"
+	}
+
+	// Preallocate streams slice with capacity and track seen URLs for deduplication
+	rtsp.Streams = make([]StreamConfig, 0, len(rtsp.URLs))
+	seenURLs := make(map[string]bool)
+	streamIndex := 0
+
+	// Migrate each URL to StreamConfig
+	for _, rawURL := range rtsp.URLs {
+		// Trim whitespace and skip empty URLs
+		url := strings.TrimSpace(rawURL)
+		if url == "" {
+			continue
+		}
+
+		// Skip duplicate URLs to ensure valid configuration
+		if seenURLs[url] {
+			continue
+		}
+		seenURLs[url] = true
+		streamIndex++
+
+		// Infer stream type from URL scheme
+		streamType := inferStreamType(url)
+
+		// Only apply transport setting to RTSP/RTMP types where it makes sense
+		transport := ""
+		if streamType == StreamTypeRTSP || streamType == StreamTypeRTMP {
+			transport = globalTransport
+		}
+
+		stream := StreamConfig{
+			Name:      fmt.Sprintf("Stream %d", streamIndex),
+			URL:       url,
+			Type:      streamType,
+			Transport: transport,
+		}
+		rtsp.Streams = append(rtsp.Streams, stream)
+	}
+
+	// If no valid URLs were found, don't mark as migrated
+	if len(rtsp.Streams) == 0 {
+		return false
+	}
+
+	// Clear legacy fields
+	rtsp.URLs = nil
+	rtsp.Transport = ""
+
+	GetLogger().Info("Migrated RTSP configuration to new streams format",
+		logger.Int("stream_count", len(rtsp.Streams)))
+
+	return true
+}
+
+// GetOAuthProvider returns the OAuth provider configuration for the given provider ID.
+// Returns nil if the provider is not configured.
+func (s *Settings) GetOAuthProvider(providerID string) *OAuthProviderConfig {
+	for i := range s.Security.OAuthProviders {
+		if s.Security.OAuthProviders[i].Provider == providerID {
+			return &s.Security.OAuthProviders[i]
+		}
+	}
+	return nil
+}
+
+// IsOAuthProviderEnabled returns true if the specified OAuth provider is enabled.
+func (s *Settings) IsOAuthProviderEnabled(providerID string) bool {
+	provider := s.GetOAuthProvider(providerID)
+	return provider != nil && provider.Enabled && provider.ClientID != "" && provider.ClientSecret != ""
+}
+
+// GetEnabledOAuthProviders returns a list of provider IDs that are enabled.
+func (s *Settings) GetEnabledOAuthProviders() []string {
+	var enabled []string
+	for _, p := range s.Security.OAuthProviders {
+		if p.Enabled && p.ClientID != "" && p.ClientSecret != "" {
+			enabled = append(enabled, p.Provider)
+		}
+	}
+	return enabled
 }
 
 // prepareSettingsForSave applies data transformations to settings before saving.
@@ -1409,7 +1750,7 @@ func SaveSettings() error {
 			Build()
 	}
 
-	log.Printf("Settings saved successfully to %s", configPath)
+	GetLogger().Info("Settings saved successfully", logger.String("path", configPath))
 	return nil
 }
 
@@ -1424,7 +1765,8 @@ func Setting() *Settings {
 					Category(errors.CategoryConfiguration).
 					Context("operation", "load-settings-init").
 					Build()
-				log.Fatalf("Error loading settings: %v", enhancedErr)
+				GetLogger().Error("Error loading settings", logger.Error(enhancedErr))
+				os.Exit(1)
 			}
 		}
 	})
@@ -1601,7 +1943,7 @@ func SaveYAMLConfig(configPath string, settings *Settings) error {
 	// Ensure the temporary file is removed in case of any failure
 	defer func() {
 		if err := os.Remove(tempFileName); err != nil && !os.IsNotExist(err) {
-			log.Printf("Failed to remove temporary file: %v", err)
+			GetLogger().Warn("Failed to remove temporary file", logger.Error(err), logger.String("file", tempFileName))
 		}
 	}()
 
@@ -1652,7 +1994,7 @@ func GenerateRandomSecret() string {
 			Category(errors.CategorySystem).
 			Context("operation", "generate-random-secret").
 			Build()
-		log.Printf("Failed to generate random secret: %v", enhancedErr)
+		GetLogger().Error("Failed to generate random secret", logger.Error(enhancedErr))
 		return ""
 	}
 	return base64.RawURLEncoding.EncodeToString(bytes)

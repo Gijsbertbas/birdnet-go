@@ -2,7 +2,6 @@ package diskmanager
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // Define variables for mocking
@@ -78,13 +78,9 @@ func TestAgeBasedCleanupFileTypeEligibility(t *testing.T) {
 
 	// Create a temporary directory
 	testDir, err := os.MkdirTemp("", "age_policy_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
+	require.NoError(t, err, "Failed to create temp directory")
 	defer func() {
-		if err := os.RemoveAll(testDir); err != nil {
-			t.Errorf("Failed to remove test directory: %v", err)
-		}
+		assert.NoError(t, os.RemoveAll(testDir), "Failed to remove test directory")
 	}()
 
 	for _, tc := range testFiles {
@@ -101,15 +97,10 @@ func TestAgeBasedCleanupFileTypeEligibility(t *testing.T) {
 
 			// Check if the error matches our expectation
 			if tc.expectError {
-				if err == nil {
-					t.Errorf("SECURITY ISSUE: Expected error for %s but got nil", tc.name)
-				} else if !strings.Contains(err.Error(), tc.errorContains) {
-					t.Errorf("Expected error containing '%s', got: %v", tc.errorContains, err)
-				}
+				require.Error(t, err, "SECURITY ISSUE: Expected error for %s but got nil", tc.name)
+				assert.Contains(t, err.Error(), tc.errorContains, "Expected error containing '%s'", tc.errorContains)
 			} else {
-				if err != nil {
-					t.Errorf("Expected no error for %s but got: %v", tc.name, err)
-				}
+				require.NoError(t, err, "Expected no error for %s", tc.name)
 			}
 		})
 	}
@@ -122,13 +113,9 @@ func TestAgeBasedFilesAfterFilter(t *testing.T) {
 
 	// Create a temporary directory
 	testDir, err := os.MkdirTemp("", "age_filter_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
+	require.NoError(t, err, "Failed to create temp directory")
 	defer func() {
-		if err := os.RemoveAll(testDir); err != nil {
-			t.Errorf("Failed to remove test directory: %v", err)
-		}
+		assert.NoError(t, os.RemoveAll(testDir), "Failed to remove test directory")
 	}()
 
 	// Let's create files of all relevant types
@@ -139,28 +126,20 @@ func TestAgeBasedFilesAfterFilter(t *testing.T) {
 
 	for _, ext := range fileTypes {
 		filePath := filepath.Join(testDir, fmt.Sprintf("bubo_bubo_80p_20210102T150405Z%s", ext))
-		if err := os.WriteFile(filePath, []byte("test content"), 0o644); err != nil { //nolint:gosec // G306: Test files don't require restrictive permissions
-			t.Fatalf("Failed to create test file: %v", err)
-		}
+		require.NoError(t, os.WriteFile(filePath, []byte("test content"), 0o644), "Failed to create test file") //nolint:gosec // G306: Test files don't require restrictive permissions
 	}
 
 	// Get audio files using the function that would be used by the policy
 	audioFiles, err := GetAudioFiles(testDir, allowedTypes, db, false)
-	if err != nil {
-		t.Fatalf("Failed to get audio files: %v", err)
-	}
+	require.NoError(t, err, "Failed to get audio files")
 
 	// Verify only allowed audio files are returned
-	if len(audioFiles) != len(allowedTypes) {
-		t.Errorf("Expected %d audio files, got %d", len(allowedTypes), len(audioFiles))
-	}
+	assert.Len(t, audioFiles, len(allowedTypes), "Expected %d audio files", len(allowedTypes))
 
 	// Verify each returned file has an allowed extension
 	for _, file := range audioFiles {
 		ext := filepath.Ext(file.Path)
-		if !contains(allowedTypes, ext) {
-			t.Errorf("SECURITY ISSUE: File with disallowed extension was included: %s", file.Path)
-		}
+		assert.True(t, contains(allowedTypes, ext), "SECURITY ISSUE: File with disallowed extension was included: %s", file.Path)
 	}
 }
 
@@ -372,7 +351,7 @@ func TestAgeBasedCleanupMinClipsGlobal(t *testing.T) {
 	// --- File Setup --- Helper to create audio files in specific subdirs
 	createTestFile := func(subdir, species string, confidence int, modTime time.Time) string {
 		subdirPath := filepath.Join(testDir, subdir)
-		require.NoError(t, os.MkdirAll(subdirPath, 0o755), "Failed to create subdirectory: %s", subdirPath)
+		require.NoError(t, os.MkdirAll(subdirPath, 0o750), "Failed to create subdirectory: %s", subdirPath)
 		timestampStr := modTime.UTC().Format("20060102T150405Z")
 		baseName := fmt.Sprintf("%s_%dp_%s", species, confidence, timestampStr)
 		audioPath := filepath.Join(testDir, subdir, baseName+".wav")
@@ -587,7 +566,9 @@ func simulateAgeBasedCleanup(
 		if err := os.Remove(file.Path); err != nil && !os.IsNotExist(err) {
 			// Log the error if it's something other than the file not existing
 			// This shouldn't fail the test, but indicates potential issues.
-			log.Printf("[Test Helper Warning] Failed to remove simulated audio file %s: %v", file.Path, err)
+			GetLogger().Warn("Test helper: failed to remove simulated audio file",
+				logger.String("path", file.Path),
+				logger.Error(err))
 		}
 		deletedCount++
 
@@ -597,7 +578,9 @@ func simulateAgeBasedCleanup(
 			if err := os.Remove(pngPath); err != nil && !os.IsNotExist(err) {
 				// Log the error if it's something other than the file not existing
 				// This shouldn't fail the test, but indicates potential issues.
-				log.Printf("[Test Helper Warning] Failed to remove simulated PNG %s: %v", pngPath, err)
+				GetLogger().Warn("Test helper: failed to remove simulated PNG",
+					logger.String("path", pngPath),
+					logger.Error(err))
 			}
 		}
 

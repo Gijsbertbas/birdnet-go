@@ -19,12 +19,27 @@
 -->
 <script lang="ts">
   import Checkbox from '$lib/desktop/components/forms/Checkbox.svelte';
+  import SelectDropdown from '$lib/desktop/components/forms/SelectDropdown.svelte';
+  import LowPassIcon from '$lib/desktop/components/ui/LowPassIcon.svelte';
+  import HighPassIcon from '$lib/desktop/components/ui/HighPassIcon.svelte';
+  import BandRejectIcon from '$lib/desktop/components/ui/BandRejectIcon.svelte';
   import FilterResponseGraph from './FilterResponseGraph.svelte';
   import { safeGet, safeArrayAccess } from '$lib/utils/security';
   import { t } from '$lib/i18n';
   import { loggers } from '$lib/utils/logger';
+  import { getCsrfToken } from '$lib/utils/api';
+  import type { EqualizerFilterType } from '$lib/stores/settings';
 
   const logger = loggers.settings;
+
+  // Attenuation options for filter passes
+  const attenuationOptions = [
+    { value: '0', label: '0dB' },
+    { value: '1', label: '12dB' },
+    { value: '2', label: '24dB' },
+    { value: '3', label: '36dB' },
+    { value: '4', label: '48dB' },
+  ];
 
   // Fallback configuration used when API fails or returns invalid data
   const FALLBACK_EQ_FILTER_CONFIG = {
@@ -58,6 +73,29 @@
         { Name: 'Passes', Label: 'Attenuation', Type: 'number', Min: 1, Max: 4, Default: 1 },
       ],
     },
+    BandReject: {
+      Parameters: [
+        {
+          Name: 'Frequency',
+          Label: 'Center Frequency',
+          Type: 'number',
+          Unit: 'Hz',
+          Min: 20,
+          Max: 20000,
+          Default: 1000,
+        },
+        {
+          Name: 'Width',
+          Label: 'Bandwidth',
+          Type: 'number',
+          Unit: 'Hz',
+          Min: 1,
+          Max: 10000,
+          Default: 100,
+        },
+        { Name: 'Passes', Label: 'Attenuation', Type: 'number', Min: 1, Max: 4, Default: 1 },
+      ],
+    },
   };
 
   interface FilterParameter {
@@ -78,12 +116,22 @@
 
   interface Filter {
     id?: string;
-    type: string;
+    type: EqualizerFilterType;
     frequency: number;
     q?: number;
+    width?: number;
     gain?: number;
     passes?: number;
-    [key: string]: any;
+  }
+
+  // Separate type for the new filter form which can have empty type before selection
+  interface NewFilterForm {
+    type: EqualizerFilterType | '';
+    frequency: number;
+    q?: number;
+    width?: number;
+    gain?: number;
+    passes?: number;
   }
 
   interface EqualizerSettings {
@@ -103,13 +151,35 @@
   let eqFilterConfig = $state<Record<string, FilterTypeConfig>>({});
   let loadingConfig = $state(true);
 
-  // New filter state for adding filters
-  let newFilter = $state<Filter>({
+  // New filter state for adding filters (uses NewFilterForm to allow empty type)
+  let newFilter = $state<NewFilterForm>({
     type: '',
     frequency: 0,
     q: 0.707,
+    width: 100,
     gain: 0,
     passes: 1, // Default to 12dB attenuation
+  });
+
+  // Map filter types to their icon components
+  const filterIconMap = {
+    LowPass: LowPassIcon,
+    HighPass: HighPassIcon,
+    BandReject: BandRejectIcon,
+  };
+
+  // Filter type options derived from config - with icons
+  let filterTypeOptions = $derived.by(() => {
+    const placeholder = {
+      value: '',
+      label: t('settings.audio.audioFilters.selectFilterType'),
+    };
+    const typeOptions = Object.keys(eqFilterConfig).map(filterType => ({
+      value: filterType,
+      label: filterType,
+      icon: filterIconMap[filterType as keyof typeof filterIconMap],
+    }));
+    return [placeholder, ...typeOptions];
   });
 
   // Load filter configuration from backend on mount with cleanup
@@ -133,13 +203,15 @@
     abortController = new AbortController();
 
     try {
-      const csrfToken =
-        (document.querySelector('meta[name="csrf-token"]') as HTMLElement)?.getAttribute(
-          'content'
-        ) || '';
+      // Build headers, only including CSRF token if available
+      const headers: Record<string, string> = {};
+      const csrfToken = getCsrfToken();
+      if (csrfToken) {
+        headers['X-CSRF-Token'] = csrfToken;
+      }
 
       const response = await fetch('/api/v2/system/audio/equalizer/config', {
-        headers: { 'X-CSRF-Token': csrfToken },
+        headers,
         signal: abortController.signal,
       });
 
@@ -183,9 +255,15 @@
   function addNewFilter() {
     if (!newFilter.type) return;
 
-    const filterToAdd = { ...newFilter };
-    // Remove empty id if it exists
-    if (!filterToAdd.id) delete filterToAdd.id;
+    // After the type check above, we know type is not empty - create a proper Filter
+    const filterToAdd: Filter = {
+      type: newFilter.type as EqualizerFilterType,
+      frequency: newFilter.frequency,
+      q: newFilter.q,
+      width: newFilter.width,
+      gain: newFilter.gain,
+      passes: newFilter.passes,
+    };
 
     // Ensure HP/LP filters use Butterworth Q factor
     if (filterToAdd.type === 'HighPass' || filterToAdd.type === 'LowPass') {
@@ -196,7 +274,7 @@
     onUpdate({ ...equalizerSettings, filters });
 
     // Reset new filter form
-    newFilter = { type: '', frequency: 0, q: 0.707, gain: 0, passes: 1 };
+    newFilter = { type: '', frequency: 0, q: 0.707, width: 100, gain: 0, passes: 1 };
   }
 
   // Remove a filter by index
@@ -215,7 +293,7 @@
     const normalizedParamName = paramName.toLowerCase();
 
     // Safe property assignment - whitelist allowed parameters
-    const allowedParams = ['frequency', 'q', 'gain', 'passes'];
+    const allowedParams = ['frequency', 'q', 'width', 'gain', 'passes'];
     if (!allowedParams.includes(normalizedParamName)) return;
 
     // Get parameter configuration for validation
@@ -228,6 +306,7 @@
     if (
       normalizedParamName === 'frequency' ||
       normalizedParamName === 'q' ||
+      normalizedParamName === 'width' ||
       normalizedParamName === 'gain' ||
       normalizedParamName === 'passes'
     ) {
@@ -258,6 +337,9 @@
       case 'q':
         updatedFilter.q = validatedValue as number;
         break;
+      case 'width':
+        updatedFilter.width = validatedValue as number;
+        break;
       case 'gain':
         updatedFilter.gain = validatedValue as number;
         break;
@@ -271,17 +353,18 @@
   }
 
   // Set default values when filter type is selected
-  function getFilterDefaults(filterType: string) {
+  function getFilterDefaults(filterType: EqualizerFilterType | '') {
     if (!filterType) {
-      newFilter = { type: '', frequency: 0, q: 0.707, gain: 0, passes: 1 };
+      newFilter = { type: '', frequency: 0, q: 0.707, width: 100, gain: 0, passes: 1 };
       return;
     }
 
     const parameters = getEqFilterParameters(filterType);
-    const updatedFilter: Filter = {
+    const updatedFilter: NewFilterForm = {
       type: filterType,
       frequency: 0,
       q: 0.707,
+      width: 100,
       gain: 0,
       passes: 1, // Default to 12dB attenuation
     };
@@ -295,6 +378,9 @@
           break;
         case 'q':
           updatedFilter.q = param.Default;
+          break;
+        case 'width':
+          updatedFilter.width = param.Default;
           break;
         case 'gain':
           updatedFilter.gain = param.Default;
@@ -339,7 +425,7 @@
 
     <div class="space-y-4">
       <!-- Existing filters -->
-      {#each equalizerSettings.filters || [] as filter, index}
+      {#each equalizerSettings.filters || [] as filter, index (index)}
         {@const filterParams = getEqFilterParameters(filter.type)}
         <div
           class="grid grid-cols-1 md:grid-cols-5 gap-4 items-end p-4 bg-base-200 rounded-lg border border-base-300"
@@ -348,14 +434,21 @@
           <div class="flex items-end">
             <button
               type="button"
-              class="btn btn-sm w-full pointer-events-none bg-base-300 border-base-300"
+              class="btn btn-sm w-full pointer-events-none bg-base-300 border-base-300 gap-2"
             >
-              <span class="font-medium">{filter.type} Filter</span>
+              {#if filter.type === 'LowPass'}
+                <LowPassIcon class="size-4" />
+              {:else if filter.type === 'HighPass'}
+                <HighPassIcon class="size-4" />
+              {:else if filter.type === 'BandReject'}
+                <BandRejectIcon class="size-4" />
+              {/if}
+              <span class="font-medium">{filter.type}</span>
             </button>
           </div>
 
           <!-- Dynamic parameters based on filter type -->
-          {#each filterParams as param}
+          {#each filterParams as param (param.Name)}
             <!-- Skip Q factor for HP/LP filters - always use Butterworth (Q=0.707) -->
             {#if !(param.Name === 'Q' && (filter.type === 'HighPass' || filter.type === 'LowPass'))}
               <div class="flex flex-col">
@@ -364,21 +457,17 @@
                     {param.Label}{param.Unit ? ` (${param.Unit})` : ''}
                   </span>
                 </div>
-                {#if param.Label === 'Attenuation'}
+                {#if param.Name.toLowerCase() === 'passes'}
                   <!-- Select for Passes/Attenuation -->
-                  <select
+                  <SelectDropdown
                     value={String(filter.passes ?? param.Default ?? 1)}
-                    onchange={e =>
-                      updateFilterParameter(index, param.Name, parseInt(e.currentTarget.value))}
-                    class="select select-bordered select-sm w-full"
+                    options={attenuationOptions}
+                    onChange={value =>
+                      updateFilterParameter(index, param.Name, parseInt(value as string))}
                     {disabled}
-                  >
-                    <option value="0">0dB</option>
-                    <option value="1">12dB</option>
-                    <option value="2">24dB</option>
-                    <option value="3">36dB</option>
-                    <option value="4">48dB</option>
-                  </select>
+                    groupBy={false}
+                    menuSize="sm"
+                  />
                 {:else if param.Name.toLowerCase() === 'frequency'}
                   <!-- Frequency input -->
                   <input
@@ -389,7 +478,7 @@
                     min={param.Min}
                     max={param.Max}
                     step="1"
-                    class="input input-bordered input-sm w-full"
+                    class="input input-sm w-full"
                     {disabled}
                   />
                 {:else if param.Name.toLowerCase() === 'q'}
@@ -402,7 +491,20 @@
                     min={param.Min}
                     max={param.Max}
                     step="0.1"
-                    class="input input-bordered input-sm w-full"
+                    class="input input-sm w-full"
+                    {disabled}
+                  />
+                {:else if param.Name.toLowerCase() === 'width'}
+                  <!-- Width (Bandwidth) input -->
+                  <input
+                    value={filter.width ?? param.Default}
+                    oninput={e =>
+                      updateFilterParameter(index, param.Name, parseFloat(e.currentTarget.value))}
+                    type="number"
+                    min={param.Min}
+                    max={param.Max}
+                    step="1"
+                    class="input input-sm w-full"
                     {disabled}
                   />
                 {:else if param.Name.toLowerCase() === 'gain'}
@@ -415,7 +517,7 @@
                     min={param.Min}
                     max={param.Max}
                     step="0.1"
-                    class="input input-bordered input-sm w-full"
+                    class="input input-sm w-full"
                     {disabled}
                   />
                 {/if}
@@ -441,26 +543,23 @@
       <div class="grid grid-cols-1 md:grid-cols-5 gap-4 items-end mt-6">
         <!-- New Filter Type -->
         <div class="flex flex-col">
-          <label class="label" for="new-filter-type">
-            <span class="label-text">{t('settings.audio.audioFilters.newFilterType')}</span>
-          </label>
-          <select
-            id="new-filter-type"
-            bind:value={newFilter.type}
-            onchange={() => getFilterDefaults(newFilter.type)}
-            class="select select-bordered select-sm w-full"
+          <SelectDropdown
+            value={newFilter.type}
+            label={t('settings.audio.audioFilters.newFilterType')}
+            options={filterTypeOptions}
+            onChange={value => {
+              newFilter.type = value as EqualizerFilterType | '';
+              getFilterDefaults(newFilter.type);
+            }}
             {disabled}
-          >
-            <option value="">{t('settings.audio.audioFilters.selectFilterType')}</option>
-            {#each Object.keys(eqFilterConfig) as filterType}
-              <option value={filterType}>{filterType}</option>
-            {/each}
-          </select>
+            groupBy={false}
+            menuSize="sm"
+          />
         </div>
 
         <!-- New Audio Filter Parameters -->
         {#if newFilter.type}
-          {#each getEqFilterParameters(newFilter.type) as param}
+          {#each getEqFilterParameters(newFilter.type) as param (param.Name)}
             <!-- Skip Q factor for HP/LP filters - always use Butterworth (Q=0.707) -->
             {#if !(param.Name === 'Q' && (newFilter.type === 'HighPass' || newFilter.type === 'LowPass'))}
               <div class="flex flex-col">
@@ -469,23 +568,18 @@
                     {param.Label}{param.Unit ? ` (${param.Unit})` : ''}
                   </span>
                 </div>
-                {#if param.Label === 'Attenuation'}
+                {#if param.Name.toLowerCase() === 'passes'}
                   <!-- Select for Passes/Attenuation -->
-                  <select
+                  <SelectDropdown
                     value={String(newFilter.passes ?? 1)}
-                    onchange={e => {
-                      const value = parseInt(e.currentTarget.value, 10);
-                      newFilter = { ...newFilter, passes: value };
+                    options={attenuationOptions}
+                    onChange={value => {
+                      newFilter = { ...newFilter, passes: parseInt(value as string, 10) };
                     }}
-                    class="select select-bordered select-sm w-full"
                     {disabled}
-                  >
-                    <option value="0">0dB</option>
-                    <option value="1">12dB</option>
-                    <option value="2">24dB</option>
-                    <option value="3">36dB</option>
-                    <option value="4">48dB</option>
-                  </select>
+                    groupBy={false}
+                    menuSize="sm"
+                  />
                 {:else if param.Name.toLowerCase() === 'frequency'}
                   <!-- Frequency input -->
                   <input
@@ -498,7 +592,7 @@
                     step="1"
                     min={param.Min}
                     max={param.Max}
-                    class="input input-bordered input-sm w-full"
+                    class="input input-sm w-full"
                     {disabled}
                   />
                 {:else if param.Name.toLowerCase() === 'q'}
@@ -513,7 +607,22 @@
                     step="0.1"
                     min={param.Min}
                     max={param.Max}
-                    class="input input-bordered input-sm w-full"
+                    class="input input-sm w-full"
+                    {disabled}
+                  />
+                {:else if param.Name.toLowerCase() === 'width'}
+                  <!-- Width (Bandwidth) input -->
+                  <input
+                    value={newFilter.width ?? 100}
+                    oninput={e => {
+                      const value = parseFloat(e.currentTarget.value) || 100;
+                      newFilter = { ...newFilter, width: value };
+                    }}
+                    type="number"
+                    step="1"
+                    min={param.Min}
+                    max={param.Max}
+                    class="input input-sm w-full"
                     {disabled}
                   />
                 {:else if param.Name.toLowerCase() === 'gain'}
@@ -528,7 +637,7 @@
                     step="0.1"
                     min={param.Min}
                     max={param.Max}
-                    class="input input-bordered input-sm w-full"
+                    class="input input-sm w-full"
                     {disabled}
                   />
                 {/if}

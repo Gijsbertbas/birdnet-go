@@ -5,37 +5,35 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"io"
-	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
-
-	"log/slog"
-	"net"
-	"net/url"
-	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/patrickmn/go-cache"
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
-	"github.com/tphakala/birdnet-go/internal/api/v2/auth"
+	"github.com/tphakala/birdnet-go/internal/api/auth"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/ebird"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
-	"github.com/tphakala/birdnet-go/internal/logging"
+	"github.com/tphakala/birdnet-go/internal/logger"
+	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observability"
 	"github.com/tphakala/birdnet-go/internal/securefs"
-	"github.com/tphakala/birdnet-go/internal/security"
 	"github.com/tphakala/birdnet-go/internal/spectrogram"
 	"github.com/tphakala/birdnet-go/internal/suncalc"
 )
+
+// Tunnel provider constant for unknown providers
+const tunnelProviderUnknown = "unknown"
 
 // Controller manages the API routes and handlers
 type Controller struct {
@@ -48,7 +46,6 @@ type Controller struct {
 	Processor           *processor.Processor
 	EBirdClient         *ebird.Client
 	TaxonomyDB          *birdnet.TaxonomyDatabase
-	logger              *log.Logger
 	controlChan         chan string
 	speciesExcludeMutex sync.RWMutex // Mutex for species exclude list operations
 	// DisableSaveSettings prevents persisting settings changes to disk.
@@ -60,19 +57,13 @@ type Controller struct {
 	detectionCache       *cache.Cache // Cache for detection queries
 	startTime            *time.Time
 	SFS                  *securefs.SecureFS     // Add SecureFS instance
-	apiLogger            *slog.Logger           // Structured logger for API operations
-	apiLevelVar          *slog.LevelVar         // Dynamic level control (type declaration)
-	apiLoggerClose       func() error           // Function to close the log file
+	apiLogger            logger.Logger          // Structured logger for API operations
 	metrics              *observability.Metrics // Shared metrics instance
 	spectrogramGenerator *spectrogram.Generator // Shared spectrogram generator (initialized after SFS)
 
-	// Auth related fields
-	// AuthService stores the shared authentication service instance.
-	// NOTE: This instance is shared across all requests handled by this controller.
-	// The underlying implementation (auth.SecurityAdapter embedding security.OAuth2Server)
-	// is designed to be concurrency-safe through internal locking (e.g., RWMutex for token maps).
-	AuthService      auth.Service        // Store the auth service instance
-	authMiddlewareFn echo.MiddlewareFunc // Authentication middleware function (set if auth configured)
+	// Auth related fields (injected from server via functional options)
+	authService    auth.Service        // Authentication service (injected from server)
+	authMiddleware echo.MiddlewareFunc // Authentication middleware function (injected from server)
 
 	// SSE related fields
 	sseManager *SSEManager // Manager for Server-Sent Events connections
@@ -84,6 +75,10 @@ type Controller struct {
 	// Goroutine lifecycle management
 	wg sync.WaitGroup // tracks background goroutines for clean shutdown
 
+	// Audio level channel for SSE streaming
+	// TODO: Consider moving to a dedicated audio manager
+	audioLevelChan chan myaudio.AudioLevelData
+
 	// Test synchronization fields (only populated when initializeRoutes is true)
 	// goroutinesStarted signals when all background goroutines have successfully started.
 	// This is primarily used in testing to ensure proper setup before assertions.
@@ -91,56 +86,73 @@ type Controller struct {
 	goroutinesStarted chan struct{} // signals when all background goroutines have started (nil if routes not initialized)
 }
 
-// Define specific errors for token handling failures
-var (
-	errMalformedAuthHeader = fmt.Errorf("malformed authorization header")
-	errInvalidAuthToken    = fmt.Errorf("invalid or expired token")
-	errAuthServiceNil      = fmt.Errorf("internal configuration error: auth service is nil")
-)
+// Option is a functional option for configuring the Controller.
+type Option func(*Controller)
+
+// WithAuthMiddleware sets the authentication middleware for the controller.
+func WithAuthMiddleware(mw echo.MiddlewareFunc) Option {
+	return func(c *Controller) {
+		c.authMiddleware = mw
+	}
+}
+
+// WithAuthService sets the authentication service for the controller.
+func WithAuthService(svc auth.Service) Option {
+	return func(c *Controller) {
+		c.authService = svc
+	}
+}
+
+// parseIPFromHeader attempts to parse a valid IP from a header value.
+// Returns the IP string if valid, empty string otherwise.
+func parseIPFromHeader(headerValue string) string {
+	if headerValue == "" {
+		return ""
+	}
+	ip := net.ParseIP(headerValue)
+	if ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+// parseFirstIPFromXFF extracts the first valid IP from X-Forwarded-For header.
+func parseFirstIPFromXFF(xff string) string {
+	if xff == "" {
+		return ""
+	}
+	parts := strings.SplitSeq(xff, ",")
+	for part := range parts {
+		if ip := parseIPFromHeader(strings.TrimSpace(part)); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
 
 // Custom IP Extractor prioritizing CF-Connecting-IP
 func ipExtractorFromCloudflareHeader(req *http.Request) string {
 	// 1. Check CF-Connecting-IP
-	cfIP := req.Header.Get("CF-Connecting-IP")
-	if cfIP != "" {
-		ip := net.ParseIP(cfIP)
-		if ip != nil {
-			return ip.String() // Return valid IP
-		}
+	if ip := parseIPFromHeader(req.Header.Get("CF-Connecting-IP")); ip != "" {
+		return ip
 	}
 
 	// 2. Check X-Forwarded-For (taking the first valid IP)
-	xff := req.Header.Get(echo.HeaderXForwardedFor)
-	if xff != "" {
-		parts := strings.SplitSeq(xff, ",")
-		for part := range parts {
-			ipStr := strings.TrimSpace(part)
-			ip := net.ParseIP(ipStr)
-			if ip != nil {
-				return ip.String() // Return first valid IP found
-			}
-		}
+	if ip := parseFirstIPFromXFF(req.Header.Get(echo.HeaderXForwardedFor)); ip != "" {
+		return ip
 	}
 
 	// 3. Check X-Real-IP
-	xri := req.Header.Get(echo.HeaderXRealIP)
-	if xri != "" {
-		ip := net.ParseIP(xri)
-		if ip != nil {
-			return ip.String() // Return valid IP
-		}
+	if ip := parseIPFromHeader(req.Header.Get(echo.HeaderXRealIP)); ip != "" {
+		return ip
 	}
 
 	// 4. Fallback to Remote Address (might be proxy)
-	// Use SplitHostPort for robustness, ignoring potential errors
 	remoteAddr, _, _ := net.SplitHostPort(req.RemoteAddr)
-	ip := net.ParseIP(remoteAddr)
-	if ip != nil {
-		return ip.String() // Return valid IP if RemoteAddr is just an IP
+	if ip := parseIPFromHeader(remoteAddr); ip != "" {
+		return ip
 	}
 
-	// If RemoteAddr contained a port or was invalid, return the raw string
-	// (though ideally, it should be a valid IP:port format)
 	return remoteAddr
 }
 
@@ -151,7 +163,7 @@ func (c *Controller) TunnelDetectionMiddleware() echo.MiddlewareFunc {
 		return func(ctx echo.Context) error {
 			req := ctx.Request()
 			tunneled := false
-			provider := "unknown"
+			provider := tunnelProviderUnknown
 
 			// Check Cloudflare header first
 			if req.Header.Get("CF-Connecting-IP") != "" {
@@ -174,76 +186,77 @@ func (c *Controller) TunnelDetectionMiddleware() echo.MiddlewareFunc {
 // New creates a new API controller, returning an error if initialization fails.
 func New(e *echo.Echo, ds datastore.Interface, settings *conf.Settings,
 	birdImageCache *imageprovider.BirdImageCache, sunCalc *suncalc.SunCalc,
-	controlChan chan string, logger *log.Logger, oauth2Server *security.OAuth2Server,
-	metrics *observability.Metrics) (*Controller, error) {
-	return NewWithOptions(e, ds, settings, birdImageCache, sunCalc, controlChan, logger, oauth2Server, metrics, true)
+	controlChan chan string,
+	metrics *observability.Metrics, opts ...Option) (*Controller, error) {
+	return NewWithOptions(e, ds, settings, birdImageCache, sunCalc, controlChan, metrics, true, opts...)
+}
+
+// resolveAndValidateMediaPath resolves a potentially relative media path and ensures it exists as a directory.
+// Returns the absolute path and any error encountered.
+func resolveAndValidateMediaPath(configPath string) (string, error) {
+	if configPath == "" {
+		return "", fmt.Errorf("settings.realtime.audio.export.path must not be empty")
+	}
+
+	mediaPath := configPath
+
+	// Resolve relative path to absolute based on working directory
+	if !filepath.IsAbs(mediaPath) {
+		workDir, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to get working directory to resolve relative media path: %w", err)
+		}
+		mediaPath = filepath.Join(workDir, mediaPath)
+		GetLogger().Debug("Resolved relative media export path",
+			logger.String("config_path", configPath),
+			logger.String("absolute_path", mediaPath),
+		)
+	}
+
+	// Ensure directory exists, creating if necessary
+	if err := ensureDirectoryExists(mediaPath); err != nil {
+		return "", err
+	}
+
+	return mediaPath, nil
+}
+
+// ensureDirectoryExists checks that a path exists and is a directory, creating it if needed.
+func ensureDirectoryExists(path string) error {
+	fi, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(path, FilePermExecutable); err != nil {
+			return fmt.Errorf("failed to create directory %q: %w", path, err)
+		}
+		fi, err = os.Stat(path)
+	}
+	if err != nil {
+		return fmt.Errorf("error checking path %q: %w", path, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("path is not a directory: %q", path)
+	}
+	return nil
 }
 
 // NewWithOptions creates a new API controller with optional route initialization.
 // Set initializeRoutes to false for testing to avoid starting background goroutines.
 func NewWithOptions(e *echo.Echo, ds datastore.Interface, settings *conf.Settings,
 	birdImageCache *imageprovider.BirdImageCache, sunCalc *suncalc.SunCalc,
-	controlChan chan string, logger *log.Logger, oauth2Server *security.OAuth2Server,
-	metrics *observability.Metrics, initializeRoutes bool) (*Controller, error) {
+	controlChan chan string,
+	metrics *observability.Metrics, initializeRoutes bool, opts ...Option) (*Controller, error) {
 
-	if logger == nil {
-		logger = log.Default()
-	}
-
-	// --- Configure IP Extractor ---
-	// IMPORTANT: For this to be secure in production, you would typically
-	// combine this with middleware that verifies the request came *from*
-	// a trusted proxy (like Cloudflare's IP ranges). Echo doesn't have
-	// built-in trusted proxy IP range checking, so this might require
-	// custom middleware or careful infrastructure setup (e.g., firewall rules).
-	// Without trusting the proxy, these headers can be spoofed.
+	// Configure IP extractor for Cloudflare proxy support
 	e.IPExtractor = ipExtractorFromCloudflareHeader
-	logger.Println("Configured custom IP extractor prioritizing CF-Connecting-IP")
-	// --- End IP Extractor Configuration ---
+	GetLogger().Info("Configured custom IP extractor prioritizing CF-Connecting-IP")
 
-	// Validate and Initialize SecureFS for the media export path
-	mediaPath := settings.Realtime.Audio.Export.Path
-
-	// --- Sanity checks for mediaPath ---
-	if mediaPath == "" {
-		return nil, fmt.Errorf("settings.realtime.audio.export.path must not be empty")
-	}
-
-	// Resolve relative path to absolute based on working directory
-	if !filepath.IsAbs(mediaPath) {
-		// Get the current working directory
-		workDir, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get working directory to resolve relative media path: %w", err)
-		}
-		mediaPath = filepath.Join(workDir, mediaPath)
-		logger.Printf("Resolved relative media export path \"%s\" to absolute path \"%s\"", settings.Realtime.Audio.Export.Path, mediaPath) // Log the resolution
-	}
-
-	// Now perform checks on the potentially resolved absolute path
-	fi, err := os.Stat(mediaPath)
+	// Validate and resolve media export path
+	mediaPath, err := resolveAndValidateMediaPath(settings.Realtime.Audio.Export.Path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// Attempt to create the directory if it doesn't exist
-			if err := os.MkdirAll(mediaPath, 0o755); err != nil {
-				return nil, fmt.Errorf("failed to create media export directory %q: %w", mediaPath, err)
-			}
-			// Stat again after creation
-			fi, err = os.Stat(mediaPath)
-			if err != nil {
-				return nil, fmt.Errorf("error checking newly created media export path %q: %w", mediaPath, err)
-			}
-		} else {
-			// Other Stat error
-			return nil, fmt.Errorf("error checking settings.realtime.audio.export.path %q: %w", mediaPath, err)
-		}
+		return nil, err
 	}
-	if !fi.IsDir() {
-		return nil, fmt.Errorf("settings.realtime.audio.export.path is not a directory: %q", mediaPath)
-	}
-	// --- End sanity checks ---
 
-	sfs, err := securefs.New(mediaPath) // Create SecureFS rooted at the export path
+	sfs, err := securefs.New(mediaPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize secure filesystem for media: %w", err)
 	}
@@ -258,8 +271,7 @@ func NewWithOptions(e *echo.Echo, ds datastore.Interface, settings *conf.Setting
 		BirdImageCache:       birdImageCache,
 		SunCalc:              sunCalc,
 		controlChan:          controlChan,
-		logger:               logger,
-		detectionCache:       cache.New(5*time.Minute, 10*time.Minute),
+		detectionCache:       cache.New(detectionCacheExpiry, detectionCacheCleanup),
 		SFS:                  sfs, // Assign SecureFS instance
 		metrics:              metrics,
 		ctx:                  ctx,
@@ -267,74 +279,39 @@ func NewWithOptions(e *echo.Echo, ds datastore.Interface, settings *conf.Setting
 		spectrogramGenerator: spectrogram.NewGenerator(settings, sfs, getSpectrogramLogger()), // Initialize shared generator
 	}
 
-	// Update spectrogram logger level based on debug setting
-	UpdateSpectrogramLogLevel(settings.Debug)
-
 	// Initialize structured logger for API requests
-	apiLogPath := "logs/web.log"
-	initialLevel := slog.LevelInfo
-	c.apiLevelVar = new(slog.LevelVar) // Initialize here
-	c.apiLevelVar.Set(initialLevel)
-
-	apiLogger, closeFunc, err := logging.NewFileLogger(apiLogPath, "api", c.apiLevelVar)
-	if err != nil {
-		logger.Printf("Warning: Failed to initialize API structured logger: %v", err)
-		// Fallback to a disabled logger (writes to io.Discard) but respects the level var
-		logger.Printf("API falling back to a disabled logger due to initialization error.")
-		fbHandler := slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: c.apiLevelVar})
-		c.apiLogger = slog.New(fbHandler).With("service", "api")
-		c.apiLoggerClose = func() error { return nil } // No-op closer
-	} else {
-		c.apiLogger = apiLogger
-		c.apiLoggerClose = closeFunc
-		logger.Printf("API structured logging initialized to %s", apiLogPath)
-	}
+	c.apiLogger = logger.Global().Module("api")
 
 	// Load local taxonomy database for fast species lookups
 	taxonomyDB, err := birdnet.LoadTaxonomyDatabase()
 	if err != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Failed to load taxonomy database", "error", err)
-			c.apiLogger.Warn("Species taxonomy lookups will fall back to eBird API")
-		} else {
-			logger.Printf("Warning: Failed to load taxonomy database: %v", err)
-			logger.Printf("Species taxonomy lookups will fall back to eBird API")
-		}
+		c.logWarnIfEnabled("Failed to load taxonomy database", logger.Error(err))
+		c.logWarnIfEnabled("Species taxonomy lookups will fall back to eBird API")
 		// Continue without taxonomy database - eBird API fallback will be used
 		c.TaxonomyDB = nil
 	} else {
 		c.TaxonomyDB = taxonomyDB
 		stats := taxonomyDB.Stats()
-		if c.apiLogger != nil {
-			c.apiLogger.Info("Loaded taxonomy database",
-				"genus_count", stats["genus_count"],
-				"family_count", stats["family_count"],
-				"species_count", stats["species_count"],
-				"version", taxonomyDB.Version,
-				"updated_at", taxonomyDB.UpdatedAt,
-			)
-		} else {
-			logger.Printf("Loaded taxonomy database: %v genera, %v families, %v species",
-				stats["genus_count"], stats["family_count"], stats["species_count"])
-		}
+		c.logInfoIfEnabled("Loaded taxonomy database",
+			logger.Any("genus_count", stats["genus_count"]),
+			logger.Any("family_count", stats["family_count"]),
+			logger.Any("species_count", stats["species_count"]),
+			logger.String("version", taxonomyDB.Version),
+			logger.String("updated_at", taxonomyDB.UpdatedAt),
+		)
 	}
 
-	// If OAuth2Server is provided, setup authentication service and middleware function
-	if oauth2Server != nil {
-		// Create and store the auth service instance directly.
-		// This single instance is shared across requests handled by this controller.
-		// Concurrency safety is handled within the auth.Service implementation.
-		c.AuthService = auth.NewSecurityAdapter(oauth2Server, c.apiLogger)
+	// Apply functional options (auth middleware and service injected from server)
+	for _, opt := range opts {
+		opt(c)
+	}
 
-		// Create the middleware provider using the stored service
-		authMiddlewareProvider := auth.NewMiddleware(c.AuthService, c.apiLogger)
-		c.authMiddlewareFn = authMiddlewareProvider.Authenticate
-
-		logger.Println("Initialized API authentication service and middleware function")
+	// Log auth configuration status
+	log := GetLogger()
+	if c.authMiddleware != nil {
+		log.Info("Auth middleware configured via functional options")
 	} else {
-		logger.Println("Warning: OAuth2Server not provided, API authentication not configured")
-		// Potentially set a NoOp auth service here if needed for consistency
-		// c.AuthService = auth.NewNoOpService()
+		log.Warn("Auth middleware not configured")
 	}
 
 	// Create v2 API group
@@ -360,7 +337,7 @@ func NewWithOptions(e *echo.Echo, ds datastore.Interface, settings *conf.Setting
 	c.startTime = &now
 
 	// Initialize SSE manager
-	c.sseManager = NewSSEManager(logger)
+	c.sseManager = NewSSEManager()
 
 	// Initialize eBird client if enabled
 	if settings.Realtime.EBird.Enabled {
@@ -372,7 +349,7 @@ func NewWithOptions(e *echo.Echo, ds datastore.Interface, settings *conf.Setting
 				Context("setting", "realtime.ebird.apikey").
 				Component("ebird").
 				Build()
-			logger.Println("Warning: eBird integration enabled but API key not configured")
+			log.Warn("eBird integration enabled but API key not configured")
 		} else {
 			ebirdConfig := ebird.Config{
 				APIKey:   settings.Realtime.EBird.APIKey,
@@ -381,15 +358,15 @@ func NewWithOptions(e *echo.Echo, ds datastore.Interface, settings *conf.Setting
 			ebirdClient, err := ebird.NewClient(ebirdConfig)
 			if err != nil {
 				// Initialization error - already enhanced by ebird.NewClient
-				logger.Printf("Warning: Failed to initialize eBird client: %v", err)
+				log.Warn("Failed to initialize eBird client", logger.Error(err))
 				// Continue without eBird client - it's not critical
 			} else {
 				c.EBirdClient = ebirdClient
-				logger.Println("Initialized eBird API client")
+				log.Info("Initialized eBird API client")
 			}
 		}
 	} else {
-		logger.Println("eBird integration disabled")
+		log.Debug("eBird integration disabled")
 	}
 
 	// Initialize routes if requested (skip in tests to avoid starting background goroutines)
@@ -426,24 +403,23 @@ func (c *Controller) LoggingMiddleware() echo.MiddlewareFunc {
 			isTunneled, _ := ctx.Get("is_tunneled").(bool)
 			tunnelProvider, _ := ctx.Get("tunnel_provider").(string)
 
-			// Log the request with structured data using LogAttrs to avoid allocations
-			// when the log level is disabled.
-			attrs := []slog.Attr{
-				slog.String("method", req.Method),
-				slog.String("path", req.URL.Path),
-				slog.String("query", req.URL.RawQuery),
-				slog.Int("status", res.Status),
-				slog.String("ip", ctx.RealIP()), // Uses custom extractor
-				slog.Bool("tunneled", isTunneled),
-				slog.String("tunnel_provider", tunnelProvider),
-				slog.String("user_agent", req.UserAgent()),
-				slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+			// Log the request with structured data
+			fields := []logger.Field{
+				logger.String("method", req.Method),
+				logger.String("path", req.URL.Path),
+				logger.String("query", req.URL.RawQuery),
+				logger.Int("status", res.Status),
+				logger.String("ip", ctx.RealIP()), // Uses custom extractor
+				logger.Bool("tunneled", isTunneled),
+				logger.String("tunnel_provider", tunnelProvider),
+				logger.String("user_agent", req.UserAgent()),
+				logger.Int64("latency_ms", time.Since(start).Milliseconds()),
 			}
 			if err != nil {
-				attrs = append(attrs, slog.Any("error", err))
+				fields = append(fields, logger.Error(err))
 			}
 
-			c.apiLogger.LogAttrs(ctx.Request().Context(), slog.LevelInfo, "API Request", attrs...)
+			c.apiLogger.Info("API Request", fields...)
 
 			return err
 		}
@@ -460,6 +436,7 @@ func (c *Controller) initRoutes() {
 		name string
 		fn   func()
 	}{
+		{"app routes", c.initAppRoutes},
 		{"search routes", c.initSearchRoutes},
 		{"detection routes", c.initDetectionRoutes},
 		{"analytics routes", c.initAnalyticsRoutes},
@@ -467,8 +444,9 @@ func (c *Controller) initRoutes() {
 		{"system routes", c.initSystemRoutes},
 		{"settings routes", c.initSettingsRoutes},
 		{"filesystem routes", c.initFileSystemRoutes},
-		{"stream routes", c.initStreamRoutes},
 		{"stream health routes", c.initStreamHealthRoutes},
+		{"audio level routes", c.initAudioLevelRoutes},
+		{"hls streaming routes", c.initHLSRoutes},
 		{"integration routes", c.initIntegrationsRoutes},
 		{"control routes", c.initControlRoutes},
 		{"auth routes", c.initAuthRoutes},
@@ -479,6 +457,7 @@ func (c *Controller) initRoutes() {
 		{"support routes", c.initSupportRoutes},
 		{"debug routes", c.initDebugRoutes},
 		{"species routes", c.initSpeciesRoutes},
+		{"dynamic threshold routes", c.initDynamicThresholdRoutes},
 	}
 
 	for _, initializer := range routeInitializers {
@@ -488,7 +467,10 @@ func (c *Controller) initRoutes() {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					c.logger.Printf("PANIC during %s initialization: %v", initializer.name, r)
+					GetLogger().Error("PANIC during route initialization",
+						logger.String("route", initializer.name),
+						logger.Any("panic", r),
+					)
 				}
 			}()
 
@@ -581,11 +563,9 @@ func (c *Controller) Shutdown() {
 	// Wait for all goroutines to finish
 	c.wg.Wait()
 
-	// Close the API logger if it was initialized
-	if c.apiLoggerClose != nil {
-		if err := c.apiLoggerClose(); err != nil {
-			c.logger.Printf("Error closing API log file: %v", err)
-		}
+	// Flush the API logger
+	if err := c.apiLogger.Flush(); err != nil {
+		GetLogger().Error("Error flushing API log", logger.Error(err))
 	}
 
 	// TODO: The go-cache library's janitor goroutine cannot be stopped.
@@ -656,31 +636,26 @@ func (c *Controller) HandleError(ctx echo.Context, err error, message string, co
 	isTunneled, _ := ctx.Get("is_tunneled").(bool)
 	tunnelProvider, _ := ctx.Get("tunnel_provider").(string)
 
-	// Log the error with both the existing logger and the structured logger
-	c.logger.Printf("API Error [%s] from %s (Tunneled: %v, Provider: %s): %s: %v",
-		errorResp.CorrelationID, ip, isTunneled, tunnelProvider, message, err)
-
-	// Also log to structured logger if available
-	if c.apiLogger != nil {
-		var errorStr string
-		if err != nil {
-			errorStr = err.Error()
-		} else {
-			errorStr = message
-		}
-
-		c.apiLogger.Error("API Error",
-			"correlation_id", errorResp.CorrelationID,
-			"message", message,
-			"error", errorStr,
-			"code", code,
-			"path", ctx.Request().URL.Path,
-			"method", ctx.Request().Method,
-			"ip", ip, // Log the extracted IP
-			"tunneled", isTunneled,
-			"tunnel_provider", tunnelProvider,
-		)
+	// Build error string for logging
+	var errorStr string
+	if err != nil {
+		errorStr = err.Error()
+	} else {
+		errorStr = message
 	}
+
+	// Log the error using structured logger
+	c.logErrorIfEnabled("API Error",
+		logger.String("correlation_id", errorResp.CorrelationID),
+		logger.String("message", message),
+		logger.String("error", errorStr),
+		logger.Int("code", code),
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("method", ctx.Request().Method),
+		logger.String("ip", ip), // Log the extracted IP
+		logger.Bool("tunneled", isTunneled),
+		logger.String("tunnel_provider", tunnelProvider),
+	)
 
 	return ctx.JSON(code, errorResp)
 }
@@ -700,18 +675,12 @@ func (c *Controller) HandleErrorForTest(ctx echo.Context, err error, message str
 func (c *Controller) Debug(format string, v ...any) {
 	if c.Settings.WebServer.Debug {
 		msg := fmt.Sprintf(format, v...)
-		c.logger.Printf("[DEBUG] %s", msg)
-
-		// Also log to structured logger if available
-		if c.apiLogger != nil {
-			// No IP available here, log simple debug message
-			c.apiLogger.Debug(msg)
-		}
+		c.logDebugIfEnabled(msg)
 	}
 }
 
 // logAPIRequest is a helper to log API requests with common context fields.
-func (c *Controller) logAPIRequest(ctx echo.Context, level slog.Level, msg string, args ...any) {
+func (c *Controller) logAPIRequest(ctx echo.Context, level logger.LogLevel, msg string, fields ...logger.Field) {
 	if c.apiLogger == nil {
 		return // Do nothing if logger isn't initialized
 	}
@@ -720,322 +689,52 @@ func (c *Controller) logAPIRequest(ctx echo.Context, level slog.Level, msg strin
 	ip := ctx.RealIP()
 	path := ctx.Request().URL.Path
 
-	// Create base attributes
-	baseAttrs := []any{
-		"path", path,
-		"ip", ip,
+	// Create base fields
+	baseFields := []logger.Field{
+		logger.String("path", path),
+		logger.String("ip", ip),
 	}
 
-	// Append specific attributes to base attributes
-	baseAttrs = append(baseAttrs, args...) // Assign append result back to baseAttrs
+	// Append specific fields to base fields
+	baseFields = append(baseFields, fields...)
 
 	// Log at the specified level
-	switch level {
-	case slog.LevelDebug:
-		c.apiLogger.Debug(msg, baseAttrs...)
-	case slog.LevelInfo:
-		c.apiLogger.Info(msg, baseAttrs...)
-	case slog.LevelWarn:
-		c.apiLogger.Warn(msg, baseAttrs...)
-	case slog.LevelError:
-		c.apiLogger.Error(msg, baseAttrs...)
-	default:
-		// Default to Info if level is unknown or custom (like Fatal)
-		c.apiLogger.Log(ctx.Request().Context(), level, msg, baseAttrs...)
-	}
+	c.apiLogger.Log(level, msg, baseFields...)
 }
 
-// handleTokenAuth attempts authentication using a Bearer token from the Authorization header.
-// It returns true if authentication succeeds.
-// It returns false and a specific error (errMalformedAuthHeader, errInvalidAuthToken, errAuthServiceNil, or nil for no header)
-// if authentication fails or is not attempted.
-// It no longer writes the HTTP response directly.
-func (c *Controller) handleTokenAuth(ctx echo.Context) (bool, error) {
-	if c.AuthService == nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("handleTokenAuth called but AuthService is nil")
-		}
-		// Return a specific error indicating the internal config issue
-		return false, errAuthServiceNil
-	}
-
-	authHeader := ctx.Request().Header.Get("Authorization")
-	if authHeader == "" {
-		return false, nil // No header, token auth not attempted, no error
-	}
-
-	parts := strings.Fields(authHeader)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("Invalid Authorization header format",
-				"path", ctx.Request().URL.Path,
-				"ip", ctx.RealIP(),
-			)
-		}
-		// Return specific error for malformed header
-		return false, errMalformedAuthHeader
-	}
-
-	token := parts[1]
-	validationErr := c.AuthService.ValidateToken(token) // Capture the error
-	if validationErr == nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Debug("Token authentication successful", "path", ctx.Request().URL.Path, "ip", ctx.RealIP())
-		}
-		return true, nil // Token validation successful
-	}
-
-	// Token validation failed
-	if c.apiLogger != nil {
-		c.apiLogger.Warn("Token validation failed",
-			"error", validationErr.Error(), // Log the specific validation error
-			"path", ctx.Request().URL.Path,
-			"ip", ctx.RealIP(),
-		)
-	}
-	// Return specific error for invalid token
-	return false, errInvalidAuthToken
+// GetAuthMiddleware returns the authentication middleware function injected from server.
+// This replaces the previous getEffectiveAuthMiddleware that had fallback logic.
+//
+// Returns nil if no middleware was configured via WithAuthMiddleware option.
+// Callers should be aware that applying nil middleware to Echo routes is a no-op
+// (the routes become unprotected). A warning is logged during initialization
+// if auth middleware is not configured.
+func (c *Controller) GetAuthMiddleware() echo.MiddlewareFunc {
+	return c.authMiddleware
 }
 
-// handleSessionAuth attempts authentication using the existing session.
-// It returns true if authentication succeeds, false otherwise.
-// It now uses the Controller's AuthService instance.
-func (c *Controller) handleSessionAuth(ctx echo.Context) bool {
-	if c.AuthService == nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Error("handleSessionAuth called but AuthService is nil")
-		}
-		return false // Cannot authenticate without a service
-	}
-
-	err := c.AuthService.CheckAccess(ctx)
-	if err == nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Debug("Session authentication successful", "path", ctx.Request().URL.Path, "ip", ctx.RealIP())
-		}
-		return true
-	}
-
-	if c.apiLogger != nil {
-		c.apiLogger.Debug("Session authentication failed", "path", ctx.Request().URL.Path, "ip", ctx.RealIP(), "error", err.Error())
-	}
-	return false
-}
-
-// handleUnauthorized determines the appropriate response for unauthenticated requests.
-func (c *Controller) handleUnauthorized(ctx echo.Context) error {
-	acceptHeader := ctx.Request().Header.Get("Accept")
-	isHXRequest := ctx.Request().Header.Get("HX-Request") == "true"
-	isBrowserRequest := strings.Contains(acceptHeader, "text/html") || isHXRequest
-
-	if isBrowserRequest {
-		loginPath := "/login" // Assuming default login path is /login
-		// Get the actual origin URL of the request
-		originURL := ctx.Request().URL.String()
-		// Compare against the actual request path, not the route pattern
-		if !strings.HasPrefix(ctx.Request().URL.Path, loginPath) {
-			// Append redirect parameter only if the current path is not the login path
-			loginPath += "?redirect=" + url.QueryEscape(originURL)
-		}
-
-		if isHXRequest {
-			ctx.Response().Header().Set("HX-Redirect", loginPath)
-			return ctx.String(http.StatusUnauthorized, "")
-		}
-		return ctx.Redirect(http.StatusFound, loginPath)
-	}
-
-	// For API clients, return JSON error response
-	// Add WWW-Authenticate header for RFC 6750 compliance, indicating Bearer scheme is expected
-	ctx.Response().Header().Set("WWW-Authenticate", `Bearer realm="api"`)
-	return ctx.JSON(http.StatusUnauthorized, map[string]string{
-		"error": "Authentication required",
-	})
-}
-
-// isAuthRequiredWithoutService checks if authentication would be required based on settings
-// and IP bypass rules, even if the AuthService itself is nil. This is used as a fallback
-// check in AuthMiddleware.
-func (c *Controller) isAuthRequiredWithoutService(ctx echo.Context) bool {
-	// Assume auth is required if any provider is enabled
-	authWouldBeRequired := c.Settings.Security.BasicAuth.Enabled || c.Settings.Security.GoogleAuth.Enabled || c.Settings.Security.GithubAuth.Enabled
-
-	// Check for subnet bypass only if auth would otherwise be required
-	if authWouldBeRequired && c.Settings.Security.AllowSubnetBypass.Enabled {
-		ipStr := ctx.RealIP()
-		ip := net.ParseIP(ipStr)
-		if ip != nil {
-			if ip.IsLoopback() {
-				// Loopback always bypasses
-				authWouldBeRequired = false
-			} else {
-				// Check configured subnets
-				allowedSubnetsStr := c.Settings.Security.AllowSubnetBypass.Subnet
-				if allowedSubnetsStr != "" {
-					allowedSubnets := strings.SplitSeq(allowedSubnetsStr, ",")
-					for cidr := range allowedSubnets {
-						trimmedCIDR := strings.TrimSpace(cidr)
-						if trimmedCIDR == "" {
-							continue
-						}
-						_, subnet, err := net.ParseCIDR(trimmedCIDR)
-						if err == nil {
-							if subnet.Contains(ip) {
-								authWouldBeRequired = false // Bypass cancels requirement
-								break                       // Found a match, exit inner loop
-							}
-						} else {
-							// Log CIDR parsing errors
-							if c.apiLogger != nil {
-								c.apiLogger.Warn("Failed to parse CIDR string from AllowSubnetBypass settings",
-									"cidr_string", trimmedCIDR,
-									"error", err.Error(),
-								)
-							} else {
-								// Fallback to standard logger if apiLogger is nil
-								c.logger.Printf("[WARN] Failed to parse CIDR string \"%s\" from AllowSubnetBypass settings: %v", trimmedCIDR, err)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return authWouldBeRequired
-}
-
-// AuthMiddleware is a method that returns the auth middleware function
-// This is now considered the *fallback* middleware if authMiddlewareFn is nil.
-// It uses the Controller's stored AuthService instance.
-func (c *Controller) AuthMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(ctx echo.Context) error {
-		// Use the stored AuthService instance
-		authService := c.AuthService
-
-		if authService == nil {
-			// If service is nil (should only happen if auth wasn't configured properly),
-			// check if auth *would* have been required based on settings and IP bypass.
-			if c.isAuthRequiredWithoutService(ctx) {
-				if c.apiLogger != nil {
-					c.apiLogger.Error("AuthMiddleware called but AuthService is nil, denying access",
-						"path", ctx.Request().URL.Path,
-						"ip", ctx.RealIP(),
-					)
-				}
-				return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Internal auth configuration error"})
-			}
-
-			// Otherwise, if auth wouldn't have been required anyway, allow access.
-			if c.apiLogger != nil {
-				c.apiLogger.Warn("AuthMiddleware called but AuthService is nil; auth not required, allowing access",
-					"path", ctx.Request().URL.Path,
-					"ip", ctx.RealIP(),
-				)
-			}
-			ctx.Set("isAuthenticated", false)
-			ctx.Set("authMethod", auth.AuthMethodUnknown) // Use defined enum for 'none'
-			return next(ctx)
-		}
-
-		// Skip auth check if auth is not required for this client IP
-		if !authService.IsAuthRequired(ctx) {
-			if c.apiLogger != nil {
-				c.apiLogger.Debug("Authentication not required for this request", "path", ctx.Request().URL.Path, "ip", ctx.RealIP())
-			}
-			ctx.Set("isAuthenticated", false)
-			ctx.Set("authMethod", auth.AuthMethodUnknown) // Use defined enum for 'none'
-			return next(ctx)
-		}
-
-		// Try token authentication first
-		authenticated, tokenErr := c.handleTokenAuth(ctx)
-		if authenticated {
-			// Token auth successful
-			ctx.Set("isAuthenticated", true)
-			// NOTE: Cannot reliably get username from opaque token via current AuthService.
-			// Username will be empty unless the session also exists and contains it.
-			// ctx.Set("username", authService.GetUsername(ctx)) // Removed this line
-			ctx.Set("authMethod", auth.AuthMethodToken) // Store enum directly
-			return next(ctx)
-		}
-
-		// Handle errors from token authentication attempt
-		if tokenErr != nil {
-			switch { // Use switch without true (shorthand)
-			case errors.Is(tokenErr, errAuthServiceNil):
-				// Logged in handleTokenAuth already
-				return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Internal auth configuration error"})
-			case errors.Is(tokenErr, errMalformedAuthHeader):
-				// Logged in handleTokenAuth already
-				ctx.Response().Header().Set("WWW-Authenticate", `Bearer realm="api"`)
-				return ctx.JSON(http.StatusUnauthorized, map[string]string{"error": "Invalid Authorization header"})
-			case errors.Is(tokenErr, errInvalidAuthToken):
-				// Logged in handleTokenAuth already
-				ctx.Response().Header().Set("WWW-Authenticate", `Bearer realm="api", error="invalid_token", error_description="Invalid or expired token"`)
-				return ctx.JSON(http.StatusUnauthorized, map[string]string{"error": "Invalid or expired token"})
-			default:
-				// Handle unexpected errors from handleTokenAuth if any arise
-				if c.apiLogger != nil {
-					c.apiLogger.Error("Unexpected error during token authentication", "error", tokenErr)
-				}
-				return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": "Internal server error during authentication"})
-			}
-		}
-
-		// Token auth not attempted (no header) or failed, try session auth
-		if c.handleSessionAuth(ctx) {
-			ctx.Set("isAuthenticated", true)
-			ctx.Set("username", authService.GetUsername(ctx))
-			ctx.Set("authMethod", auth.AuthMethodBrowserSession) // Use defined enum for session
-			return next(ctx)
-		}
-
-		// Authentication failed completely, handle unauthorized response
-		return c.handleUnauthorized(ctx)
-	}
-}
-
-// getEffectiveAuthMiddleware returns the appropriate authentication middleware function.
-// It prioritizes the configured authMiddlewareFn and falls back to the
-// controller's AuthMiddleware method if the function is not set.
-func (c *Controller) getEffectiveAuthMiddleware() echo.MiddlewareFunc {
-	if c.authMiddlewareFn != nil {
-		if c.apiLogger != nil {
-			c.apiLogger.Info("Using configured authMiddlewareFn for route protection")
-		}
-		return c.authMiddlewareFn
-	} else {
-		if c.apiLogger != nil {
-			c.apiLogger.Warn("authMiddlewareFn not configured, using fallback AuthMiddleware method for route protection")
-		}
-		return c.AuthMiddleware // Return the method itself
-	}
-}
-
-// InitializeAPI creates a new API controller and registers all routes
-// It now accepts the OAuth2Server instance directly.
+// InitializeAPI creates a new API controller and registers all routes.
+// Auth middleware and service should be passed via functional options.
 func InitializeAPI(e *echo.Echo, ds datastore.Interface, settings *conf.Settings,
 	birdImageCache *imageprovider.BirdImageCache, sunCalc *suncalc.SunCalc,
-	controlChan chan string, logger *log.Logger, proc *processor.Processor,
-	oauth2Server *security.OAuth2Server, metrics *observability.Metrics) *Controller { // Added oauth2Server and metrics parameters
+	controlChan chan string, proc *processor.Processor,
+	metrics *observability.Metrics, opts ...Option) *Controller {
 
-	// Create API controller, passing oauth2Server and metrics directly to New
-	apiController, err := New(e, ds, settings, birdImageCache, sunCalc, controlChan, logger, oauth2Server, metrics)
+	// Create API controller with metrics and functional options
+	apiController, err := New(e, ds, settings, birdImageCache, sunCalc, controlChan, metrics, opts...)
 	if err != nil {
-		logger.Fatalf("Failed to initialize API: %v", err)
+		GetLogger().Error("Failed to initialize API", logger.Error(err))
+		os.Exit(1)
 	}
 
 	// Assign processor after initialization
 	apiController.Processor = proc
 
 	// Log initialization
-	if apiController.apiLogger != nil {
-		apiController.apiLogger.Info("API v2 initialized",
-			"version", settings.Version,
-			"build_date", settings.BuildDate,
-		)
-	}
+	apiController.logInfoIfEnabled("API v2 initialized",
+		logger.String("version", settings.Version),
+		logger.String("build_date", settings.BuildDate),
+	)
 
 	return apiController
 }

@@ -1,8 +1,9 @@
 <script lang="ts">
   import { cn } from '$lib/utils/cn';
   import ReconnectingEventSource from 'reconnecting-eventsource';
-  import { mediaIcons } from '$lib/utils/icons';
+  import { Mic, CirclePlay, CircleStop, Check } from '@lucide/svelte';
   import { loggers } from '$lib/utils/logger';
+  import { fetchWithCSRF } from '$lib/utils/api';
   import Hls from 'hls.js';
   import type { ErrorData } from 'hls.js';
   import { HLS_AUDIO_CONFIG, BUFFERING_STRATEGY, ERROR_HANDLING } from './hls-config';
@@ -134,9 +135,8 @@
     cleanupEventSource();
 
     try {
-      // TODO: Update to v2 API when available
       // ReconnectingEventSource with configuration
-      eventSource = new ReconnectingEventSource('/api/v1/audio-level', {
+      eventSource = new ReconnectingEventSource('/api/v2/streams/audio-level', {
         max_retry_time: 30000, // Max 30 seconds between reconnection attempts
         withCredentials: false, // Set to true if you need CORS credentials
       });
@@ -265,18 +265,12 @@
       if (!isPlaying || !playingSource) return;
 
       try {
-        // TODO: Update to v2 API when available
-        const response = await fetch('/api/v1/audio-stream-hls/heartbeat', {
+        await fetchWithCSRF('/api/v2/streams/hls/heartbeat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ source_id: playingSource }),
+          body: { source_id: playingSource },
         });
-
-        if (!response.ok) {
-          // Heartbeat failed
-        }
       } catch {
-        // Failed to send heartbeat
+        // Failed to send heartbeat - ignore
       }
     };
 
@@ -293,11 +287,9 @@
 
     // Send disconnect notification
     if (playingSource) {
-      // TODO: Update to v2 API when available
-      fetch('/api/v1/audio-stream-hls/heartbeat?disconnect=true', {
+      fetchWithCSRF('/api/v2/streams/hls/heartbeat?disconnect=true', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_id: playingSource }),
+        body: { source_id: playingSource },
       }).catch(() => {
         // Ignore errors during disconnect
       });
@@ -428,22 +420,22 @@
     const encodedSourceId = encodeURIComponent(sourceId);
 
     try {
-      // TODO: Update to v2 API when available
-      const response = await fetch(`/api/v1/audio-stream-hls/${encodedSourceId}/start`, {
+      // Use fetchWithCSRF for authenticated HLS endpoint
+      await fetchWithCSRF(`/api/v2/streams/hls/${encodedSourceId}/start`, {
         method: 'POST',
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to start stream: ${response.status} ${response.statusText}`);
-      }
-
-      const hlsUrl = `/api/v1/audio-stream-hls/${encodedSourceId}/playlist.m3u8`;
+      const hlsUrl = `/api/v2/streams/hls/${encodedSourceId}/playlist.m3u8`;
       await setupHLSStream(hlsUrl, sourceId);
 
       startHeartbeat();
-    } catch {
+    } catch (error) {
       // Handle audio stream access error
-      showStatusMessage('Error starting stream');
+      const message =
+        error instanceof Error && error.message.includes('permission')
+          ? 'Login required to stream audio'
+          : 'Error starting stream';
+      showStatusMessage(message);
       globalThis.setTimeout(() => hideStatusMessage(), 3000);
     }
   }
@@ -473,11 +465,10 @@
       navigator.mediaSession.playbackState = 'paused';
     }
 
-    // Notify server
+    // Notify server (use fetchWithCSRF for authenticated endpoint)
     if (previousSource) {
       const encodedSourceId = encodeURIComponent(previousSource);
-      // TODO: Update to v2 API when available
-      fetch(`/api/v1/audio-stream-hls/${encodedSourceId}/stop`, {
+      fetchWithCSRF(`/api/v2/streams/hls/${encodedSourceId}/stop`, {
         method: 'POST',
       }).catch(_err => {
         // Failed to notify server of playback stop
@@ -569,7 +560,7 @@
   <button
     bind:this={buttonRef}
     onclick={() => (dropdownOpen = !dropdownOpen)}
-    class="w-full h-full relative focus:outline-none group"
+    class="w-full h-full relative focus:outline-hidden group"
     aria-expanded={dropdownOpen}
     aria-haspopup="true"
     aria-label={`Audio level for ${selectedSource ? getSourceDisplayName(selectedSource) : 'No source'}`}
@@ -594,7 +585,7 @@
       />
     </svg>
     <div class="absolute inset-0 flex items-center justify-center">
-      {@html mediaIcons.microphone}
+      <Mic class="size-5" />
     </div>
     <!-- Screen reader announcement -->
     <div class="sr-only" aria-live="polite">
@@ -607,7 +598,7 @@
   {#if selectedSource && !dropdownOpen}
     <!-- Tooltip -->
     <div
-      class="invisible group-hover:visible absolute left-1/2 transform -translate-x-1/2 -translate-y-full mt-2 px-2 py-1 bg-gray-900 text-gray-50 text-sm rounded whitespace-nowrap z-50"
+      class="invisible group-hover:visible absolute left-1/2 transform -translate-x-1/2 -translate-y-full mt-2 px-2 py-1 bg-gray-900 text-gray-50 text-sm rounded-sm whitespace-nowrap z-50"
       style:top="-5px"
       aria-hidden="true"
     >
@@ -622,63 +613,96 @@
         bind:this={dropdownRef}
         role="menu"
         aria-label="Audio Source Selection"
-        class="absolute p-1 right-0 mt-2 w-auto min-w-[16rem] max-w-[90vw] overflow-hidden rounded-md shadow-lg bg-base-100 ring-1 ring-black ring-opacity-5 z-50"
+        class="audio-dropdown absolute top-full mt-2 w-72 sm:w-80 max-w-[calc(100vw-2rem)] bg-base-100 rounded-lg shadow-xl border border-base-300 overflow-hidden flex flex-col z-50"
       >
-        <div class="py-1" role="menu" aria-orientation="vertical">
+        <!-- Header -->
+        <div class="flex items-center justify-between p-4 border-b border-base-300">
+          <h3 class="text-lg font-semibold">Audio Sources</h3>
+        </div>
+
+        <!-- Source list -->
+        <div class="overflow-y-auto flex-1" role="menu" aria-orientation="vertical">
           {#if Object.keys(levels).length === 0}
-            <div class="px-4 py-2 text-sm text-base-content/60" role="menuitem">
-              No audio sources available
+            <div class="p-8 text-center text-base-content/60">
+              <div class="mx-auto mb-2 opacity-50">
+                <Mic class="size-12 mx-auto" />
+              </div>
+              <p>No audio sources available</p>
             </div>
           {:else}
-            {#each Object.entries(levels) as [source, _data]}
+            {#each Object.entries(levels) as [source, _data] (source)}
               <div
                 class={cn(
-                  'flex flex-row items-center w-full p-2 text-sm hover:bg-base-200 rounded-md',
-                  selectedSource === source && 'bg-base-200',
-                  isInactive(source) ? 'text-base-content/60' : 'text-base-content'
+                  'border-b border-base-300 p-4 hover:bg-base-200 transition-colors',
+                  selectedSource === source && 'bg-primary/10 border-l-2 border-l-primary'
                 )}
                 role="menuitem"
               >
-                <!-- Source name (clickable to select) -->
-                <button
-                  onclick={() => {
-                    selectedSource = source;
-                    dropdownOpen = false;
-                  }}
-                  class="flex-1 text-left flex items-center justify-between"
-                  role="menuitemradio"
-                  aria-checked={selectedSource === source}
-                >
-                  <span class="flex-1 whitespace-nowrap">{getSourceDisplayName(source)}</span>
-                  {#if isInactive(source)}
-                    <span class="text-xs text-base-content/60 shrink-0 ml-2" aria-hidden="true">
-                      (silent)
-                    </span>
-                  {/if}
-                </button>
+                <div class="flex items-center gap-3">
+                  <!-- Status indicator -->
+                  <div class="shrink-0">
+                    <div
+                      class={cn(
+                        'w-8 h-8 rounded-full flex items-center justify-center',
+                        isInactive(source)
+                          ? 'bg-base-300 text-base-content/60'
+                          : 'bg-success/20 text-success'
+                      )}
+                    >
+                      <Mic class="size-4" />
+                    </div>
+                  </div>
 
-                <!-- Play/Stop controls -->
-                <button
-                  onclick={() => {
-                    toggleSourcePlayback(source);
-                    dropdownOpen = false;
-                  }}
-                  class={cn(
-                    'btn btn-xs btn-circle btn-ghost ml-2',
-                    playingSource === source ? 'text-error' : 'text-success'
-                  )}
-                  aria-label={playingSource === source
-                    ? 'Stop audio playback'
-                    : 'Start audio playback'}
-                >
-                  {#if playingSource !== source}
-                    <!-- Play icon -->
-                    {@html mediaIcons.playCircle}
-                  {:else}
-                    <!-- Stop icon -->
-                    {@html mediaIcons.stopCircle}
-                  {/if}
-                </button>
+                  <!-- Source info (clickable to select) -->
+                  <button
+                    onclick={() => {
+                      selectedSource = source;
+                      dropdownOpen = false;
+                    }}
+                    class="flex-1 text-left min-w-0"
+                    role="menuitemradio"
+                    aria-checked={selectedSource === source}
+                  >
+                    <div class="flex items-center gap-2">
+                      <span
+                        class={cn(
+                          'font-medium text-sm truncate',
+                          isInactive(source) ? 'text-base-content/60' : 'text-base-content',
+                          selectedSource === source && 'text-primary'
+                        )}
+                      >
+                        {getSourceDisplayName(source)}
+                      </span>
+                      {#if selectedSource === source}
+                        <Check class="size-4 text-primary shrink-0" />
+                      {/if}
+                    </div>
+                    {#if isInactive(source)}
+                      <span class="text-xs text-base-content/60">(silent)</span>
+                    {/if}
+                  </button>
+
+                  <!-- Play/Stop controls -->
+                  <button
+                    onclick={() => {
+                      toggleSourcePlayback(source);
+                      dropdownOpen = false;
+                    }}
+                    class={cn(
+                      'btn btn-sm btn-circle btn-ghost shrink-0',
+                      playingSource === source ? 'text-error' : 'text-success'
+                    )}
+                    aria-label={playingSource === source
+                      ? 'Stop audio playback'
+                      : 'Start audio playback'}
+                  >
+                    {#if playingSource !== source}
+                      <CirclePlay class="size-5" />
+                    {:else}
+                      <CircleStop class="size-5" />
+                    {/if}
+                  </button>
+                </div>
               </div>
             {/each}
           {/if}
@@ -690,7 +714,7 @@
   <!-- Status message -->
   {#if showStatus}
     <div
-      class="fixed bottom-4 right-4 bg-primary text-primary-content p-2 rounded shadow-lg z-50"
+      class="fixed bottom-4 right-4 bg-primary text-primary-content p-2 rounded-sm shadow-lg z-50"
       role="status"
       aria-live="polite"
     >
@@ -709,3 +733,25 @@
     {/if}
   </div>
 </div>
+
+<style>
+  /* Mobile: fixed positioning centered horizontally to prevent overflow */
+  .audio-dropdown {
+    position: fixed;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    top: 4rem; /* Below header */
+  }
+
+  /* Desktop (sm+): absolute positioning aligned to button */
+  @media (min-width: 640px) {
+    .audio-dropdown {
+      position: absolute;
+      left: auto;
+      right: 0;
+      transform: none;
+      top: 100%;
+    }
+  }
+</style>

@@ -1,7 +1,6 @@
 package myaudio
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +9,14 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/observability/metrics"
+)
+
+// Audio file extension constants.
+const (
+	ExtWAV  = ".wav"
+	ExtFLAC = ".flac"
 )
 
 var (
@@ -45,6 +51,7 @@ func GetTotalChunks(sampleRate, totalSamples int, overlap float64) int {
 }
 
 func GetAudioInfo(filePath string) (AudioInfo, error) {
+	log := GetLogger()
 	start := time.Now()
 
 	// Validate input
@@ -80,7 +87,7 @@ func GetAudioInfo(filePath string) (AudioInfo, error) {
 	}
 
 	// Open the file
-	file, err := os.Open(filePath)
+	file, err := os.Open(filePath) //nolint:gosec // G304: filePath is from CLI args or directory walking
 	if err != nil {
 		enhancedErr := errors.New(err).
 			Component("myaudio").
@@ -98,16 +105,18 @@ func GetAudioInfo(filePath string) (AudioInfo, error) {
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			log.Printf("Failed to close audio file: %v", err)
+			log.Warn("failed to close audio file",
+				logger.Error(err),
+				logger.String("file_path", filePath))
 		}
 	}()
 
 	// Process based on file extension
 	var info AudioInfo
 	switch ext {
-	case ".wav":
+	case ExtWAV:
 		info, err = readWAVInfo(file)
-	case ".flac":
+	case ExtFLAC:
 		info, err = readFLACInfo(file)
 	default:
 		enhancedErr := errors.Newf("unsupported audio format: %s", ext).
@@ -154,6 +163,7 @@ func GetAudioInfo(filePath string) (AudioInfo, error) {
 
 // ReadAudioFileBuffered reads and processes audio data in chunks
 func ReadAudioFileBuffered(settings *conf.Settings, callback AudioChunkCallback) error {
+	log := GetLogger()
 	start := time.Now()
 
 	// Validate input
@@ -221,15 +231,17 @@ func ReadAudioFileBuffered(settings *conf.Settings, callback AudioChunkCallback)
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			log.Printf("Failed to close audio file: %v", err)
+			log.Warn("failed to close audio file",
+				logger.Error(err),
+				logger.String("file_path", settings.Input.Path))
 		}
 	}()
 
 	// Process based on file format
 	switch ext {
-	case ".wav":
+	case ExtWAV:
 		err = readWAVBuffered(file, settings, callback)
-	case ".flac":
+	case ExtFLAC:
 		err = readFLACBuffered(file, settings, callback)
 	default:
 		enhancedErr := errors.Newf("unsupported audio format: %s", ext).

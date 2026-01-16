@@ -455,7 +455,7 @@ describe('NumberField', () => {
     expect(onUpdate).toHaveBeenCalledWith(0);
   });
 
-  it('clamps values on blur event', async () => {
+  it('clamps values on blur-xs event', async () => {
     const onUpdate = vi.fn();
 
     render(NumberField, {
@@ -495,8 +495,8 @@ describe('NumberField', () => {
     // Input value above maximum
     await fireEvent.change(input, { target: { value: '15' } });
 
-    // Should show clamping message (check for the translated text with parameter placeholder)
-    expect(screen.getByText(/Value was adjusted to maximum \(\{value\}\)/)).toBeInTheDocument();
+    // Should show clamping message with interpolated value
+    expect(screen.getByText(/Value was adjusted to maximum \(10\)/)).toBeInTheDocument();
   });
 
   it('handles extremely large numbers by clamping', async () => {

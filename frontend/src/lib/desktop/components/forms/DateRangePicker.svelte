@@ -3,7 +3,7 @@
   import { formatDateForInput, formatDate } from '$lib/utils/formatters';
   import { parseLocalDateString } from '$lib/utils/date';
   import FormField from './FormField.svelte';
-  import { alertIconsSvg } from '$lib/utils/icons'; // Centralized icons - see icons.ts
+  import { XCircle } from '@lucide/svelte';
   import { t } from '$lib/i18n';
 
   interface DatePreset {
@@ -253,9 +253,7 @@
 
   {#if error}
     <div class="alert alert-error mt-2">
-      <div class="w-4 h-4">
-        {@html alertIconsSvg.error}
-      </div>
+      <XCircle class="size-4" />
       <span class="text-sm">{error}</span>
     </div>
   {/if}
@@ -264,7 +262,7 @@
     <div class="mt-4">
       <div class="text-sm font-medium mb-2">{t('forms.dateRange.labels.quickSelect')}</div>
       <div class="flex flex-wrap gap-2">
-        {#each presets as preset}
+        {#each presets as preset (preset.key)}
           <button
             type="button"
             class={cn('btn btn-sm', isPresetActive(preset) ? 'btn-primary' : 'btn-ghost')}
@@ -290,7 +288,7 @@
   {/if}
 
   {#if startDateObj && endDateObj}
-    <div class="mt-2 text-sm text-base-content/70">
+    <div class="mt-2 text-sm text-base-content opacity-70">
       {t('forms.dateRange.labels.selected', {
         startDate: formatDate(startDateObj),
         endDate: formatDate(endDateObj),

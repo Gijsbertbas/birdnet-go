@@ -13,6 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Test constants for type assertion testing.
+const (
+	typeBool    = "bool"
+	typeInt     = "int"
+	typeFloat64 = "float64"
+	typeString  = "string"
+)
+
 func TestValidateEnvBool(t *testing.T) {
 	t.Parallel()
 
@@ -549,28 +557,28 @@ func TestValueCanonicalization(t *testing.T) {
 		expectedValue any
 	}{
 		// Boolean canonicalization
-		{"boolean true", "BIRDNET_DEBUG", "true", "birdnet.debug", "bool", true},
-		{"boolean false", "BIRDNET_DEBUG", "false", "birdnet.debug", "bool", false},
-		{"boolean with spaces", "BIRDNET_DEBUG", " TRUE ", "birdnet.debug", "bool", true},
-		{"boolean uppercase", "BIRDNET_USEXNNPACK", "FALSE", "birdnet.usexnnpack", "bool", false},
+		{"boolean true", "BIRDNET_DEBUG", "true", "birdnet.debug", typeBool, true},
+		{"boolean false", "BIRDNET_DEBUG", "false", "birdnet.debug", typeBool, false},
+		{"boolean with spaces", "BIRDNET_DEBUG", " TRUE ", "birdnet.debug", typeBool, true},
+		{"boolean uppercase", "BIRDNET_USEXNNPACK", "FALSE", "birdnet.usexnnpack", typeBool, false},
 
 		// Integer canonicalization
-		{"threads zero", "BIRDNET_THREADS", "0", "birdnet.threads", "int", 0},
-		{"threads positive", "BIRDNET_THREADS", "8", "birdnet.threads", "int", 8},
-		{"threads with spaces", "BIRDNET_THREADS", " 4 ", "birdnet.threads", "int", 4},
+		{"threads zero", "BIRDNET_THREADS", "0", "birdnet.threads", typeInt, 0},
+		{"threads positive", "BIRDNET_THREADS", "8", "birdnet.threads", typeInt, 8},
+		{"threads with spaces", "BIRDNET_THREADS", " 4 ", "birdnet.threads", typeInt, 4},
 
 		// Float canonicalization
-		{"latitude", "BIRDNET_LATITUDE", "45.5", "birdnet.latitude", "float64", 45.5},
-		{"longitude with spaces", "BIRDNET_LONGITUDE", " -120.5 ", "birdnet.longitude", "float64", -120.5},
-		{"sensitivity", "BIRDNET_SENSITIVITY", "1.2", "birdnet.sensitivity", "float64", 1.2},
-		{"threshold", "BIRDNET_THRESHOLD", "0.8", "birdnet.threshold", "float64", 0.8},
-		{"overlap", "BIRDNET_OVERLAP", "2.5", "birdnet.overlap", "float64", 2.5},
+		{"latitude", "BIRDNET_LATITUDE", "45.5", "birdnet.latitude", typeFloat64, 45.5},
+		{"longitude with spaces", "BIRDNET_LONGITUDE", " -120.5 ", "birdnet.longitude", typeFloat64, -120.5},
+		{"sensitivity", "BIRDNET_SENSITIVITY", "1.2", "birdnet.sensitivity", typeFloat64, 1.2},
+		{"threshold", "BIRDNET_THRESHOLD", "0.8", "birdnet.threshold", typeFloat64, 0.8},
+		{"overlap", "BIRDNET_OVERLAP", "2.5", "birdnet.overlap", typeFloat64, 2.5},
 
 		// String canonicalization
-		{"locale lowercase", "BIRDNET_LOCALE", "EN-US", "birdnet.locale", "string", "en-us"},
-		{"locale with spaces", "BIRDNET_LOCALE", " de-DE ", "birdnet.locale", "string", "de-de"},
-		{"model path trimmed", "BIRDNET_MODELPATH", " /path/to/model ", "birdnet.modelpath", "string", "/path/to/model"},
-		{"range filter model", "BIRDNET_RANGEFILTER_MODEL", " latest ", "birdnet.rangefilter.model", "string", "latest"},
+		{"locale lowercase", "BIRDNET_LOCALE", "EN-US", "birdnet.locale", typeString, "en-us"},
+		{"locale with spaces", "BIRDNET_LOCALE", " de-DE ", "birdnet.locale", typeString, "de-de"},
+		{"model path trimmed", "BIRDNET_MODELPATH", " /path/to/model ", "birdnet.modelpath", typeString, "/path/to/model"},
+		{"range filter model", "BIRDNET_RANGEFILTER_MODEL", " latest ", "birdnet.rangefilter.model", typeString, "latest"},
 	}
 
 	for _, tt := range tests {
@@ -587,20 +595,20 @@ func TestValueCanonicalization(t *testing.T) {
 
 			// Verify type
 			switch tt.expectedType {
-			case "bool":
+			case typeBool:
 				assert.IsType(t, bool(false), actual, "Expected bool type")
 				assert.Equal(t, tt.expectedValue, actual)
-			case "int":
+			case typeInt:
 				assert.IsType(t, int(0), actual, "Expected int type")
 				assert.Equal(t, tt.expectedValue, actual)
-			case "float64":
+			case typeFloat64:
 				assert.IsType(t, float64(0), actual, "Expected float64 type")
 				assert.Equal(t, tt.expectedValue, actual)
-			case "string":
+			case typeString:
 				assert.IsType(t, "", actual, "Expected string type")
 				assert.Equal(t, tt.expectedValue, actual)
 			default:
-				t.Fatalf("Unknown expected type: %s", tt.expectedType)
+				require.Fail(t, "Unknown expected type", "type: %s", tt.expectedType)
 			}
 		})
 	}
@@ -624,7 +632,7 @@ func TestEnvironmentVariableValidationPreservesDefaults(t *testing.T) {
 			envVar:        "BIRDNET_DEBUG",
 			invalidEnvVal: "not_a_boolean",
 			validEnvVal:   "false",
-			expectedType:  "bool",
+			expectedType:  typeBool,
 		},
 		{
 			name:          "invalid threads preserves default",
@@ -633,7 +641,7 @@ func TestEnvironmentVariableValidationPreservesDefaults(t *testing.T) {
 			envVar:        "BIRDNET_THREADS",
 			invalidEnvVal: "not_a_number",
 			validEnvVal:   "8",
-			expectedType:  "int",
+			expectedType:  typeInt,
 		},
 		{
 			name:          "invalid threshold preserves default",
@@ -642,7 +650,7 @@ func TestEnvironmentVariableValidationPreservesDefaults(t *testing.T) {
 			envVar:        "BIRDNET_THRESHOLD",
 			invalidEnvVal: "not_a_float",
 			validEnvVal:   "0.5",
-			expectedType:  "float64",
+			expectedType:  typeFloat64,
 		},
 		{
 			name:          "invalid locale preserves default",
@@ -651,7 +659,7 @@ func TestEnvironmentVariableValidationPreservesDefaults(t *testing.T) {
 			envVar:        "BIRDNET_LOCALE",
 			invalidEnvVal: "toolong_invalid_locale",
 			validEnvVal:   "fr",
-			expectedType:  "string",
+			expectedType:  typeString,
 		},
 	}
 
@@ -680,13 +688,13 @@ func TestEnvironmentVariableValidationPreservesDefaults(t *testing.T) {
 
 			// Verify type is preserved
 			switch tt.expectedType {
-			case "bool":
+			case typeBool:
 				assert.IsType(t, true, actualValue, "Type should remain bool")
-			case "int":
+			case typeInt:
 				assert.IsType(t, 0, actualValue, "Type should remain int")
-			case "float64":
+			case typeFloat64:
 				assert.IsType(t, 0.0, actualValue, "Type should remain float64")
-			case "string":
+			case typeString:
 				assert.IsType(t, "", actualValue, "Type should remain string")
 			}
 
@@ -705,18 +713,148 @@ func TestEnvironmentVariableValidationPreservesDefaults(t *testing.T) {
 
 			// Verify type conversion happened correctly for typed values
 			switch tt.expectedType {
-			case "bool":
+			case typeBool:
 				expected, _ := strconv.ParseBool(tt.validEnvVal)
 				assert.Equal(t, expected, actualValue)
-			case "int":
+			case typeInt:
 				expected, _ := strconv.Atoi(tt.validEnvVal)
 				assert.Equal(t, expected, actualValue)
-			case "float64":
+			case typeFloat64:
 				expected, _ := strconv.ParseFloat(tt.validEnvVal, 64)
 				assert.InEpsilon(t, expected, actualValue, 1e-9)
-			case "string":
+			case typeString:
 				assert.Equal(t, strings.ToLower(tt.validEnvVal), actualValue)
 			}
 		})
 	}
+}
+
+// Test constants for BaseURL validation.
+const (
+	validHTTPSURL       = "https://birdnet.example.com"
+	validHTTPURL        = "http://localhost:8080"
+	validURLWithPort    = "https://birdnet.example.com:5500"
+	validURLWithPath    = "https://birdnet.example.com/app"
+	invalidURLNoScheme  = "birdnet.example.com"
+	invalidURLBadScheme = "ftp://birdnet.example.com"
+	invalidURLNoHost    = "https://"
+	invalidURLEmpty     = ""
+)
+
+func TestValidateEnvBaseURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+		errMsg  string
+	}{
+		// Valid URLs
+		{"valid HTTPS URL", validHTTPSURL, false, ""},
+		{"valid HTTP URL", validHTTPURL, false, ""},
+		{"valid URL with custom port", validURLWithPort, false, ""},
+		{"valid URL with path", validURLWithPath, false, ""},
+		{"valid URL with trailing slash", "https://birdnet.example.com/", false, ""},
+		{"valid localhost", "http://localhost", false, ""},
+		{"valid IP address", "http://192.168.1.100:8080", false, ""},
+		{"valid IPv6 address", "https://[::1]:8080", false, ""},
+
+		// Whitespace handling
+		{"valid with leading space", " https://birdnet.example.com", false, ""},
+		{"valid with trailing space", "https://birdnet.example.com ", false, ""},
+		{"valid with surrounding spaces", "  https://birdnet.example.com  ", false, ""},
+		{"valid with tab", "\thttps://birdnet.example.com\t", false, ""},
+
+		// Invalid URLs - missing scheme
+		{"missing scheme", invalidURLNoScheme, true, "must include scheme"},
+		{"missing scheme with port", "birdnet.example.com:8080", true, "must be http or https"}, // Go parses "birdnet.example.com" as scheme
+
+		// Invalid URLs - wrong scheme
+		{"ftp scheme", invalidURLBadScheme, true, "must be http or https"},
+		{"file scheme", "file:///etc/passwd", true, "must be http or https"},
+		{"ws scheme", "ws://birdnet.example.com", true, "must be http or https"},
+		{"wss scheme", "wss://birdnet.example.com", true, "must be http or https"},
+
+		// Invalid URLs - missing hostname
+		{"missing host", invalidURLNoHost, true, "must include a valid hostname"},
+		{"scheme only", "https://", true, "must include a valid hostname"},
+		{"scheme with slash", "http:///path", true, "must include a valid hostname"},
+		{"port without hostname", "http://:8080", true, "must include a valid hostname"},
+		{"port without hostname https", "https://:443", true, "must include a valid hostname"},
+
+		// Invalid URLs - empty or malformed
+		{"empty string", invalidURLEmpty, true, "must not be empty"},
+		{"whitespace only", "   ", true, "must not be empty"},
+		{"tab only", "\t", true, "must not be empty"},
+		{"newline only", "\n", true, "must not be empty"},
+
+		// Edge cases
+		{"URL with query string", "https://birdnet.example.com?foo=bar", false, ""},
+		{"URL with fragment", "https://birdnet.example.com#section", false, ""},
+		{"URL with userinfo", "https://user:pass@birdnet.example.com", false, ""},
+		{"URL with all components", "https://user:pass@birdnet.example.com:8080/path?q=1#frag", false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateEnvBaseURL(tt.value)
+			if tt.wantErr {
+				require.Error(t, err, "Expected error for value: %q", tt.value)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg,
+						"Error message should contain %q for value: %q", tt.errMsg, tt.value)
+				}
+			} else {
+				assert.NoError(t, err, "Expected no error for value: %q", tt.value)
+			}
+		})
+	}
+}
+
+func TestValidateEnvBaseURL_Integration(t *testing.T) {
+	// Test integration with configureEnvironmentVariables
+
+	t.Run("valid BIRDNET_URL sets config", func(t *testing.T) {
+		viper.Reset()
+		t.Setenv("BIRDNET_URL", validURLWithPort)
+
+		err := configureEnvironmentVariables()
+		require.NoError(t, err)
+
+		actual := viper.GetString(ConfigKeyBaseURL)
+		// Should have trailing slash trimmed by canonicalization
+		assert.Equal(t, validURLWithPort, actual)
+	})
+
+	t.Run("BIRDNET_URL with trailing slash is trimmed", func(t *testing.T) {
+		viper.Reset()
+		t.Setenv("BIRDNET_URL", "https://birdnet.example.com/")
+
+		err := configureEnvironmentVariables()
+		require.NoError(t, err)
+
+		actual := viper.GetString(ConfigKeyBaseURL)
+		assert.Equal(t, "https://birdnet.example.com", actual, "Trailing slash should be trimmed")
+	})
+
+	t.Run("invalid BIRDNET_URL returns error", func(t *testing.T) {
+		viper.Reset()
+		t.Setenv("BIRDNET_URL", invalidURLNoScheme)
+
+		err := configureEnvironmentVariables()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "BIRDNET_URL")
+	})
+
+	t.Run("BIRDNET_URL with invalid scheme returns error", func(t *testing.T) {
+		viper.Reset()
+		t.Setenv("BIRDNET_URL", invalidURLBadScheme)
+
+		err := configureEnvironmentVariables()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be http or https")
+	})
 }

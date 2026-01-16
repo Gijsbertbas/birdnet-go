@@ -4,8 +4,6 @@ vars:
   BINARY_DIR: bin
   BINARY_NAME: birdnet-go
   TFLITE_VERSION: v2.17.1
-  TAILWIND_INPUT: tailwind.input.css
-  TAILWIND_OUTPUT: assets/tailwind.css
   LABELS_DIR: internal/birdnet/data/labels
   AVICOMMONS_DATA_DIR: internal/imageprovider/data
   AVICOMMONS_JSON_FILE: latest.json
@@ -58,6 +56,32 @@ tasks:
       - go tool cover -html=coverage/coverage.out -o coverage/coverage.html
     vars:
       TEST_FLAGS: '{{default "" .CLI_ARGS}}'
+
+  # Go linting with CGO support for TensorFlow
+  lint:
+    desc: Run golangci-lint with TensorFlow CGO flags
+    cmds:
+      - |
+        # Determine library path based on OS
+        if [ "{{.UNAME_S}}" = "Darwin" ]; then
+          if [ "{{.UNAME_M}}" = "arm64" ]; then
+            LIB_DIR="/opt/homebrew/lib"
+          else
+            LIB_DIR="/usr/local/lib"
+          fi
+        else
+          LIB_DIR="/usr/lib"
+        fi
+        {{.CGO_FLAGS}} CGO_LDFLAGS="-L${LIB_DIR} -ltensorflowlite_c" \
+        golangci-lint run {{.CLI_ARGS}}
+    vars:
+      CLI_ARGS: '{{default "-v" .CLI_ARGS}}'
+
+  lint-fix:
+    desc: Run golangci-lint with auto-fix enabled
+    cmds:
+      - task: lint
+        vars: {CLI_ARGS: "--fix -v"}
 
   # New Task: Download Avicommons Data
   download-avicommons-data:
@@ -117,12 +141,12 @@ tasks:
         echo "  • Go dev tools (golangci-lint, air)"
         echo "  • Frontend dependencies and Playwright browsers"
         echo ""
-        read -p "Continue with setup? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-          echo "Setup cancelled."
-          exit 1
-        fi
+        printf "Continue with setup? (y/N) "
+        read REPLY
+        case "$REPLY" in
+          [Yy]|[Yy][Ee][Ss]) ;;
+          *) echo "Setup cancelled."; exit 1 ;;
+        esac
       - task: detect-and-install-deps
       - task: install-go-tools
       - task: setup-frontend-dev
@@ -147,7 +171,10 @@ tasks:
       - |
         echo "🔍 Detecting operating system..."
 
-        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Use uname for reliable OS detection (OSTYPE is bash-specific and may be empty)
+        DETECTED_OS="$(uname -s)"
+
+        if [ "$DETECTED_OS" = "Linux" ]; then
           echo "📦 Installing dependencies for Linux (apt-based)..."
 
           # Check if running as root or with sudo
@@ -181,21 +208,23 @@ tasks:
             CURRENT_GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
             CURRENT_GO_MINOR=$(echo "$CURRENT_GO_VERSION" | cut -d. -f1,2)
 
-            if [[ "$CURRENT_GO_MINOR" != "$REQUIRED_GO_VERSION"* ]]; then
-              echo "⚠️  Go ${CURRENT_GO_VERSION} found, but Go ${REQUIRED_GO_VERSION}.x required"
-              echo "   Current: ${CURRENT_GO_VERSION}"
-              echo "   Required: ${REQUIRED_GO_VERSION}.x"
-              echo ""
-              read -p "   Upgrade to Go ${GO_VERSION}? (y/N) " -n 1 -r
-              echo
-              if [[ $REPLY =~ ^[Yy]$ ]]; then
-                INSTALL_GO=true
-              else
-                echo "⚠️  Continuing with Go ${CURRENT_GO_VERSION} - you may encounter compatibility issues"
-              fi
-            else
-              echo "✅ Go ${CURRENT_GO_VERSION} is already installed (meets requirement)"
-            fi
+            case "$CURRENT_GO_MINOR" in
+              ${REQUIRED_GO_VERSION}*)
+                echo "✅ Go ${CURRENT_GO_VERSION} is already installed (meets requirement)"
+                ;;
+              *)
+                echo "⚠️  Go ${CURRENT_GO_VERSION} found, but Go ${REQUIRED_GO_VERSION}.x required"
+                echo "   Current: ${CURRENT_GO_VERSION}"
+                echo "   Required: ${REQUIRED_GO_VERSION}.x"
+                echo ""
+                printf "   Upgrade to Go ${GO_VERSION}? (y/N) "
+                read REPLY
+                case "$REPLY" in
+                  [Yy]|[Yy][Ee][Ss]) INSTALL_GO=true ;;
+                  *) echo "⚠️  Continuing with Go ${CURRENT_GO_VERSION} - you may encounter compatibility issues" ;;
+                esac
+                ;;
+            esac
           fi
 
           if [ "$INSTALL_GO" = true ]; then
@@ -251,15 +280,18 @@ tasks:
             echo "   Allows building for ARM64/aarch64 from x86_64"
             echo "   Useful for building for Raspberry Pi, etc."
             echo ""
-            read -p "   Install ARM64 cross-compilation tools? (y/N) " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-              echo "📥 Installing ARM64 cross-compilation tools..."
-              $SUDO apt-get install -y gcc-aarch64-linux-gnu
-              echo "✅ ARM64 cross-compilation tools installed"
-            else
-              echo "⏭️  Skipping ARM64 cross-compilation tools"
-            fi
+            printf "   Install ARM64 cross-compilation tools? (y/N) "
+            read REPLY
+            case "$REPLY" in
+              [Yy]|[Yy][Ee][Ss])
+                echo "📥 Installing ARM64 cross-compilation tools..."
+                $SUDO apt-get install -y gcc-aarch64-linux-gnu
+                echo "✅ ARM64 cross-compilation tools installed"
+                ;;
+              *)
+                echo "⏭️  Skipping ARM64 cross-compilation tools"
+                ;;
+            esac
           else
             echo "✅ ARM64 cross-compilation tools already installed"
           fi
@@ -270,7 +302,7 @@ tasks:
             sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
           fi
 
-        elif [[ "$OSTYPE" == "darwin"* ]]; then
+        elif [ "$DETECTED_OS" = "Darwin" ]; then
           echo "📦 Installing dependencies for macOS (homebrew)..."
 
           # Check if homebrew is installed
@@ -297,21 +329,23 @@ tasks:
             CURRENT_GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
             CURRENT_GO_MINOR=$(echo "$CURRENT_GO_VERSION" | cut -d. -f1,2)
 
-            if [[ "$CURRENT_GO_MINOR" != "$REQUIRED_GO_VERSION"* ]]; then
-              echo "⚠️  Go ${CURRENT_GO_VERSION} found, but Go ${REQUIRED_GO_VERSION}.x required"
-              echo "   Current: ${CURRENT_GO_VERSION}"
-              echo "   Required: ${REQUIRED_GO_VERSION}.x"
-              echo ""
-              read -p "   Upgrade to Go ${REQUIRED_GO_VERSION}? (y/N) " -n 1 -r
-              echo
-              if [[ $REPLY =~ ^[Yy]$ ]]; then
-                INSTALL_GO=true
-              else
-                echo "⚠️  Continuing with Go ${CURRENT_GO_VERSION} - you may encounter compatibility issues"
-              fi
-            else
-              echo "✅ Go ${CURRENT_GO_VERSION} is already installed (meets requirement)"
-            fi
+            case "$CURRENT_GO_MINOR" in
+              ${REQUIRED_GO_VERSION}*)
+                echo "✅ Go ${CURRENT_GO_VERSION} is already installed (meets requirement)"
+                ;;
+              *)
+                echo "⚠️  Go ${CURRENT_GO_VERSION} found, but Go ${REQUIRED_GO_VERSION}.x required"
+                echo "   Current: ${CURRENT_GO_VERSION}"
+                echo "   Required: ${REQUIRED_GO_VERSION}.x"
+                echo ""
+                printf "   Upgrade to Go ${REQUIRED_GO_VERSION}? (y/N) "
+                read REPLY
+                case "$REPLY" in
+                  [Yy]|[Yy][Ee][Ss]) INSTALL_GO=true ;;
+                  *) echo "⚠️  Continuing with Go ${CURRENT_GO_VERSION} - you may encounter compatibility issues" ;;
+                esac
+                ;;
+            esac
           fi
 
           if [ "$INSTALL_GO" = true ]; then
@@ -326,9 +360,10 @@ tasks:
               brew install go
               INSTALLED_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
               echo "✅ Go ${INSTALLED_VERSION} installed"
-              if [[ "$INSTALLED_VERSION" != "$REQUIRED_GO_VERSION"* ]]; then
-                echo "⚠️  Installed version may not match project requirements"
-              fi
+              case "$INSTALLED_VERSION" in
+                ${REQUIRED_GO_VERSION}*) ;;
+                *) echo "⚠️  Installed version may not match project requirements" ;;
+              esac
             fi
           fi
 
@@ -350,7 +385,7 @@ tasks:
           fi
 
         else
-          echo "❌ Unsupported operating system: $OSTYPE"
+          echo "❌ Unsupported operating system: $DETECTED_OS"
           echo "This script supports Linux (apt-based) and macOS (homebrew)"
           exit 1
         fi
@@ -456,14 +491,17 @@ tasks:
           CURRENT_GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
           CURRENT_GO_MINOR=$(echo "$CURRENT_GO_VERSION" | cut -d. -f1,2)
 
-          if [[ "$CURRENT_GO_MINOR" == "$REQUIRED_GO_VERSION"* ]]; then
-            echo "✅ Go: ${CURRENT_GO_VERSION} (meets ${REQUIRED_GO_VERSION}.x requirement)"
-          else
-            echo "❌ Go: ${CURRENT_GO_VERSION} found, but ${REQUIRED_GO_VERSION}.x required"
-            echo "   Current version does not match project requirements"
-            echo "   Run 'task setup-dev' to install the correct version"
-            exit 1
-          fi
+          case "$CURRENT_GO_MINOR" in
+            ${REQUIRED_GO_VERSION}*)
+              echo "✅ Go: ${CURRENT_GO_VERSION} (meets ${REQUIRED_GO_VERSION}.x requirement)"
+              ;;
+            *)
+              echo "❌ Go: ${CURRENT_GO_VERSION} found, but ${REQUIRED_GO_VERSION}.x required"
+              echo "   Current version does not match project requirements"
+              echo "   Run 'task setup-dev' to install the correct version"
+              exit 1
+              ;;
+          esac
         else
           echo "❌ Go: not found"
           echo "   Run 'task setup-dev' to install Go"
@@ -575,22 +613,6 @@ tasks:
           echo "TensorFlow headers already exist at version {{.TFLITE_VERSION}}"
         fi
 
-  download-assets:
-    cmds:
-      - mkdir -p assets
-      - curl -sL https://unpkg.com/leaflet/dist/leaflet.js -o assets/leaflet.js
-      - curl -sL https://unpkg.com/leaflet/dist/leaflet.css -o assets/leaflet.css
-      - curl -sL https://unpkg.com/htmx.org@2.0 -o assets/htmx.min.js
-      - curl -sL https://unpkg.com/alpinejs -o assets/alpinejs.min.js
-      - curl -sL https://cdn.jsdelivr.net/npm/hls.js@latest -o assets/hls.min.js
-      - curl -sL https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js -o assets/chart.min.js
-      - curl -sL https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js -o assets/chartjs-adapter-date-fns.bundle.min.js
-
-  generate-tailwindcss:
-    cmds:
-      - npm -D install daisyui@4.12.24
-      - npx --yes tailwindcss@3.4.17 -i {{.TAILWIND_INPUT}} -o {{.TAILWIND_OUTPUT}} --minify
-
   dev_server:
     cmds:
       - air realtime
@@ -633,11 +655,57 @@ tasks:
       - dist/**/*
 
   frontend-dev:
-    desc: Start frontend development server
+    desc: Start Vite dev server with HMR (access via localhost:5173)
     dir: frontend
     deps: [frontend-install]
     cmds:
       - npm run dev
+
+  frontend-watch:
+    desc: Build frontend in watch mode (auto-rebuild on changes)
+    dir: frontend
+    deps: [frontend-install]
+    cmds:
+      - |
+        echo "🔧 Starting frontend watch mode..."
+        echo "   Files will be rebuilt automatically when changed"
+        echo "   The Go server will serve these files from disk"
+        echo ""
+      - npm run build -- --watch
+
+  dev:
+    desc: Show instructions for frontend development workflow
+    cmds:
+      - |
+        echo ""
+        echo "🚀 BirdNET-Go Frontend Development Workflow"
+        echo ""
+        echo "The Go server automatically detects and serves frontend files from disk"
+        echo "when frontend/dist/ exists, enabling fast frontend iteration without"
+        echo "rebuilding the Go binary."
+        echo ""
+        echo "Option 1: Watch Mode (recommended for most development)"
+        echo "==========================================================="
+        echo "Terminal 1: task frontend-watch    # Auto-rebuilds on file changes"
+        echo "Terminal 2: ./bin/birdnet-go realtime  # Or: air realtime (for Go changes)"
+        echo "Access: http://localhost:8080"
+        echo ""
+        echo "Option 2: Vite Dev Server (for HMR - instant updates)"
+        echo "==========================================================="
+        echo "Terminal 1: task frontend-dev      # Vite dev server with HMR"
+        echo "Terminal 2: ./bin/birdnet-go realtime  # Backend for API calls"
+        echo "Access: http://localhost:5173      # Note: different port!"
+        echo ""
+        echo "Option 3: Backend-only development (Go changes)"
+        echo "==========================================================="
+        echo "Terminal 1: task frontend-watch    # Keep frontend fresh"
+        echo "Terminal 2: air realtime           # Auto-rebuilds Go on changes"
+        echo "Access: http://localhost:8080"
+        echo ""
+        echo "Quick Start:"
+        echo "  task frontend-watch  # In one terminal"
+        echo "  air realtime         # In another terminal"
+        echo ""
 
   frontend-lint:
     desc: Lint frontend code
@@ -668,6 +736,37 @@ tasks:
     deps: [frontend-install]
     cmds:
       - npm run test -- --run
+
+  # Integration Testing Tasks
+  integration-backend:
+    desc: Start backend for integration testing (air with hot reload)
+    cmds:
+      - air realtime
+
+  integration-test:
+    desc: Run frontend integration tests (backend must be running)
+    dir: frontend
+    deps: [frontend-install]
+    cmds:
+      - |
+        if ! curl -s http://localhost:8080/api/v2/health > /dev/null 2>&1; then
+          echo "⚠️  Backend not running at localhost:8080"
+          echo "   Start it with: task integration-backend"
+          echo "   Or use: task integration-test-auto (starts backend automatically)"
+          echo ""
+          echo "Running tests anyway (they will be skipped if backend unavailable)..."
+        fi
+      - npm run test:integration -- --run
+
+  integration-test-auto:
+    desc: Run integration tests with automatic backend management
+    dir: frontend
+    deps: [frontend-install]
+    cmds:
+      - |
+        echo "🧪 Running integration tests with auto-managed backend..."
+        echo "   Backend will be started automatically by Vitest global setup"
+      - npm run test:integration:auto -- --run
 
   frontend-test-coverage:
     desc: Run frontend tests with coverage
@@ -881,22 +980,25 @@ tasks:
             fi
           fi
           
-          if [[ "{{.TFLITE_LIB_ARCH}}" == *.zip ]]; then
-            unzip -o "tflite_c_{{.TFLITE_VERSION}}_{{.TFLITE_LIB_ARCH}}"
-            if [ -w "{{.TFLITE_LIB_DIR}}" ]; then
-              mv "{{.LIB_FILENAME}}" "{{.TFLITE_LIB_DIR}}/"
-            else
-              sudo mv "{{.LIB_FILENAME}}" "{{.TFLITE_LIB_DIR}}/"
-            fi
-          else
-            tar -xzf "tflite_c_{{.TFLITE_VERSION}}_{{.TFLITE_LIB_ARCH}}"
-            if [ -w "{{.TFLITE_LIB_DIR}}" ]; then
-              mv "{{.LIB_FILENAME}}" "{{.TFLITE_LIB_DIR}}/"
-            else
-              sudo mv "{{.LIB_FILENAME}}" "{{.TFLITE_LIB_DIR}}/"
-            fi
-          fi
-          
+          case "{{.TFLITE_LIB_ARCH}}" in
+            *.zip)
+              unzip -o "tflite_c_{{.TFLITE_VERSION}}_{{.TFLITE_LIB_ARCH}}"
+              if [ -w "{{.TFLITE_LIB_DIR}}" ]; then
+                mv "{{.LIB_FILENAME}}" "{{.TFLITE_LIB_DIR}}/"
+              else
+                sudo mv "{{.LIB_FILENAME}}" "{{.TFLITE_LIB_DIR}}/"
+              fi
+              ;;
+            *)
+              tar -xzf "tflite_c_{{.TFLITE_VERSION}}_{{.TFLITE_LIB_ARCH}}"
+              if [ -w "{{.TFLITE_LIB_DIR}}" ]; then
+                mv "{{.LIB_FILENAME}}" "{{.TFLITE_LIB_DIR}}/"
+              else
+                sudo mv "{{.LIB_FILENAME}}" "{{.TFLITE_LIB_DIR}}/"
+              fi
+              ;;
+          esac
+
           rm -f "tflite_c_{{.TFLITE_VERSION}}_{{.TFLITE_LIB_ARCH}}"
         fi
       - task: ensure-tflite-symlinks
@@ -1003,24 +1105,31 @@ tasks:
           fi
         fi
       - |
-        if [[ "{{.LIB_FILENAME}}" == *.dll ]] && [ ! -f "{{.LIB_DIR}}/tensorflowlite_c.dll" ]; then
-          if [ -w "{{.LIB_DIR}}" ]; then
-            ln -sf "{{.LIB_DIR}}/{{.LIB_FILENAME}}" "{{.LIB_DIR}}/tensorflowlite_c.dll"
-          else
-            sudo ln -sf "{{.LIB_DIR}}/{{.LIB_FILENAME}}" "{{.LIB_DIR}}/tensorflowlite_c.dll"
-          fi
-        elif [ "{{.UNAME_S}}" = "Linux" ] && [ ! -f "{{.LIB_DIR}}/libtensorflowlite_c.so" ]; then
-          if [ -w "{{.LIB_DIR}}" ]; then
-            cd {{.LIB_DIR}} && \
-            ln -sf {{.LIB_FILENAME}} libtensorflowlite_c.so.2 && \
-            ln -sf libtensorflowlite_c.so.2 libtensorflowlite_c.so
-          else
-            cd {{.LIB_DIR}} && \
-            sudo ln -sf {{.LIB_FILENAME}} libtensorflowlite_c.so.2 && \
-            sudo ln -sf libtensorflowlite_c.so.2 libtensorflowlite_c.so
-          fi
-        elif [ "{{.UNAME_S}}" = "Darwin" ] && [ ! -f "{{.LIB_DIR}}/libtensorflowlite_c.dylib" ]; then
-          cd {{.LIB_DIR}} && \
-          ln -sf {{.LIB_FILENAME}} libtensorflowlite_c.dylib
-        fi 
+        case "{{.LIB_FILENAME}}" in
+          *.dll)
+            if [ ! -f "{{.LIB_DIR}}/tensorflowlite_c.dll" ]; then
+              if [ -w "{{.LIB_DIR}}" ]; then
+                ln -sf "{{.LIB_DIR}}/{{.LIB_FILENAME}}" "{{.LIB_DIR}}/tensorflowlite_c.dll"
+              else
+                sudo ln -sf "{{.LIB_DIR}}/{{.LIB_FILENAME}}" "{{.LIB_DIR}}/tensorflowlite_c.dll"
+              fi
+            fi
+            ;;
+          *)
+            if [ "{{.UNAME_S}}" = "Linux" ] && [ ! -f "{{.LIB_DIR}}/libtensorflowlite_c.so" ]; then
+              if [ -w "{{.LIB_DIR}}" ]; then
+                cd {{.LIB_DIR}} && \
+                ln -sf {{.LIB_FILENAME}} libtensorflowlite_c.so.2 && \
+                ln -sf libtensorflowlite_c.so.2 libtensorflowlite_c.so
+              else
+                cd {{.LIB_DIR}} && \
+                sudo ln -sf {{.LIB_FILENAME}} libtensorflowlite_c.so.2 && \
+                sudo ln -sf libtensorflowlite_c.so.2 libtensorflowlite_c.so
+              fi
+            elif [ "{{.UNAME_S}}" = "Darwin" ] && [ ! -f "{{.LIB_DIR}}/libtensorflowlite_c.dylib" ]; then
+              cd {{.LIB_DIR}} && \
+              ln -sf {{.LIB_FILENAME}} libtensorflowlite_c.dylib
+            fi
+            ;;
+        esac
       

@@ -107,17 +107,19 @@ routeInitializers := []struct {
 | DELETE | `/detections/:id`             | `DeleteDetection`       | ✅   | Delete detection record     |
 | POST   | `/detections/:id/review`      | `ReviewDetection`       | ✅   | Review/verify detection     |
 | POST   | `/detections/:id/lock`        | `LockDetection`         | ✅   | Lock detection from changes |
-| POST   | `/detections/ignore`          | `IgnoreSpecies`         | ✅   | Add species to ignore list  |
+| POST   | `/detections/ignore`          | `IgnoreSpecies`         | ✅   | Toggle species in ignore list (add/remove) |
+| GET    | `/detections/ignored`         | `GetExcludedSpecies`    | ✅   | Get list of excluded species |
 
 ### Integrations (`integrations.go`)
 
-| Method | Route                              | Handler                     | Auth | Description                      |
-| ------ | ---------------------------------- | --------------------------- | ---- | -------------------------------- |
-| GET    | `/integrations/mqtt/status`        | `GetMQTTStatus`             | ✅   | MQTT connection status           |
-| POST   | `/integrations/mqtt/test`          | `TestMQTTConnection`        | ✅   | Test MQTT connection             |
-| GET    | `/integrations/birdweather/status` | `GetBirdWeatherStatus`      | ✅   | BirdWeather integration status   |
-| POST   | `/integrations/birdweather/test`   | `TestBirdWeatherConnection` | ✅   | Test BirdWeather connection      |
-| POST   | `/integrations/weather/test`       | `TestWeatherConnection`     | ✅   | Test weather provider connection |
+| Method | Route                                        | Handler                         | Auth | Description                           |
+| ------ | -------------------------------------------- | ------------------------------- | ---- | ------------------------------------- |
+| GET    | `/integrations/mqtt/status`                  | `GetMQTTStatus`                 | ✅   | MQTT connection status                |
+| POST   | `/integrations/mqtt/test`                    | `TestMQTTConnection`            | ✅   | Test MQTT connection                  |
+| POST   | `/integrations/mqtt/homeassistant/discovery` | `TriggerHomeAssistantDiscovery` | ✅   | Trigger Home Assistant MQTT discovery |
+| GET    | `/integrations/birdweather/status`           | `GetBirdWeatherStatus`          | ✅   | BirdWeather integration status        |
+| POST   | `/integrations/birdweather/test`             | `TestBirdWeatherConnection`     | ✅   | Test BirdWeather connection           |
+| POST   | `/integrations/weather/test`                 | `TestWeatherConnection`         | ✅   | Test weather provider connection      |
 
 ### Media (`media.go`)
 
@@ -191,12 +193,106 @@ routeInitializers := []struct {
 | GET    | `/soundlevels/stream` | `StreamSoundLevels` | ❌⚡ | Real-time audio level stream |
 | GET    | `/sse/status`         | `GetSSEStatus`      | ❌   | SSE connection status        |
 
-### Streams (`streams.go`)
+### Audio Level SSE (`audio_level.go`)
 
-| Method | Route                    | Handler                     | Auth | Description         |
-| ------ | ------------------------ | --------------------------- | ---- | ------------------- |
-| GET    | `/streams/audio-level`   | `HandleAudioLevelStream`    | ✅   | Audio level stream  |
-| GET    | `/streams/notifications` | `HandleNotificationsStream` | ✅   | Notification stream |
+| Method | Route                  | Handler            | Auth | Description             |
+| ------ | ---------------------- | ------------------ | ---- | ----------------------- |
+| GET    | `/streams/audio-level` | `StreamAudioLevel` | ❌   | Real-time audio level SSE |
+
+**Features:**
+
+- Real-time audio level data for UI audio indicators (0-100 with clipping detection)
+- Automatic source anonymization for unauthenticated clients
+- Connection limiting: up to 5 concurrent connections per client IP (allows multiple browser tabs)
+- Maximum connection duration: 30 minutes
+- Heartbeat interval: 10 seconds
+
+**Event Format:**
+
+```json
+{
+  "type": "audio-level",
+  "levels": {
+    "source_id_1": {
+      "level": 45,
+      "name": "Audio Source Name",
+      "source": "source_id_1",
+      "clipping": false
+    }
+  }
+}
+```
+
+### HLS Streaming (`audio_hls.go`)
+
+| Method | Route                                  | Handler            | Auth | Description                   |
+| ------ | -------------------------------------- | ------------------ | ---- | ----------------------------- |
+| POST   | `/streams/hls/:sourceID/start`         | `StartHLSStream`   | ✅   | Start HLS stream for source   |
+| POST   | `/streams/hls/:sourceID/stop`          | `StopHLSStream`    | ✅   | Stop HLS stream               |
+| POST   | `/streams/hls/heartbeat`               | `HLSHeartbeat`     | ❌   | Keep HLS stream alive         |
+| GET    | `/streams/hls/status`                  | `GetHLSStatus`     | ❌   | Get status of all HLS streams |
+| GET    | `/streams/hls/:sourceID/playlist.m3u8` | `ServeHLSPlaylist` | ❌   | Get HLS playlist              |
+| GET    | `/streams/hls/:sourceID/*`             | `ServeHLSContent`  | ❌   | Serve HLS segments and init   |
+
+**Start HLS Stream:**
+
+- `POST /api/v2/streams/hls/{URL-encoded-sourceID}/start`
+- Optional query param: `?force=true` to restart an existing stream
+
+**Start HLS Stream Response:**
+
+```json
+{
+  "status": "ready",
+  "source": "rtsp%3A%2F%2Fcamera.local%3A554%2Fstream",
+  "playlist_url": "/api/v2/streams/hls/rtsp%3A%2F%2Fcamera.local%3A554%2Fstream/playlist.m3u8",
+  "active_clients": 1,
+  "playlist_ready": true
+}
+```
+
+**Heartbeat Request:**
+
+```json
+{
+  "source_id": "rtsp://camera.local:554/stream",
+  "client_id": "optional-client-id"
+}
+```
+
+**Status Response:**
+
+```json
+{
+  "streams": [
+    {
+      "status": "active",
+      "source": "rtsp%3A%2F%2Fcamera.local%3A554%2Fstream",
+      "playlist_url": "/api/v2/streams/hls/...",
+      "active_clients": 2,
+      "playlist_ready": true
+    }
+  ],
+  "count": 1
+}
+```
+
+**Features:**
+
+- FFmpeg-based HLS streaming with AAC audio encoding
+- Automatic stream cleanup after 5 minutes of inactivity
+- Stream reuse: existing healthy streams are reused for new clients
+- Client tracking with heartbeat-based keep-alive
+- Secure file serving with path validation
+- Cross-platform support (FIFO on Unix, stdin pipe on Windows)
+- Configurable bitrate (16-320 kbps), sample rate, and segment length
+
+**Configuration (via settings):**
+
+- `BitRate`: Audio bitrate in kbps (default: 128, range: 16-320)
+- `SampleRate`: Audio sample rate in Hz (default: 48000)
+- `SegmentLength`: HLS segment duration in seconds (default: 2, range: 1-30)
+- `FfmpegLogLevel`: FFmpeg log level (default: "warning")
 
 ### Stream Health Monitoring (`streams_health.go`)
 
@@ -313,8 +409,10 @@ if param == "" {
 ### Logging
 
 ```go
-// Use structured logging
-c.logAPIRequest(ctx, slog.LevelInfo, "Operation completed", "key", value)
+// Use structured logging with type-safe field constructors
+c.log.Info("operation completed",
+    logger.String("key", value),
+    logger.String("ip", ctx.RealIP()))
 ```
 
 ### Authentication

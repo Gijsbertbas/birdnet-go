@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore/mocks"
@@ -40,6 +41,39 @@ type SSETestConfig struct {
 	maxConnections    int
 	testTimeout       time.Duration
 	connectionTimeout time.Duration
+}
+
+// attemptSSEConnection attempts to establish an SSE connection and read events.
+// Returns true if connection was established and events were read.
+func attemptSSEConnection(t *testing.T, serverURL, endpoint string, connID int, timeout time.Duration) bool {
+	t.Helper()
+	client := createTestHTTPClient(timeout)
+	defer client.CloseIdleConnections()
+
+	req, err := http.NewRequest("GET", serverURL+"/api/v2"+endpoint, http.NoBody)
+	if err != nil {
+		assert.NoErrorf(t, err, "Connection %d: Failed to create request", connID)
+		return false
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false // May fail due to rate limiting
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	// Read a few events
+	scanner := bufio.NewScanner(resp.Body)
+	eventCount := 0
+	for scanner.Scan() && eventCount < 3 {
+		eventCount++
+	}
+	return true
 }
 
 // Common test configurations for different SSE endpoints
@@ -199,7 +233,7 @@ func testSingleConnectionContextCancellation(t *testing.T, server *httptest.Serv
 	case <-done:
 		// Expected - connection should close due to context cancellation
 	case <-time.After(500 * time.Millisecond):
-		t.Error("Connection did not close within expected time after context cancellation")
+		assert.Fail(t, "Connection did not close within expected time after context cancellation")
 	}
 
 	// Response body will be closed by defer
@@ -217,49 +251,16 @@ func testMultipleConcurrentConnections(t *testing.T, server *httptest.Server, co
 	var wg sync.WaitGroup
 	var connectionsEstablished int32
 
-	// Start multiple concurrent connections using Go 1.25's WaitGroup.Go()
-	// LLM GUIDANCE: This pattern replaces the old wg.Add(1) + go func() + defer wg.Done()
 	for i := 0; i < config.maxConnections; i++ {
 		connID := i
-		// Use WaitGroup.Go() for automatic Add/Done management (Go 1.25)
-		// This eliminates common bugs from forgetting wg.Done() or calling wg.Add() after goroutine starts
 		wg.Go(func() {
-
-			client := createTestHTTPClient(config.testTimeout)
-			defer client.CloseIdleConnections() // Always cleanup
-
-			req, err := http.NewRequest("GET", server.URL+"/api/v2"+config.endpoint, http.NoBody)
-			if err != nil {
-				t.Errorf("Connection %d: Failed to create request: %v", connID, err)
-				return
-			}
-			req.Header.Set("Accept", "text/event-stream")
-
-			resp, err := client.Do(req)
-			if err != nil {
-				// May fail due to rate limiting, which is acceptable
-				return
-			}
-			defer func() { _ = resp.Body.Close() }()
-
-			if resp.StatusCode == http.StatusOK {
+			if attemptSSEConnection(t, server.URL, config.endpoint, connID, config.testTimeout) {
 				atomic.AddInt32(&connectionsEstablished, 1)
-
-				// Read a few events
-				scanner := bufio.NewScanner(resp.Body)
-				eventCount := 0
-				for scanner.Scan() && eventCount < 3 {
-					eventCount++
-				}
 			}
 		})
 	}
 
-	// Wait for all connections to complete
 	wg.Wait()
-
-	// Cleanup is immediate with DisableKeepAlives=true
-	// At least one connection should have been established
 	require.Positive(t, int(atomic.LoadInt32(&connectionsEstablished)),
 		"At least one connection should have been established")
 }
@@ -416,7 +417,7 @@ func setupSSETestServer(t *testing.T) (*httptest.Server, *Controller) {
 	require.NoError(t, err, "Failed to initialize metrics")
 
 	// Create controller WITH route initialization
-	controller, err := NewWithOptions(e, mockDS, settings, nil, nil, controlChan, nil, nil, mockMetrics, true)
+	controller, err := NewWithOptions(e, mockDS, settings, nil, nil, controlChan, mockMetrics, true)
 	require.NoError(t, err)
 
 	// Wait for goroutines to start
@@ -425,7 +426,7 @@ func setupSSETestServer(t *testing.T) (*httptest.Server, *Controller) {
 		case <-controller.goroutinesStarted:
 			// Controller is ready
 		case <-time.After(2 * time.Second):
-			t.Fatal("Controller failed to start within timeout")
+			require.Fail(t, "Controller failed to start within timeout")
 		}
 	}
 
@@ -490,7 +491,7 @@ func setupSSETestServerForBench(b *testing.B) (*httptest.Server, *Controller) {
 	controlChan := make(chan string, 10)
 	mockMetrics, _ := observability.NewMetrics()
 
-	controller, err := NewWithOptions(e, mockDS, settings, nil, nil, controlChan, nil, nil, mockMetrics, true)
+	controller, err := NewWithOptions(e, mockDS, settings, nil, nil, controlChan, mockMetrics, true)
 	if err != nil {
 		b.Fatal(err)
 	}

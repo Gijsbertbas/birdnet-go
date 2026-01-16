@@ -4,30 +4,87 @@
 
 - **Svelte 5** with Runes (`$state`, `$derived`, `$effect`)
 - **TypeScript** - NO `any` types without justification
-- **Tailwind 3** + **daisyUI 4** components
+- **Tailwind v4.1** (native CSS only, no component libraries)
 - **Vite** build, **Vitest** testing
 - **i18n** - Custom implementation in `@i18n`
 
 ## Critical Rules
 
 - **NEVER use `any` type**
-- **NEVER create inline SVGs** - use `$lib/utils/icons`
+- **NEVER create inline SVGs** - use `@lucide/svelte` icons
 - **NEVER use `toISOString()` for dates** - use `getLocalDateString()`
 - **Use D3.js for ALL charting/plotting** - unless specific requirement for custom approach
 - **Run `npm run check:all` before EVERY commit**
 
 ## Structure
 
-```
+```text
 frontend/
 ├── src/lib/
 │   ├── components/{charts,data,forms,media,ui}/
 │   ├── features/{analytics,detections,settings}/
+│   ├── i18n/              # i18n configuration and utilities
 │   ├── pages/
 │   ├── stores/
 │   └── utils/
+├── static/messages/       # Translation files (JSON)
+│   ├── en.json           # English (primary)
+│   ├── de.json           # German
+│   ├── es.json           # Spanish
+│   ├── fi.json           # Finnish
+│   ├── fr.json           # French
+│   ├── nl.json           # Dutch
+│   ├── pl.json           # Polish
+│   └── pt.json           # Portuguese
 └── dist/
 ```
+
+## Internationalization (i18n)
+
+### Translation Files Location
+
+All translation files are in `frontend/static/messages/`:
+
+```bash
+frontend/static/messages/
+├── en.json  # English (primary - update this first)
+├── de.json  # German
+├── es.json  # Spanish
+├── fi.json  # Finnish
+├── fr.json  # French
+├── nl.json  # Dutch
+├── pl.json  # Polish
+└── pt.json  # Portuguese
+```
+
+### Adding New Translation Keys
+
+**CRITICAL: When adding new translation keys, you MUST update ALL language files.**
+
+1. Add the key to `en.json` first (English is the source of truth)
+2. Add translations to ALL other language files (de, es, fi, fr, nl, pl, pt)
+3. Use the same key structure across all files
+
+```bash
+# Quick check for missing keys
+grep -l "newKeyName" frontend/static/messages/*.json
+```
+
+### Usage in Components
+
+```svelte
+<script lang="ts">
+  import { t } from '$lib/i18n';
+</script>
+
+<p>{t('about.avicommonsTitle')}</p><p>{t('about.avicommonsDescription')}</p>
+```
+
+### Key Naming Convention
+
+- Use dot notation for nested keys: `section.subsection.key`
+- Use camelCase for key names: `avicommonsDescription`
+- Group related keys under common prefixes: `about.`, `settings.`, `notifications.`
 
 ## Commands
 
@@ -210,15 +267,18 @@ let settings = $derived(
 
 ```svelte
 <script>
-  import { navigationIcons, actionIcons } from '$lib/utils/icons';
+  import { X, Search, Settings } from '@lucide/svelte';
 </script>
 
 <!-- ✅ Correct -->
-{@html navigationIcons.close}
+<X class="h-4 w-4" />
+<Search class="h-5 w-5" />
 
 <!-- ❌ Wrong -->
 <svg>...</svg>
 ```
+
+See `$lib/utils/ICONS.md` for common icons and usage patterns.
 
 ## Logging
 
@@ -287,8 +347,12 @@ function getCsrfToken(): string | null {
 ### Buttons
 
 ```svelte
+<script>
+  import { X } from '@lucide/svelte';
+</script>
+
 <button aria-label="Close dialog">
-  {@html navigationIcons.close}
+  <X class="h-4 w-4" />
 </button>
 ```
 
@@ -353,9 +417,14 @@ node tools/test-all-pages.js
 
 ```svelte
 {#if loading}
-  <div class="loading loading-spinner" />
+  <div class="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full" />
 {:else if error}
-  <div role="alert" class="alert alert-error">{error.message}</div>
+  <div
+    role="alert"
+    class="p-4 rounded-lg bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
+  >
+    {error.message}
+  </div>
 {:else}
   <Content />
 {/if}
@@ -403,9 +472,36 @@ sed -i 's/export let/let/g' file.svelte
 sg scan --pattern "export let $PROP = $DEFAULT" --rewrite "let { $PROP = $DEFAULT } = $props()" src/
 ```
 
+## Svelte MCP (REQUIRED)
+
+The Svelte MCP server provides official documentation and code validation tools. **You MUST use this for all Svelte development.**
+
+### Required Usage
+
+1. **When writing/modifying Svelte components**: Always run the Svelte autofixer (`mcp__svelte__svelte-autofixer`) on the component code before committing
+2. **When unsure about Svelte 5 syntax**: Use `mcp__svelte__list-sections` and `mcp__svelte__get-documentation` to fetch official docs
+3. **For code examples**: Use `mcp__svelte__playground-link` to generate shareable playground links
+
+### Svelte Autofixer Workflow
+
+```
+1. Write/modify Svelte component
+2. Run svelte-autofixer with the component code
+3. Fix any issues reported
+4. Re-run autofixer until no issues remain
+5. Commit the code
+```
+
+### Common Issues Caught by Autofixer
+
+- Missing keys in `{#each}` blocks
+- Incorrect rune usage
+- Svelte 4 patterns that should be migrated
+- Accessibility issues
+
 ## Resources
 
-- Svelte 5 docs available via MCP tool
+- **Svelte MCP** - Use `mcp__svelte__*` tools for official Svelte 5/SvelteKit documentation
 - WCAG: https://www.w3.org/WAI/WCAG21/quickref/
 - axe DevTools browser extension for testing
 - ast-grep docs: https://ast-grep.github.io/

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { cn } from '$lib/utils/cn';
   import type { HTMLAttributes } from 'svelte/elements';
-  import { navigationIcons } from '$lib/utils/icons'; // Centralized icons - see icons.ts
+  import { ChevronLeft, ChevronRight } from '@lucide/svelte';
   import { t } from '$lib/i18n';
 
   interface Props extends HTMLAttributes<HTMLElement> {
@@ -26,7 +26,7 @@
   }: Props = $props();
 
   // Calculate visible page numbers
-  let visiblePages = $derived(() => {
+  let visiblePages = $derived.by(() => {
     const pages: number[] = [];
     let start = Math.max(1, currentPage - Math.floor(maxVisiblePages / 2));
     let end = Math.min(totalPages, start + maxVisiblePages - 1);
@@ -71,12 +71,12 @@
       disabled={disabled || currentPage === 1}
       aria-label={t('dataDisplay.pagination.goToPreviousPage')}
     >
-      {@html navigationIcons.arrowLeft}
+      <ChevronLeft class="size-4" />
     </button>
 
     <!-- Page numbers -->
     {#if showPageInfo && totalPages > 1}
-      {@const pages = visiblePages()}
+      {@const pages = visiblePages}
       {@const firstPage = pages[0]}
       {@const lastPage = pages[pages.length - 1]}
       {#if firstPage > 1}
@@ -86,7 +86,7 @@
         {/if}
       {/if}
 
-      {#each pages as page}
+      {#each pages as page (page)}
         <button
           class={cn('join-item btn btn-sm', { 'btn-active': page === currentPage })}
           onclick={() => goToPage(page)}
@@ -119,7 +119,7 @@
       disabled={disabled || currentPage === totalPages}
       aria-label={t('dataDisplay.pagination.goToNextPage')}
     >
-      {@html navigationIcons.arrowRight}
+      <ChevronRight class="size-4" />
     </button>
   </div>
 </nav>

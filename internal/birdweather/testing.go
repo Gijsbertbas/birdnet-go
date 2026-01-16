@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -15,12 +14,73 @@ import (
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // Rate limiting constants
 const (
 	// Minimum time between test submissions (1 minute)
 	minTestInterval = 1 * time.Minute
+)
+
+// Test configuration defaults
+const (
+	// defaultFailureProbability is the default probability for simulated failures
+	defaultFailureProbability = 0.5
+
+	// defaultMinDelayMs is the default minimum delay in milliseconds for simulated delays
+	defaultMinDelayMs = 500
+
+	// defaultMaxDelayMs is the default maximum delay in milliseconds for simulated delays
+	defaultMaxDelayMs = 3000
+)
+
+// Audio constants for test data generation
+const (
+	// testAudioSampleRate is the sample rate for test audio data (48kHz)
+	testAudioSampleRate = 48000
+
+	// testAudioBytesPerSample is the number of bytes per audio sample (16-bit = 2 bytes)
+	testAudioBytesPerSample = 2
+
+	// testAudioDurationFraction is the fraction of a second for test audio (0.5 seconds)
+	testAudioDurationFraction = 2 // sampleRate / 2 = 0.5 seconds
+)
+
+// generateTestPCMData creates a small test PCM data buffer (500ms of silence)
+// This is used in multiple test functions to avoid code duplication
+func generateTestPCMData() []byte {
+	numSamples := testAudioSampleRate / testAudioDurationFraction // 0.5 seconds
+	return make([]byte, numSamples*testAudioBytesPerSample)
+}
+
+// newSecureHTTPClient creates an HTTP client with secure TLS configuration
+// This helper reduces code duplication for creating HTTP clients with TLS settings
+func newSecureHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: false,
+			},
+		},
+	}
+}
+
+// HTTP status code constants for testing
+const (
+	// httpStatusClientError is the threshold for client error status codes
+	httpStatusClientError = 400
+
+	// httpStatusUnauthorized is the 401 status code
+	httpStatusUnauthorized = 401
+
+	// httpStatusForbidden is the 403 status code
+	httpStatusForbidden = 403
+
+	// httpStatusNotFound is the 404 status code
+	httpStatusNotFound = 404
 )
 
 // DNS Fallback resolvers
@@ -78,7 +138,11 @@ func checkRateLimit() error {
 // resolveDNSWithFallback attempts to resolve a hostname using fallback DNS servers if the OS resolver fails
 // It uses shorter timeouts per DNS server to avoid long waits when multiple servers are unreachable
 // The provided context allows callers to control overall timeout and cancellation
+//
+//nolint:gocognit // Complexity justified: DNS fallback requires multiple resolver attempts with per-attempt timeout management
 func resolveDNSWithFallback(ctx context.Context, hostname string) ([]net.IP, error) {
+	log := GetLogger()
+
 	// First try the standard resolver with context-based timeout
 	// Create a child context with systemDNSTimeout, but respect parent cancellation
 	dnsCtx, cancel := context.WithTimeout(ctx, systemDNSTimeout)
@@ -94,13 +158,17 @@ func resolveDNSWithFallback(ctx context.Context, hostname string) ([]net.IP, err
 	// Go 1.23+: Better timeout detection via errors.Is(err, context.DeadlineExceeded)
 	if err != nil {
 		if isDNSTimeout(err) {
-			log.Printf("Standard DNS resolution for %s timed out after %v (likely multiple unreachable DNS servers)", hostname, systemDNSTimeout)
+			log.Warn("Standard DNS resolution timed out (likely multiple unreachable DNS servers)",
+				logger.String("hostname", hostname),
+				logger.Duration("timeout", systemDNSTimeout))
 		} else {
-			log.Printf("Standard DNS resolution for %s failed: %v", hostname, err)
+			log.Warn("Standard DNS resolution failed",
+				logger.String("hostname", hostname),
+				logger.Error(err))
 		}
 	}
 
-	log.Printf("Attempting to resolve %s using fallback DNS servers...", hostname)
+	log.Info("Attempting to resolve using fallback DNS servers", logger.String("hostname", hostname))
 
 	// Try each fallback resolver with shorter, independent timeouts
 	var lastErr error
@@ -145,15 +213,23 @@ func resolveDNSWithFallback(ctx context.Context, hostname string) ([]net.IP, err
 			for i, addr := range fallbackIPs {
 				result[i] = addr.IP
 			}
-			log.Printf("Successfully resolved %s using fallback DNS %s: %v", hostname, resolver, result)
+			log.Info("Successfully resolved using fallback DNS",
+				logger.String("hostname", hostname),
+				logger.String("resolver", resolver),
+				logger.Any("ips", result))
 			return result, nil
 		}
 
 		// Log the failure reason
 		if err == nil {
-			log.Printf("Fallback DNS %s returned no records for %s", resolver, hostname)
+			log.Debug("Fallback DNS returned no records",
+				logger.String("resolver", resolver),
+				logger.String("hostname", hostname))
 		} else {
-			log.Printf("Fallback DNS %s failed to resolve %s: %v", resolver, hostname, err)
+			log.Debug("Fallback DNS resolution failed",
+				logger.String("resolver", resolver),
+				logger.String("hostname", hostname),
+				logger.Error(err))
 		}
 	}
 
@@ -184,9 +260,9 @@ type TestConfig struct {
 var testConfig = &TestConfig{
 	Enabled:            false,
 	RandomFailureMode:  false,
-	FailureProbability: 0.5,
-	MinDelay:           500,
-	MaxDelay:           3000,
+	FailureProbability: defaultFailureProbability,
+	MinDelay:           defaultMinDelayMs,
+	MaxDelay:           defaultMaxDelayMs,
 	rng:                rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), uint64(time.Now().UnixNano()))), //nolint:gosec // G404: weak randomness acceptable for test utilities, not security-critical
 }
 
@@ -263,12 +339,12 @@ const (
 	// DNS-specific timeouts
 	// Linux default DNS timeout is 5s per server. With multiple DNS servers configured,
 	// total time can be 5s × N servers. We allow time for 2 server attempts (10s).
-	systemDNSTimeout   = 10 * time.Second // Maximum wait for system DNS (allows 2 × 5s server attempts)
+	systemDNSTimeout = 10 * time.Second // Maximum wait for system DNS (allows 2 × 5s server attempts)
 
 	// Per-server timeouts for fallback DNS resolution
 	// Set to 5s to match Linux default and allow each DNS server a full timeout attempt
-	dnsResolverTimeout = 5 * time.Second  // Per-server connection timeout: matches Linux DNS default
-	dnsLookupTimeout   = 5 * time.Second  // Per-lookup timeout: allows one full DNS server attempt
+	dnsResolverTimeout = 5 * time.Second // Per-server connection timeout: matches Linux DNS default
+	dnsLookupTimeout   = 5 * time.Second // Per-lookup timeout: allows one full DNS server attempt
 )
 
 // networkTest represents a generic network test function
@@ -348,7 +424,11 @@ func runTest(ctx context.Context, stage TestStage, test birdweatherTest) TestRes
 }
 
 // testAPIConnectivity tests basic connectivity to the BirdWeather API
+//
+//nolint:gocognit // Complexity justified: connectivity testing requires multiple fallback attempts and error handling paths
 func (b *BwClient) testAPIConnectivity(ctx context.Context) TestResult {
+	log := GetLogger()
+
 	apiCtx, apiCancel := context.WithTimeout(ctx, apiTimeout)
 	defer apiCancel()
 
@@ -364,13 +444,13 @@ func (b *BwClient) testAPIConnectivity(ctx context.Context) TestResult {
 		hostname := parsedURL.Hostname()
 
 		// First attempt: Use standard HTTP client
-		log.Printf("Testing connectivity to BirdWeather API at %s", apiEndpoint)
+		log.Info("Testing connectivity to BirdWeather API", logger.String("endpoint", apiEndpoint))
 		err = tryAPIConnection(ctx, apiEndpoint)
 
 		// If first attempt fails with DNS error, try fallback DNS resolution
 		if err != nil {
 			if isDNSError(err) {
-				log.Printf("DNS resolution failed: %v, attempting fallback...", err)
+				log.Warn("DNS resolution failed, attempting fallback", logger.Error(err))
 
 				// Attempt DNS resolution with fallback resolvers
 				ips, resolveErr := resolveDNSWithFallback(ctx, hostname)
@@ -380,22 +460,23 @@ func (b *BwClient) testAPIConnectivity(ctx context.Context) TestResult {
 
 				// If fallback DNS succeeded, it means the system DNS is incorrectly configured
 				// We don't connect directly with IP as that would cause HTTPS certificate validation issues
-				log.Printf("Fallback DNS successfully resolved %s while system DNS failed", hostname)
-				log.Printf("This indicates your system DNS is incorrectly configured")
+				log.Info("Fallback DNS successfully resolved while system DNS failed",
+					logger.String("hostname", hostname))
+				log.Warn("This indicates your system DNS is incorrectly configured")
 
 				// Log the resolved IPs for debugging
 				ipStrings := make([]string, len(ips))
 				for i, ip := range ips {
 					ipStrings[i] = ip.String()
 				}
-				log.Printf("Resolved IPs using fallback DNS: %s", strings.Join(ipStrings, ", "))
+				log.Debug("Resolved IPs using fallback DNS", logger.String("ips", strings.Join(ipStrings, ", ")))
 
 				// Try connecting again with the original FQDN - this may work if the DNS
 				// resolution failure was transient or if the fallback resolution affected DNS cache
-				log.Printf("Retrying connection with original hostname after fallback DNS resolution")
+				log.Info("Retrying connection with original hostname after fallback DNS resolution")
 				retryErr := tryAPIConnection(ctx, apiEndpoint)
 				if retryErr == nil {
-					log.Printf("✅ Successfully connected to BirdWeather API after fallback DNS resolution")
+					log.Info("Successfully connected to BirdWeather API after fallback DNS resolution")
 					return nil
 				}
 
@@ -478,6 +559,8 @@ func replaceHostWithIP(urlStr, ip string) string {
 
 // tryAPIConnection attempts to connect to the API endpoint
 func tryAPIConnection(ctx context.Context, apiEndpoint string, hostHeader ...string) error {
+	log := GetLogger()
+
 	req, err := http.NewRequestWithContext(ctx, "HEAD", apiEndpoint, http.NoBody)
 	if err != nil {
 		return err
@@ -492,16 +575,7 @@ func tryAPIConnection(ctx context.Context, apiEndpoint string, hostHeader ...str
 	}
 
 	// Create a temporary HTTP client with a shorter timeout for this test
-	client := &http.Client{
-		Timeout: apiTimeout,
-		// Add special transport to handle potential certificate issues with direct IP
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion:         tls.VersionTLS12, // Require TLS 1.2 minimum
-				InsecureSkipVerify: false,            // Keep secure by default
-			},
-		},
-	}
+	client := newSecureHTTPClient(apiTimeout)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -515,29 +589,29 @@ func tryAPIConnection(ctx context.Context, apiEndpoint string, hostHeader ...str
 		}
 		return fmt.Errorf("failed to connect to BirdWeather API: %w", err)
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Failed to close response body: %v", err)
-		}
-	}()
+	defer closeResponseBody(resp)
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= httpStatusClientError {
 		// Special handling for 404 Not Found errors
-		if resp.StatusCode == 404 {
-			log.Printf("BirdWeather API endpoint not found: returned 404")
+		if resp.StatusCode == httpStatusNotFound {
+			log.Warn("BirdWeather API endpoint not found", logger.Int("status_code", resp.StatusCode))
 			return fmt.Errorf("API endpoint not found (404)")
 		}
-		log.Printf("BirdWeather API returned error status: %d", resp.StatusCode)
+		log.Warn("BirdWeather API returned error status", logger.Int("status_code", resp.StatusCode))
 		return fmt.Errorf("API returned error status: %d", resp.StatusCode)
 	}
 
 	// Successfully connected to the API
-	log.Printf("✅ Successfully connected to BirdWeather API (status: %d)", resp.StatusCode)
+	log.Info("Successfully connected to BirdWeather API", logger.Int("status_code", resp.StatusCode))
 	return nil
 }
 
 // testAuthentication tests authentication with the BirdWeather API
+//
+//nolint:gocognit // Complexity justified: authentication testing requires DNS fallback and multiple verification paths
 func (b *BwClient) testAuthentication(ctx context.Context) TestResult {
+	log := GetLogger()
+
 	authCtx, authCancel := context.WithTimeout(ctx, authTimeout)
 	defer authCancel()
 
@@ -550,7 +624,7 @@ func (b *BwClient) testAuthentication(ctx context.Context) TestResult {
 		if err != nil {
 			// If it's a DNS or network error, try with alternative methods
 			if isDNSError(err) || isNetworkError(err) {
-				log.Printf("Primary authentication failed with network error: %v", err)
+				log.Warn("Primary authentication failed with network error", logger.Error(err))
 
 				// Try to resolve the hostname with fallback DNS
 				parsedURL, parseErr := url.Parse(stationURL)
@@ -567,12 +641,12 @@ func (b *BwClient) testAuthentication(ctx context.Context) TestResult {
 				// Try each resolved IP
 				for _, ip := range ips {
 					ipEndpoint := replaceHostWithIP(stationURL, ip.String())
-					log.Printf("Attempting authentication with fallback DNS: %s", ipEndpoint)
+					log.Debug("Attempting authentication with fallback DNS", logger.String("endpoint", ipEndpoint))
 
 					// Use the original hostname for Host header
 					authErr := tryAuthenticationWithHostOverride(ctx, b, ipEndpoint, hostname)
 					if authErr == nil {
-						log.Printf("✅ Successfully authenticated with BirdWeather via fallback DNS")
+						log.Info("Successfully authenticated with BirdWeather via fallback DNS")
 						return nil
 					}
 				}
@@ -589,8 +663,31 @@ func (b *BwClient) testAuthentication(ctx context.Context) TestResult {
 	})
 }
 
+// checkAuthenticationStatus evaluates the HTTP status code and returns an appropriate error
+func checkAuthenticationStatus(statusCode int) error {
+	log := GetLogger()
+
+	switch statusCode {
+	case httpStatusUnauthorized, httpStatusForbidden:
+		log.Error("BirdWeather authentication failed: invalid station ID")
+		return fmt.Errorf("authentication failed: invalid station ID")
+	case httpStatusNotFound:
+		log.Error("BirdWeather station not found", logger.Int("status_code", statusCode))
+		return fmt.Errorf("station not found (404)")
+	default:
+		if statusCode >= httpStatusClientError {
+			log.Error("BirdWeather authentication failed",
+				logger.Int("status_code", statusCode))
+			return fmt.Errorf("authentication failed: server returned status code %d", statusCode)
+		}
+	}
+	return nil
+}
+
 // tryAuthentication attempts to authenticate with the station URL
 func tryAuthentication(ctx context.Context, b *BwClient, stationURL string) error {
+	log := GetLogger()
+
 	maskedURL := maskURLForLogging(stationURL, b.BirdweatherID)
 	req, err := http.NewRequestWithContext(ctx, "GET", stationURL, http.NoBody)
 	if err != nil {
@@ -602,33 +699,21 @@ func tryAuthentication(ctx context.Context, b *BwClient, stationURL string) erro
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with BirdWeather at %s: %w", maskedURL, err)
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Failed to close response body: %v", err)
-		}
-	}()
+	defer closeResponseBody(resp)
 
-	switch resp.StatusCode {
-	case 401, 403:
-		log.Printf("❌ BirdWeather authentication failed: invalid station ID")
-		return fmt.Errorf("authentication failed: invalid station ID")
-	case 404:
-		log.Printf("❌ BirdWeather station not found: returned 404")
-		return fmt.Errorf("station not found (404)")
-	default:
-		if resp.StatusCode >= 400 {
-			log.Printf("❌ BirdWeather authentication failed: server returned status code %d", resp.StatusCode)
-			return fmt.Errorf("authentication failed: server returned status code %d", resp.StatusCode)
-		}
+	if err := checkAuthenticationStatus(resp.StatusCode); err != nil {
+		return err
 	}
 
 	// Successfully authenticated - don't log the actual token
-	log.Printf("✅ Successfully authenticated with BirdWeather (status: %d)", resp.StatusCode)
+	log.Info("Successfully authenticated with BirdWeather", logger.Int("status_code", resp.StatusCode))
 	return nil
 }
 
 // tryAuthenticationWithHostOverride attempts to authenticate with a provided host override
 func tryAuthenticationWithHostOverride(ctx context.Context, b *BwClient, stationURL, hostOverride string) error {
+	log := GetLogger()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", stationURL, http.NoBody)
 	if err != nil {
 		return err
@@ -641,43 +726,21 @@ func tryAuthenticationWithHostOverride(ctx context.Context, b *BwClient, station
 	}
 
 	// Create a client with custom transport to handle direct IP connection
-	client := &http.Client{
-		Timeout: authTimeout,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion:         tls.VersionTLS12, // Require TLS 1.2 minimum
-				InsecureSkipVerify: false,            // Keep secure
-			},
-		},
-	}
+	client := newSecureHTTPClient(authTimeout)
 
 	maskedURL := maskURLForLogging(stationURL, b.BirdweatherID)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with BirdWeather at %s (host: %s): %w", maskedURL, hostOverride, err)
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Failed to close response body: %v", err)
-		}
-	}()
+	defer closeResponseBody(resp)
 
-	switch resp.StatusCode {
-	case 401, 403:
-		log.Printf("❌ BirdWeather authentication failed: invalid station ID")
-		return fmt.Errorf("authentication failed: invalid station ID")
-	case 404:
-		log.Printf("❌ BirdWeather station not found: returned 404")
-		return fmt.Errorf("station not found (404)")
-	default:
-		if resp.StatusCode >= 400 {
-			log.Printf("❌ BirdWeather authentication failed: server returned status code %d", resp.StatusCode)
-			return fmt.Errorf("authentication failed: server returned status code %d", resp.StatusCode)
-		}
+	if err := checkAuthenticationStatus(resp.StatusCode); err != nil {
+		return err
 	}
 
 	// Successfully authenticated
-	log.Printf("✅ Successfully authenticated with BirdWeather (status: %d)", resp.StatusCode)
+	log.Info("Successfully authenticated with BirdWeather", logger.Int("status_code", resp.StatusCode))
 	return nil
 }
 
@@ -698,14 +761,14 @@ func isNetworkError(err error) bool {
 
 // testSoundscapeUpload tests uploading a small soundscape to BirdWeather
 func (b *BwClient) testSoundscapeUpload(ctx context.Context) TestResult {
+	log := GetLogger()
+
 	uploadCtx, uploadCancel := context.WithTimeout(ctx, uploadTimeout)
 	defer uploadCancel()
 
 	return runTest(uploadCtx, SoundscapeUpload, func(ctx context.Context) error {
 		// Generate a small test PCM data (500ms of silence)
-		sampleRate := 48000
-		numSamples := sampleRate / 2              // 0.5 seconds
-		testPCMData := make([]byte, numSamples*2) // 16-bit samples = 2 bytes per sample
+		testPCMData := generateTestPCMData()
 
 		// Generate current timestamp in the required format
 		timestamp := time.Now().Format("2006-01-02T15:04:05.000-0700")
@@ -713,12 +776,13 @@ func (b *BwClient) testSoundscapeUpload(ctx context.Context) TestResult {
 		// Attempt to upload the test soundscape
 		soundscapeID, err := b.UploadSoundscape(timestamp, testPCMData)
 		if err != nil {
-			log.Printf("❌ BirdWeather soundscape upload failed: %s", err)
+			log.Error("BirdWeather soundscape upload failed", logger.Error(err))
 			return fmt.Errorf("failed to upload soundscape: %w", err)
 		}
 
 		// Successfully uploaded soundscape
-		log.Printf("✅ Successfully uploaded test soundscape to BirdWeather with ID: %s", soundscapeID)
+		log.Info("Successfully uploaded test soundscape to BirdWeather",
+			logger.String("soundscape_id", soundscapeID))
 
 		// Store the soundscapeID in the context
 		if rc, ok := ctx.Value(resultIDKey).(*resultContext); ok && rc != nil {
@@ -731,6 +795,8 @@ func (b *BwClient) testSoundscapeUpload(ctx context.Context) TestResult {
 
 // testDetectionPost tests posting a test detection to BirdWeather
 func (b *BwClient) testDetectionPost(ctx context.Context, soundscapeID string) TestResult {
+	log := GetLogger()
+
 	postCtx, postCancel := context.WithTimeout(ctx, postTimeout)
 	defer postCancel()
 
@@ -746,20 +812,26 @@ func (b *BwClient) testDetectionPost(ctx context.Context, soundscapeID string) T
 		// Post the test detection
 		err := b.PostDetection(soundscapeID, timestamp, commonName, scientificName, confidence)
 		if err != nil {
-			log.Printf("❌ BirdWeather detection post failed: %s", err)
+			log.Error("BirdWeather detection post failed", logger.Error(err))
 			return fmt.Errorf("failed to post detection: %w", err)
 		}
 
 		// Successfully posted detection
-		log.Printf("✅ Successfully posted test detection to BirdWeather: %s (%s) with confidence %.2f",
-			commonName, scientificName, confidence)
+		log.Info("Successfully posted test detection to BirdWeather",
+			logger.String("common_name", commonName),
+			logger.String("scientific_name", scientificName),
+			logger.Float64("confidence", confidence))
 
 		return nil
 	})
 }
 
 // TestConnection performs a multi-stage test of the BirdWeather connection and functionality
+//
+//nolint:gocognit // Complexity justified: orchestrates multiple test stages with state management and result coordination
 func (b *BwClient) TestConnection(ctx context.Context, resultChan chan<- TestResult) {
+	log := GetLogger()
+
 	// Helper function to send a result
 	sendResult := func(result TestResult) {
 		// Mark progress messages
@@ -790,18 +862,21 @@ func (b *BwClient) TestConnection(ctx context.Context, resultChan chan<- TestRes
 		// Add timestamp
 		result.Timestamp = time.Now().Format(time.RFC3339)
 
-		// Log the result with emoji
-		emoji := "❌"
+		// Log the result
 		if result.Success {
-			emoji = "✅"
+			logMsg := result.Message
+			if !result.Success && result.Error != "" {
+				logMsg = fmt.Sprintf("%s: %s", result.Message, result.Error)
+			}
+			log.Info("Test stage completed",
+				logger.String("stage", result.Stage),
+				logger.String("message", logMsg))
+		} else {
+			log.Warn("Test stage failed",
+				logger.String("stage", result.Stage),
+				logger.String("message", result.Message),
+				logger.String("error", result.Error))
 		}
-
-		// Format the log message
-		logMsg := result.Message
-		if !result.Success && result.Error != "" {
-			logMsg = fmt.Sprintf("%s: %s", result.Message, result.Error)
-		}
-		log.Printf("%s %s: %s", emoji, result.Stage, logMsg)
 
 		// Send result to channel
 		select {
@@ -922,9 +997,7 @@ func (b *BwClient) UploadTestSoundscape(ctx context.Context) TestResult {
 	}
 
 	// Generate a small test PCM data (500ms of silence)
-	sampleRate := 48000
-	numSamples := sampleRate / 2              // 0.5 seconds
-	testPCMData := make([]byte, numSamples*2) // 16-bit samples = 2 bytes per sample
+	testPCMData := generateTestPCMData()
 
 	// Generate current timestamp in the required format
 	timestamp := time.Now().Format("2006-01-02T15:04:05.000-0700")

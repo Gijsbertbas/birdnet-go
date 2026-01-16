@@ -6,9 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"log/slog"
-
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // Subscriber represents a notification subscriber
@@ -28,7 +27,7 @@ type Service struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
-	logger        *slog.Logger
+	logger        logger.Logger
 	config        *ServiceConfig
 	telemetry     *NotificationTelemetry
 }
@@ -58,10 +57,10 @@ type ServiceConfig struct {
 // DefaultServiceConfig returns a default configuration
 func DefaultServiceConfig() *ServiceConfig {
 	return &ServiceConfig{
-		MaxNotifications:   1000,
-		CleanupInterval:    5 * time.Minute,
+		MaxNotifications:   DefaultMaxNotifications,
+		CleanupInterval:    DefaultCleanupInterval,
 		RateLimitWindow:    1 * time.Minute,
-		RateLimitMaxEvents: 100,
+		RateLimitMaxEvents: DefaultRateLimitMaxEvents,
 	}
 }
 
@@ -72,6 +71,7 @@ func NewService(config *ServiceConfig) *Service {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	log := GetLogger()
 
 	service := &Service{
 		store:         NewInMemoryStore(config.MaxNotifications),
@@ -80,24 +80,24 @@ func NewService(config *ServiceConfig) *Service {
 		cleanupTicker: time.NewTicker(config.CleanupInterval),
 		ctx:           ctx,
 		cancel:        cancel,
-		logger:        getFileLogger(config.Debug),
+		logger:        log,
 		config:        config,
 	}
 
 	// Log service initialization
-	service.logger.Info("notification service initialized",
-		"max_notifications", config.MaxNotifications,
-		"cleanup_interval", config.CleanupInterval,
-		"rate_limit_window", config.RateLimitWindow,
-		"rate_limit_max_events", config.RateLimitMaxEvents,
-		"debug", config.Debug)
+	log.Info("notification service initialized",
+		logger.Int("max_notifications", config.MaxNotifications),
+		logger.Duration("cleanup_interval", config.CleanupInterval),
+		logger.Duration("rate_limit_window", config.RateLimitWindow),
+		logger.Int("rate_limit_max_events", config.RateLimitMaxEvents),
+		logger.Bool("debug", config.Debug))
 
 	// Start background cleanup
 	service.wg.Add(1)
 	go service.cleanupLoop()
 
-	service.logger.Info("notification cleanup worker started",
-		"interval", config.CleanupInterval)
+	log.Info("notification cleanup worker started",
+		logger.Duration("interval", config.CleanupInterval))
 
 	return service
 }
@@ -107,7 +107,7 @@ func NewService(config *ServiceConfig) *Service {
 func (s *Service) SetTelemetry(telemetry *NotificationTelemetry) {
 	s.telemetry = telemetry
 	s.logger.Info("telemetry integration enabled for notification service",
-		"enabled", telemetry != nil && telemetry.IsEnabled())
+		logger.Bool("enabled", telemetry != nil && telemetry.IsEnabled()))
 }
 
 // GetTelemetry returns the telemetry integration, or nil if not set.
@@ -121,9 +121,9 @@ func (s *Service) Create(notifType Type, priority Priority, title, message strin
 	if !s.rateLimiter.Allow() {
 		if s.config.Debug {
 			s.logger.Debug("notification rate limit exceeded",
-				"type", notifType,
-				"priority", priority,
-				"title_length", len(title))
+				logger.String("type", string(notifType)),
+				logger.String("priority", string(priority)),
+				logger.Int("title_length", len(title)))
 		}
 		return nil, errors.Newf("rate limit exceeded").
 			Component("notification").
@@ -135,11 +135,11 @@ func (s *Service) Create(notifType Type, priority Priority, title, message strin
 
 	if s.config.Debug {
 		s.logger.Debug("creating notification",
-			"id", notification.ID,
-			"type", notifType,
-			"priority", priority,
-			"title_length", len(title),
-			"message_length", len(message))
+			logger.String("id", notification.ID),
+			logger.String("type", string(notifType)),
+			logger.String("priority", string(priority)),
+			logger.Int("title_length", len(title)),
+			logger.Int("message_length", len(message)))
 	}
 
 	// Save to store
@@ -156,8 +156,8 @@ func (s *Service) Create(notifType Type, priority Priority, title, message strin
 
 	if s.config.Debug {
 		s.logger.Debug("notification created and broadcast",
-			"id", notification.ID,
-			"subscriber_count", len(s.subscribers))
+			logger.String("id", notification.ID),
+			logger.Int("subscriber_count", len(s.subscribers)))
 	}
 
 	return notification, nil
@@ -287,17 +287,17 @@ func (s *Service) Subscribe() (<-chan *Notification, context.Context) {
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	sub := &Subscriber{
-		ch:     make(chan *Notification, 10),
+		ch:     make(chan *Notification, DefaultChannelBufferSize),
 		ctx:    ctx,
 		cancel: cancel,
 	}
 	s.subscribers = append(s.subscribers, sub)
-	
+
 	if s.config.Debug {
 		s.logger.Debug("new subscriber added",
-			"total_subscribers", len(s.subscribers))
+			logger.Int("total_subscribers", len(s.subscribers)))
 	}
-	
+
 	return sub.ch, ctx
 }
 
@@ -312,12 +312,12 @@ func (s *Service) Unsubscribe(ch <-chan *Notification) {
 		if subscriber.ch == ch {
 			subscriber.cancel()
 			s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
-			
+
 			if s.config.Debug {
 				s.logger.Debug("subscriber removed",
-					"remaining_subscribers", len(s.subscribers))
+					logger.Int("remaining_subscribers", len(s.subscribers)))
 			}
-			
+
 			break
 		}
 	}
@@ -367,57 +367,92 @@ func (s *Service) CreateErrorNotification(err error) (*Notification, error) {
 	return s.CreateWithComponent(TypeError, priority, title, message, component)
 }
 
-// broadcast sends a notification to all subscribers
+// broadcastStats tracks broadcast results.
+type broadcastStats struct {
+	success   int
+	failed    int
+	cancelled int
+}
+
+// broadcast sends a notification to all subscribers.
+// Each subscriber receives a clone of the notification to prevent race conditions
+// if the original notification is modified after broadcast (e.g., adding metadata).
 func (s *Service) broadcast(notification *Notification) {
 	s.subscribersMu.Lock()
 	defer s.subscribersMu.Unlock()
 
+	s.logBroadcastStart(notification)
+	activeSubscribers, stats := s.processSubscribers(notification)
+	s.subscribers = activeSubscribers
+	s.logBroadcastCompletion(notification, stats, len(activeSubscribers))
+}
+
+// logBroadcastStart logs the start of a broadcast operation.
+func (s *Service) logBroadcastStart(notification *Notification) {
 	if s.config.Debug && len(s.subscribers) > 0 {
 		s.logger.Debug("broadcasting notification",
-			"notification_id", notification.ID,
-			"type", notification.Type,
-			"subscriber_count", len(s.subscribers))
+			logger.String("notification_id", notification.ID),
+			logger.String("type", string(notification.Type)),
+			logger.Int("subscriber_count", len(s.subscribers)))
 	}
+}
 
-	// Track which subscribers are still active
+// processSubscribers sends notification to all subscribers and returns active ones.
+func (s *Service) processSubscribers(notification *Notification) ([]*Subscriber, broadcastStats) {
 	activeSubscribers := make([]*Subscriber, 0, len(s.subscribers))
-	var successCount, failedCount, cancelledCount int
+	var stats broadcastStats
 
 	for _, sub := range s.subscribers {
-		select {
-		case <-sub.ctx.Done():
-			// Subscriber cancelled, don't add to active list
-			cancelledCount++
+		if s.isSubscriberCancelled(sub) {
+			stats.cancelled++
 			continue
-		default:
-			// Subscriber is still active
-			activeSubscribers = append(activeSubscribers, sub)
+		}
 
-			// Try to send notification
-			select {
-			case sub.ch <- notification:
-				// Successfully sent
-				successCount++
-			default:
-				// Channel is full, skip this subscriber
-				failedCount++
-				if s.logger != nil {
-					s.logger.Debug("notification channel full, skipping subscriber")
-				}
-			}
+		activeSubscribers = append(activeSubscribers, sub)
+		if s.sendToSubscriber(sub, notification) {
+			stats.success++
+		} else {
+			stats.failed++
 		}
 	}
 
-	// Update the subscribers list to only include active ones
-	s.subscribers = activeSubscribers
+	return activeSubscribers, stats
+}
 
-	if s.config.Debug && (successCount > 0 || failedCount > 0 || cancelledCount > 0) {
+// isSubscriberCancelled checks if a subscriber's context is cancelled.
+func (s *Service) isSubscriberCancelled(sub *Subscriber) bool {
+	select {
+	case <-sub.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// sendToSubscriber sends a cloned notification to a subscriber.
+// Returns true if sent successfully, false if channel was full.
+func (s *Service) sendToSubscriber(sub *Subscriber, notification *Notification) bool {
+	clone := notification.Clone()
+	select {
+	case sub.ch <- clone:
+		return true
+	default:
+		if s.logger != nil {
+			s.logger.Debug("notification channel full, skipping subscriber")
+		}
+		return false
+	}
+}
+
+// logBroadcastCompletion logs the completion of a broadcast operation.
+func (s *Service) logBroadcastCompletion(notification *Notification, stats broadcastStats, activeCount int) {
+	if s.config.Debug && (stats.success > 0 || stats.failed > 0 || stats.cancelled > 0) {
 		s.logger.Debug("broadcast completed",
-			"notification_id", notification.ID,
-			"success_count", successCount,
-			"failed_count", failedCount,
-			"cancelled_count", cancelledCount,
-			"active_subscribers", len(activeSubscribers))
+			logger.String("notification_id", notification.ID),
+			logger.Int("success_count", stats.success),
+			logger.Int("failed_count", stats.failed),
+			logger.Int("cancelled_count", stats.cancelled),
+			logger.Int("active_subscribers", activeCount))
 	}
 }
 
@@ -428,44 +463,56 @@ func (s *Service) cleanupLoop() {
 	for {
 		select {
 		case <-s.cleanupTicker.C:
-			if s.config.Debug {
-				// Count expired notifications before cleanup
-				filter := &FilterOptions{}
-				notifications, _ := s.store.List(filter)
-				var expiredCount int
-				for _, n := range notifications {
-					if n.IsExpired() {
-						expiredCount++
-					}
-				}
-				if expiredCount > 0 {
-					s.logger.Debug("starting notification cleanup",
-						"expired_count", expiredCount,
-						"total_count", len(notifications))
-				}
-			}
-			
-			if err := s.store.DeleteExpired(); err != nil {
-				// Log error but don't stop the cleanup loop
-				if s.logger != nil {
-					s.logger.Error("error cleaning up expired notifications", "error", err)
-				}
-			} else if s.config.Debug {
-				s.logger.Debug("notification cleanup completed")
-			}
+			s.performCleanup()
 		case <-s.ctx.Done():
-			if s.config.Debug {
-				s.logger.Debug("notification cleanup loop shutting down")
-			}
+			s.logger.Debug("notification cleanup loop shutting down")
 			return
 		}
 	}
 }
 
+// performCleanup executes a single cleanup cycle with optional debug logging.
+func (s *Service) performCleanup() {
+	s.logCleanupStart()
+
+	if err := s.store.DeleteExpired(); err != nil {
+		s.logger.Error("error cleaning up expired notifications", logger.Error(err))
+	} else if s.config.Debug {
+		s.logger.Debug("notification cleanup completed")
+	}
+}
+
+// logCleanupStart logs debug info about expired notifications before cleanup.
+func (s *Service) logCleanupStart() {
+	if !s.config.Debug {
+		return
+	}
+
+	notifications, _ := s.store.List(&FilterOptions{})
+	expiredCount := s.countExpired(notifications)
+
+	if expiredCount > 0 {
+		s.logger.Debug("starting notification cleanup",
+			logger.Int("expired_count", expiredCount),
+			logger.Int("total_count", len(notifications)))
+	}
+}
+
+// countExpired counts expired notifications in a slice.
+func (s *Service) countExpired(notifications []*Notification) int {
+	count := 0
+	for _, n := range notifications {
+		if n.IsExpired() {
+			count++
+		}
+	}
+	return count
+}
+
 // Stop gracefully shuts down the notification service
 func (s *Service) Stop() {
 	s.logger.Info("notification service shutting down")
-	
+
 	s.cancel()
 	s.cleanupTicker.Stop()
 	s.wg.Wait()
@@ -478,14 +525,14 @@ func (s *Service) Stop() {
 	}
 	s.subscribers = nil
 	s.subscribersMu.Unlock()
-	
+
 	s.logger.Info("notification service stopped",
-		"subscribers_cancelled", subscriberCount)
-	
+		logger.Int("subscribers_cancelled", subscriberCount))
+
 	// Close the logger to clean up resources
 	if err := CloseLogger(); err != nil {
 		// Use fallback logging since our logger might be closed
-		slog.Default().Error("failed to close notification logger", "error", err)
+		s.logger.Error("failed to close notification logger", logger.Error(err))
 	}
 }
 

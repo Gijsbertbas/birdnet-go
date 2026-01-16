@@ -51,7 +51,7 @@ func TestFFmpegStream_Stop(t *testing.T) {
 	case <-stream.stopChan:
 		// Expected - channel should be closed
 	default:
-		t.Fatal("Stop channel should be closed")
+		require.Fail(t, "Stop channel should be closed")
 	}
 }
 
@@ -70,7 +70,7 @@ func TestFFmpegStream_Restart(t *testing.T) {
 	case <-stream.restartChan:
 		// Expected - restart signal received
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Restart signal not received")
+		require.Fail(t, "Restart signal not received")
 	}
 
 	// Verify restart count was reset
@@ -176,7 +176,7 @@ func TestFFmpegStream_BackoffCalculation(t *testing.T) {
 				// maxBackoffExponent constant
 				20)
 
-			backoff := min(stream.backoffDuration*time.Duration(1<<uint(exponent)), stream.maxBackoff)
+			backoff := min(stream.backoffDuration*time.Duration(1<<uint(exponent)), stream.maxBackoff) //nolint:gosec // G115: exponent is capped by min()
 
 			assert.Equal(t, tt.expectedWait, backoff)
 		})
@@ -303,7 +303,7 @@ func TestFFmpegStream_HandleAudioData(t *testing.T) {
 		assert.NotNil(t, data.AudioLevel)
 		assert.WithinDuration(t, time.Now(), data.Timestamp, time.Second)
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("No data received on audio channel")
+		require.Fail(t, "No data received on audio channel")
 	}
 }
 
@@ -429,7 +429,7 @@ func TestFFmpegStream_ConcurrentHealthAndDataUpdates(t *testing.T) {
 		case <-done:
 			// Completed
 		case <-time.After(2 * time.Second):
-			t.Fatal("Concurrent test timed out")
+			require.Fail(t, "Concurrent test timed out")
 		}
 	}
 
@@ -456,7 +456,7 @@ func TestFFmpegStream_BackoffOverflowProtection(t *testing.T) {
 		// maxBackoffExponent constant
 		20)
 
-	expectedBackoff := min(stream.backoffDuration*time.Duration(1<<uint(exponent)), stream.maxBackoff)
+	expectedBackoff := min(stream.backoffDuration*time.Duration(1<<uint(exponent)), stream.maxBackoff) //nolint:gosec // G115: exponent is capped by min()
 
 	// The expected backoff should be the maximum allowed (2 minutes)
 	assert.Equal(t, 2*time.Minute, expectedBackoff)
@@ -464,7 +464,7 @@ func TestFFmpegStream_BackoffOverflowProtection(t *testing.T) {
 	// Verify the calculation doesn't panic or overflow
 	assert.NotPanics(t, func() {
 		// This should not panic due to overflow protection
-		testBackoff := stream.backoffDuration * time.Duration(1<<uint(exponent))
+		testBackoff := stream.backoffDuration * time.Duration(1<<uint(exponent)) //nolint:gosec // G115: exponent is capped by min()
 		_ = testBackoff
 	})
 }
@@ -482,7 +482,7 @@ func TestFFmpegStream_DroppedDataLogging(t *testing.T) {
 	case audioChan <- UnifiedAudioData{}:
 		// Channel filled
 	default:
-		t.Fatal("Expected to be able to fill the channel")
+		require.Fail(t, "Expected to be able to fill the channel")
 	}
 
 	// Test rate limiting - first call should log
@@ -1017,7 +1017,7 @@ func TestFFmpegStream_ConcurrentLastDataTimeAccess(t *testing.T) {
 		case <-done:
 			// Completed
 		case <-time.After(5 * time.Second):
-			t.Fatal("Concurrent test timed out - possible deadlock")
+			require.Fail(t, "Concurrent test timed out - possible deadlock")
 		}
 	}
 

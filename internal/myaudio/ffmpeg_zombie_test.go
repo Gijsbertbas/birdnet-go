@@ -11,6 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -21,7 +22,7 @@ func TestFFmpegStream_ZombieCreationOnProcessExit(t *testing.T) {
 	t.Attr("component", "ffmpeg")
 	t.Attr("test-type", "zombie-prevention")
 
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Zombie process testing is Unix-specific")
 	}
 
@@ -64,7 +65,7 @@ func TestFFmpegStream_ZombieCreationOnProcessExit(t *testing.T) {
 		case <-cleanupDone:
 			// Cleanup completed
 		case <-time.After(2 * time.Second):
-			t.Fatal("Cleanup timeout")
+			require.Fail(t, "Cleanup timeout")
 		}
 
 		// Verify no zombie
@@ -75,7 +76,7 @@ func TestFFmpegStream_ZombieCreationOnProcessExit(t *testing.T) {
 // TestFFmpegStream_ZombiePreventionWithWaitTimeout tests that we don't create zombies
 // even when the Wait() call times out in cleanupProcess
 func TestFFmpegStream_ZombiePreventionWithWaitTimeout(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Zombie process testing is Unix-specific")
 	}
 
@@ -135,14 +136,12 @@ func TestFFmpegStream_ZombiePreventionWithWaitTimeout(t *testing.T) {
 	zombieCount := 0
 	for _, pid := range pids {
 		if isProcessZombie(t, pid) {
-			t.Errorf("Process %d is still a zombie after cleanup timeout", pid)
+			assert.Failf(t, "Process is still a zombie", "PID %d is still a zombie after cleanup timeout", pid)
 			zombieCount++
 		}
 	}
 
-	if zombieCount > 0 {
-		t.Errorf("Found %d zombie processes out of %d total", zombieCount, len(pids))
-	}
+	assert.Equal(t, 0, zombieCount, "Found %d zombie processes out of %d total", zombieCount, len(pids))
 }
 
 // TestFFmpegStream_ZombieAccumulationDuringRestarts tests zombie accumulation during repeated restarts
@@ -150,7 +149,7 @@ func TestFFmpegStream_ZombieAccumulationDuringRestarts(t *testing.T) {
 	t.Attr("component", "ffmpeg")
 	t.Attr("test-type", "zombie-prevention")
 
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Zombie process testing is Unix-specific")
 	}
 
@@ -211,8 +210,8 @@ func TestFFmpegStream_ZombieAccumulationDuringRestarts(t *testing.T) {
 		}
 	}
 
+	assert.Equal(t, 0, zombieCount, "Accumulated %d zombie processes out of %d restarts", zombieCount, numRestarts)
 	if zombieCount > 0 {
-		t.Errorf("Accumulated %d zombie processes out of %d restarts", zombieCount, numRestarts)
 		t.Logf("Zombie PIDs: %v", activePids)
 	}
 }
@@ -268,7 +267,7 @@ func TestFFmpegStream_CleanupGoroutineLeak(t *testing.T) {
 func isProcessZombie(t *testing.T, pid int) bool {
 	t.Helper()
 	statPath := fmt.Sprintf("/proc/%d/stat", pid)
-	data, err := os.ReadFile(statPath)
+	data, err := os.ReadFile(statPath) //nolint:gosec // G304: statPath built from test PID, not user input
 	if err != nil {
 		// Process doesn't exist
 		return false
@@ -293,7 +292,7 @@ func isProcessZombie(t *testing.T, pid int) bool {
 
 // TestFFmpegStream_ProcessStateTransitions tracks process states during lifecycle
 func TestFFmpegStream_ProcessStateTransitions(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		t.Skip("Process state testing is Unix-specific")
 	}
 
@@ -340,16 +339,14 @@ func TestFFmpegStream_ProcessStateTransitions(t *testing.T) {
 
 	// Check final state
 	finalState := getProcessState(t, pid)
-	if finalState == "Z" {
-		t.Error("Process ended up as zombie")
-	}
+	assert.NotEqual(t, "Z", finalState, "Process ended up as zombie")
 }
 
 // Helper to get process state
 func getProcessState(t *testing.T, pid int) string {
 	t.Helper()
 	statPath := fmt.Sprintf("/proc/%d/stat", pid)
-	data, err := os.ReadFile(statPath)
+	data, err := os.ReadFile(statPath) //nolint:gosec // G304: statPath built from test PID, not user input
 	if err != nil {
 		return ""
 	}

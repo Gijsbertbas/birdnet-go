@@ -67,29 +67,38 @@ export default defineConfig({
         target: 'http://localhost:8080',
         changeOrigin: true,
       },
-      '/ws': {
-        target: 'ws://localhost:8080',
-        ws: true,
-      },
     },
   },
   build: {
     outDir: 'dist',
     chunkSizeWarningLimit: 1000,
     emptyOutDir: true,
+    manifest: true, // Generates .vite/manifest.json for cache busting
+    // Watch mode disabled by default for CI/CD compatibility
+    // When using --watch flag, chokidar options are applied for reliable file change detection
+    watch: process.argv.includes('--watch')
+      ? {
+          chokidar: {
+            usePolling: true,
+            interval: 300,
+          },
+        }
+      : null,
     rollupOptions: {
       output: {
-        entryFileNames: '[name].js',
-        chunkFileNames: '[name].js',
-        assetFileNames: '[name].[ext]',
+        // Content hashes enable proper cache busting with CDNs like Cloudflare
+        entryFileNames: '[name]-[hash].js',
+        chunkFileNames: '[name]-[hash].js',
+        assetFileNames: '[name]-[hash].[ext]',
         manualChunks: {
           vendor: ['svelte'],
           charts: ['chart.js'],
-          ui: [/* UI library chunks */]
         }
       },
     },
   },
+  // Vitest 4.x cache directory (moved from test.cache.dir)
+  cacheDir: 'node_modules/.vite',
   test: {
     environment: 'jsdom',
     globals: true,
@@ -98,6 +107,24 @@ export default defineConfig({
     // Exclude .svelte files from test discovery - they are test wrapper components, not test files
     // Added per CodeRabbit review to fix "No test suite found" errors for .test.svelte files
     include: ['src/**/*.{test,spec}.{js,ts}'],
+    // Explicitly exclude node_modules and other non-test directories from file search
+    // Integration tests are excluded - run them separately with npm run test:integration
+    exclude: ['node_modules', 'dist', 'build', '.svelte-kit', 'coverage', '**/*.integration.{test,spec}.{js,ts}'],
+    // Performance optimizations - Vitest 4.x removed poolOptions, use top-level options
+    pool: 'threads', // Faster than default 'forks' for many small tests
+    minWorkers: 2, // Keep minimum threads warm (renamed from poolOptions.threads.minThreads)
+    maxWorkers: 8, // Limit max threads to avoid overhead (renamed from poolOptions.threads.maxThreads)
+    // Increase concurrent test limit
+    maxConcurrency: 20,
+    // Optimize dependency handling
+    deps: {
+      optimizer: {
+        web: {
+          // Pre-bundle heavy dependencies
+          include: ['@testing-library/svelte', '@testing-library/jest-dom', 'jsdom'],
+        },
+      },
+    },
     coverage: {
       reporter: ['text', 'html', 'lcov'],
       exclude: [

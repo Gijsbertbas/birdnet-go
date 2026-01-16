@@ -80,6 +80,10 @@ export interface DynamicThresholdSettings {
   validHours: number;
 }
 
+export interface FalsePositiveFilterSettings {
+  level: number; // 0=Off, 1=Lenient, 2=Moderate, 3=Balanced, 4=Strict, 5=Maximum
+}
+
 export interface RangeFilterSettings {
   threshold: number;
   speciesCount: number | null;
@@ -121,24 +125,36 @@ export interface SoundLevelSettings {
   interval: number;
 }
 
+// Stream type constants
+export const StreamTypes = {
+  RTSP: 'rtsp',
+  HTTP: 'http',
+  HLS: 'hls',
+  RTMP: 'rtmp',
+  UDP: 'udp',
+} as const;
+
+export type StreamType = (typeof StreamTypes)[keyof typeof StreamTypes];
+
+// StreamConfig represents a single audio stream source
+export interface StreamConfig {
+  name: string; // Required: descriptive name like "Front Yard"
+  url: string; // Required: stream URL
+  type: StreamType; // Stream type: rtsp, http, hls, rtmp, udp
+  transport?: 'tcp' | 'udp'; // Transport protocol (for RTSP/RTMP only)
+}
+
 // RTSPHealthSettings matches backend RTSPHealthSettings
 export interface RTSPHealthSettings {
   healthyDataThreshold: number; // seconds before stream considered unhealthy (default: 60)
   monitoringInterval: number; // health check interval in seconds (default: 30)
 }
 
-// RTSPSettings matches backend RTSPSettings exactly
+// RTSPSettings matches backend RTSPSettings - now uses StreamConfig
 export interface RTSPSettings {
-  transport: string; // RTSP Transport Protocol ("tcp" or "udp")
-  urls: string[]; // RTSP stream URLs - simple string array to match backend
+  streams: StreamConfig[]; // Stream configurations
   health?: RTSPHealthSettings; // health monitoring settings
   ffmpegParameters?: string[]; // optional custom FFmpeg parameters
-}
-
-// Deprecated - kept for backwards compatibility during migration
-export interface RTSPUrl {
-  url: string;
-  enabled: boolean;
 }
 
 export interface AudioQuality {
@@ -152,11 +168,15 @@ export interface EqualizerSettings {
   filters: EqualizerFilter[];
 }
 
+/** Supported equalizer filter types (must match backend eqfilter_config.go) */
+export type EqualizerFilterType = 'HighPass' | 'LowPass' | 'BandReject';
+
 export interface EqualizerFilter {
   id: string;
-  type: 'highpass' | 'lowpass' | 'bandpass' | 'bandstop';
+  type: EqualizerFilterType;
   frequency: number;
   q?: number;
+  width?: number; // Bandwidth in Hz (for BandReject)
   gain?: number;
   passes?: number; // Number of filter passes (1=12dB, 2=24dB, 3=36dB, 4=48dB)
 }
@@ -236,6 +256,12 @@ export interface BirdWeatherSettings {
   debug: boolean;
 }
 
+export interface HomeAssistantSettings {
+  enabled: boolean;
+  discoveryPrefix: string; // Topic prefix (default: "homeassistant")
+  deviceName: string; // Base device name (default: "BirdNET-Go")
+}
+
 export interface MQTTSettings {
   enabled: boolean;
   broker: string;
@@ -248,6 +274,7 @@ export interface MQTTSettings {
     enabled: boolean;
     skipVerify: boolean;
   };
+  homeAssistant?: HomeAssistantSettings;
 }
 
 export interface ObservabilitySettings {
@@ -281,7 +308,18 @@ export interface WeatherSettings {
   wunderground: WundergroundSettings;
 }
 
+// New array-based OAuth provider configuration
+export interface OAuthProviderConfig {
+  provider: 'google' | 'github' | 'microsoft' | 'line' | 'kakao';
+  enabled: boolean;
+  clientId: string;
+  clientSecret: string;
+  redirectUri?: string;
+  userId?: string;
+}
+
 export interface SecuritySettings {
+  baseUrl: string;
   host: string;
   autoTls: boolean;
   basicAuth: {
@@ -289,14 +327,19 @@ export interface SecuritySettings {
     username: string;
     password: string;
   };
-  googleAuth: OAuthSettings;
-  githubAuth: OAuthSettings;
+  // New array-based OAuth provider configuration
+  oauthProviders?: OAuthProviderConfig[];
+  // Legacy OAuth settings (deprecated, kept for backwards compatibility)
+  googleAuth?: OAuthSettings;
+  githubAuth?: OAuthSettings;
+  microsoftAuth?: OAuthSettings;
   allowSubnetBypass: {
     enabled: boolean;
     subnet: string;
   };
 }
 
+// Legacy OAuth settings interface (deprecated)
 export interface OAuthSettings {
   enabled: boolean;
   clientId: string;
@@ -324,6 +367,37 @@ export interface Action {
   executeDefaults: boolean;
 }
 
+// Season definition for seasonal tracking
+export interface Season {
+  startMonth: number; // 1-12
+  startDay: number; // 1-31
+}
+
+// Yearly tracking settings
+export interface YearlyTrackingSettings {
+  enabled: boolean;
+  resetMonth: number; // Month to reset yearly tracking (1=January)
+  resetDay: number; // Day to reset yearly tracking
+  windowDays: number; // Days to show "new this year" indicator
+}
+
+// Seasonal tracking settings
+export interface SeasonalTrackingSettings {
+  enabled: boolean;
+  windowDays: number; // Days to show "new this season" indicator
+  seasons: Record<string, Season>; // Season definitions (e.g., spring, summer, fall, winter)
+}
+
+// Species tracking settings
+export interface SpeciesTrackingSettings {
+  enabled: boolean;
+  newSpeciesWindowDays: number; // Days to consider a species "new"
+  syncIntervalMinutes: number; // Interval to sync with database
+  notificationSuppressionHours: number; // Hours to suppress duplicate notifications
+  yearlyTracking: YearlyTrackingSettings;
+  seasonalTracking: SeasonalTrackingSettings;
+}
+
 export interface SupportSettings {
   sentry: {
     enabled: boolean;
@@ -340,6 +414,7 @@ export interface RealtimeSettings {
   audio?: AudioSettings;
   dashboard?: Dashboard;
   dynamicThreshold?: DynamicThresholdSettings;
+  falsePositiveFilter?: FalsePositiveFilterSettings;
   log?: {
     enabled: boolean;
     path: string;
@@ -353,6 +428,7 @@ export interface RealtimeSettings {
   monitoring?: MonitoringSettings;
   species?: SpeciesSettings;
   weather?: WeatherSettings;
+  speciesTracking?: SpeciesTrackingSettings;
 }
 
 // WebServer settings
@@ -367,8 +443,8 @@ export interface Dashboard {
   thumbnails: Thumbnails;
   summaryLimit: number;
   locale?: string; // UI locale setting
-  newUI?: boolean; // Enable redirect from old HTMX UI to new Svelte UI
   spectrogram?: SpectrogramPreRender; // Spectrogram pre-rendering settings
+  temperatureUnit?: string; // Temperature display unit: "celsius" or "fahrenheit"
 }
 
 export interface Thumbnails {
@@ -385,6 +461,13 @@ export type SpectrogramSize = 'sm' | 'md' | 'lg' | 'xl';
 // Spectrogram generation mode options
 export type SpectrogramMode = 'auto' | 'prerender' | 'user-requested';
 
+// Spectrogram style preset options
+export type SpectrogramStyle = 'default' | 'scientific_dark' | 'high_contrast_dark' | 'scientific';
+
+// Spectrogram dynamic range preset options (dB values for Sox -z parameter)
+// Lower values = higher contrast (weak signals visible), higher values = more detail
+export type SpectrogramDynamicRange = '80' | '100' | '120';
+
 // SpectrogramPreRender contains settings for spectrogram generation modes.
 // Three modes control when and how spectrograms are generated:
 //   - "auto": Generate on-demand when API is called (default, suitable for most systems)
@@ -395,6 +478,8 @@ export interface SpectrogramPreRender {
   enabled?: boolean; // DEPRECATED: Use mode instead (kept for backward compatibility)
   size: SpectrogramSize; // Default size for all modes (sm=400px, md=800px, lg=1000px, xl=1200px)
   raw: boolean; // Generate raw spectrogram without axes/legend (default: true)
+  style?: SpectrogramStyle; // Visual style preset (default: 'default')
+  dynamicRange?: SpectrogramDynamicRange; // Dynamic range in dB: 80 (high contrast), 100 (standard), 120 (extended)
 }
 
 // Default spectrogram settings
@@ -403,6 +488,8 @@ export const DEFAULT_SPECTROGRAM_SETTINGS: SpectrogramPreRender = {
   enabled: false,
   size: 'sm',
   raw: true,
+  style: 'default',
+  dynamicRange: '100',
 } as const;
 
 // Log config
@@ -458,6 +545,68 @@ export interface SentrySettings {
   includePrivateInfo?: boolean;
 }
 
+// Push notification provider filter configuration
+export interface PushFilterConfig {
+  types?: string[]; // 'detection', 'error', 'warning', 'info', 'system'
+  priorities?: string[];
+  components?: string[];
+}
+
+// Webhook authentication configuration
+export interface WebhookAuthConfig {
+  type: 'none' | 'bearer' | 'basic' | 'custom';
+  token?: string; // For bearer auth
+  user?: string; // For basic auth
+  pass?: string; // For basic auth
+  header?: string; // For custom auth
+  value?: string; // For custom auth
+}
+
+// Webhook endpoint configuration
+export interface WebhookEndpointConfig {
+  url: string;
+  method?: string; // POST, PUT, PATCH (default: POST)
+  headers?: Record<string, string>;
+  timeout?: number;
+  auth?: WebhookAuthConfig;
+}
+
+// Push provider configuration (shoutrrr type for user-friendly UI)
+export interface PushProviderConfig {
+  type: 'shoutrrr' | 'webhook' | 'script';
+  enabled: boolean;
+  name: string;
+  urls?: string[]; // For shoutrrr providers
+  endpoints?: WebhookEndpointConfig[]; // For webhook providers
+  filter?: PushFilterConfig;
+  timeout?: number;
+}
+
+// Push settings for notification delivery
+export interface PushSettings {
+  enabled: boolean;
+  providers?: PushProviderConfig[];
+  // Detection filtering settings
+  minConfidenceThreshold?: number; // 0.0-1.0, 0 = disabled
+  speciesCooldownMinutes?: number; // 0 = disabled
+}
+
+// Notification templates
+export interface NewSpeciesTemplate {
+  title: string;
+  message: string;
+}
+
+export interface NotificationTemplates {
+  newSpecies?: NewSpeciesTemplate;
+}
+
+// Main notification settings structure
+export interface NotificationSettings {
+  push?: PushSettings;
+  templates?: NotificationTemplates;
+}
+
 // Main settings form data interface - EXACTLY matching backend structure
 export interface SettingsFormData {
   debug?: boolean;
@@ -473,6 +622,7 @@ export interface SettingsFormData {
   sentry?: SentrySettings;
   output?: OutputSettings;
   backup?: BackupSettings;
+  notification?: NotificationSettings;
 }
 
 // Global settings state interface
@@ -530,6 +680,9 @@ function createEmptySettings(): SettingsFormData {
         trigger: 0.8,
         min: 0.3,
         validHours: 24,
+      },
+      falsePositiveFilter: {
+        level: 0,
       },
       audio: {
         source: '',
@@ -599,6 +752,11 @@ function createEmptySettings(): SettingsFormData {
           enabled: false,
           skipVerify: false,
         },
+        homeAssistant: {
+          enabled: false,
+          discoveryPrefix: 'homeassistant',
+          deviceName: 'BirdNET-Go',
+        },
       },
       species: {
         include: [],
@@ -614,12 +772,13 @@ function createEmptySettings(): SettingsFormData {
           fallbackPolicy: 'all',
         },
         summaryLimit: 100,
-        newUI: false,
         spectrogram: DEFAULT_SPECTROGRAM_SETTINGS,
+        temperatureUnit: 'celsius',
       },
     },
     webServer: {},
     security: {
+      baseUrl: '',
       host: '',
       autoTls: false,
       basicAuth: {
@@ -627,18 +786,8 @@ function createEmptySettings(): SettingsFormData {
         username: '',
         password: '',
       },
-      googleAuth: {
-        enabled: false,
-        clientId: '',
-        clientSecret: '',
-        userId: '',
-      },
-      githubAuth: {
-        enabled: false,
-        clientId: '',
-        clientSecret: '',
-        userId: '',
-      },
+      // New array-based OAuth providers (replaces legacy individual provider fields)
+      oauthProviders: [],
       allowSubnetBypass: {
         enabled: false,
         subnet: '',
@@ -662,6 +811,18 @@ function createEmptySettings(): SettingsFormData {
         database: '',
         host: 'localhost',
         port: '3306',
+      },
+    },
+    notification: {
+      push: {
+        enabled: false,
+        providers: [],
+      },
+      templates: {
+        newSpecies: {
+          title: '',
+          message: '',
+        },
       },
     },
   };
@@ -717,6 +878,11 @@ export const birdweatherSettings = derived(
 
 export const mqttSettings = derived(settingsStore, $store => $store.formData.realtime?.mqtt);
 
+export const homeAssistantSettings = derived(
+  settingsStore,
+  $store => $store.formData.realtime?.mqtt?.homeAssistant
+);
+
 export const speciesSettings = derived(settingsStore, $store => $store.formData.realtime?.species);
 
 export const dashboardSettings = derived(
@@ -731,6 +897,8 @@ export const sentrySettings = derived(settingsStore, $store => $store.formData.s
 export const rtspSettings = derived(settingsStore, $store => $store.formData.realtime?.rtsp);
 
 export const outputSettings = derived(settingsStore, $store => $store.formData.output);
+
+export const notificationSettings = derived(settingsStore, $store => $store.formData.notification);
 
 export const integrationSettings = derived(settingsStore, $store => ({
   birdweather: $store.formData.realtime?.birdweather,
@@ -755,6 +923,12 @@ export const supportSettings = derived(settingsStore, $store => ({
 export const dynamicThresholdSettings = derived(
   settingsStore,
   $store => $store.formData.realtime?.dynamicThreshold
+);
+
+// Species tracking settings derived store
+export const speciesTrackingSettings = derived(
+  settingsStore,
+  $store => $store.formData.realtime?.speciesTracking
 );
 
 // Settings actions

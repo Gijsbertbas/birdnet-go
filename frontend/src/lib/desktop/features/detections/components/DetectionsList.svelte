@@ -1,15 +1,15 @@
 <!--
   DetectionsList.svelte
-  
+
   A container component that orchestrates the display of multiple bird detection records.
   Manages pagination, loading states, and provides a consistent layout for detection data.
-  
+
   Usage:
   - Main detection pages
   - Search results presentation
   - Filtered detection views
   - Administrative detection management interfaces
-  
+
   Features:
   - Paginated detection display
   - Loading and error state handling
@@ -17,7 +17,7 @@
   - Responsive card-based layout
   - Integration with DetectionRow components
   - Refresh functionality
-  
+
   Props:
   - data: DetectionsListData | null - Paginated detection data
   - loading?: boolean - Loading state indicator
@@ -28,14 +28,17 @@
   - className?: string - Additional CSS classes
 -->
 <script lang="ts">
-  import { cn } from '$lib/utils/cn';
-  import type { DetectionsListData } from '$lib/types/detection.types';
-  import Pagination from '$lib/desktop/components/ui/Pagination.svelte';
-  import LoadingSpinner from '$lib/desktop/components/ui/LoadingSpinner.svelte';
+  import MobileAudioPlayer from '$lib/desktop/components/media/MobileAudioPlayer.svelte';
   import EmptyState from '$lib/desktop/components/ui/EmptyState.svelte';
-  import DetectionRow from './DetectionRow.svelte';
-  import { alertIconsSvg } from '$lib/utils/icons';
+  import LoadingSpinner from '$lib/desktop/components/ui/LoadingSpinner.svelte';
+  import Pagination from '$lib/desktop/components/ui/Pagination.svelte';
   import { t } from '$lib/i18n';
+  import type { DetectionsListData } from '$lib/types/detection.types';
+  import { cn } from '$lib/utils/cn';
+  import { XCircle } from '@lucide/svelte';
+  import { untrack } from 'svelte';
+  import DetectionCardMobile from './DetectionCardMobile.svelte';
+  import DetectionRow from './DetectionRow.svelte';
 
   interface Props {
     data: DetectionsListData | null;
@@ -60,7 +63,7 @@
   }: Props = $props();
 
   // Generate title based on query type
-  const title = $derived(() => {
+  const title = $derived.by(() => {
     if (!data) return t('detections.title');
 
     switch (data.queryType) {
@@ -107,12 +110,33 @@
     }
   }
 
-  let selectedNumResults = $state(String(data?.numResults || 25));
+  // State for number of results - captures initial value without creating dependency
+  // Uses untrack() to explicitly capture initial value only (local state is independent after init)
+  let selectedNumResults = $state(untrack(() => String(data?.numResults || 25)));
 
-  // Keep selectedNumResults in sync with data changes
-  $effect(() => {
-    selectedNumResults = String(data?.numResults || 25);
-  });
+  // Mobile audio player state
+  let showMobilePlayer = $state(false);
+  let selectedAudioUrl = $state('');
+  let selectedSpeciesName = $state('');
+  let selectedDetectionId = $state<number | undefined>(undefined);
+
+  function handlePlayMobileAudio(payload: {
+    audioUrl: string;
+    speciesName: string;
+    detectionId: number;
+  }) {
+    selectedAudioUrl = payload.audioUrl;
+    selectedSpeciesName = payload.speciesName;
+    selectedDetectionId = payload.detectionId;
+    showMobilePlayer = true;
+  }
+
+  function handleCloseMobilePlayer() {
+    showMobilePlayer = false;
+    selectedAudioUrl = '';
+    selectedSpeciesName = '';
+    selectedDetectionId = undefined;
+  }
 </script>
 
 <div class={cn(className)}>
@@ -120,7 +144,7 @@
     <div class="flex justify-between items-center">
       <!-- Title -->
       <span class="card-title grow text-base sm:text-xl">
-        {title()}
+        {title}
       </span>
 
       <!-- Number of results selector -->
@@ -128,7 +152,7 @@
         <label for="num-results" class="text-sm font-medium">Results:</label>
         <select
           id="num-results"
-          class="select select-bordered select-sm w-20"
+          class="select select-sm w-20"
           bind:value={selectedNumResults}
           onchange={handleNumResultsChange}
         >
@@ -167,7 +191,7 @@
     {:else if error}
       <div class="px-4 py-8">
         <div class="alert alert-error">
-          {@html alertIconsSvg.error}
+          <XCircle class="size-6" />
           <span>{error}</span>
         </div>
       </div>
@@ -178,7 +202,8 @@
         className="py-8"
       />
     {:else}
-      <table class="w-full">
+      <!-- Desktop/tablet: table layout -->
+      <table class="w-full hidden md:table">
         <caption class="sr-only">{t('detections.table.caption')}</caption>
         <thead>
           <tr class="detection-header-list">
@@ -192,13 +217,29 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-base-200">
-          {#each data.notes as detection}
+          {#each data.notes as detection (detection.id)}
             <tr>
-              <DetectionRow {detection} {onDetailsClick} {onRefresh} />
+              <DetectionRow
+                {detection}
+                {onDetailsClick}
+                {onRefresh}
+                onPlayMobileAudio={handlePlayMobileAudio}
+              />
             </tr>
           {/each}
         </tbody>
       </table>
+
+      <!-- Mobile: card layout -->
+      <div class="md:hidden space-y-2">
+        {#each data.notes as detection (detection.id)}
+          <DetectionCardMobile
+            {detection}
+            {onDetailsClick}
+            onPlayMobileAudio={handlePlayMobileAudio}
+          />
+        {/each}
+      </div>
     {/if}
   </div>
 
@@ -206,7 +247,7 @@
   {#if data && data.totalResults > data.itemsPerPage}
     <div class="border-t border-base-200">
       <div class="flex flex-col sm:flex-row justify-between items-center p-4 gap-4">
-        <div class="text-sm text-base-content/70 order-2 sm:order-1">
+        <div class="text-sm text-base-content opacity-70 order-2 sm:order-1">
           {t('detections.pagination.showing', {
             from: data.showingFrom,
             to: data.showingTo,
@@ -222,6 +263,18 @@
           />
         </div>
       </div>
+    </div>
+  {/if}
+
+  <!-- Mobile Audio Player Overlay -->
+  {#if showMobilePlayer}
+    <div class="md:hidden">
+      <MobileAudioPlayer
+        audioUrl={selectedAudioUrl}
+        speciesName={selectedSpeciesName}
+        detectionId={selectedDetectionId}
+        onClose={handleCloseMobilePlayer}
+      />
     </div>
   {/if}
 </div>

@@ -2,16 +2,150 @@
 
 debug: false              # print debug messages, can help with problem solving
 
+# Centralized logging configuration
+logging:
+  default_level: info     # default log level: debug, info, warn, error
+  # Timezone for JSON file timestamps. Console output has no timestamps
+  # (journald/Docker adds them). Use "Local" for system timezone, "UTC",
+  # or IANA timezone name like "Europe/Helsinki", "America/New_York"
+  timezone: "Local"
+
+  # Console output configuration
+  # Note: Console uses human-readable text format without timestamps.
+  # When running as systemd service or Docker container, the execution
+  # environment adds timestamps automatically.
+  console:
+    enabled: true         # enable console output
+    level: info           # log level for console output
+
+  # Default file output configuration
+  # Note: File output uses JSON format with RFC3339 timestamps for
+  # machine parsing and log aggregation (ELK, Loki, etc.)
+  file_output:
+    enabled: true         # enable file output
+    path: logs/birdnet.log # default log file path
+    max_size: 100         # maximum size in MB before rotation
+    max_age: 30           # maximum age in days to keep old logs
+    max_backups: 10       # maximum number of old log files to keep
+    compress: true        # compress rotated logs
+    level: info           # log level for file output
+
+  # Per-module output configuration
+  # Each module can have its own dedicated log file
+  # Sub-modules (e.g., analysis.processor) inherit from parent unless specified
+  modules:
+    # Core processing modules
+    analysis:
+      enabled: true
+      file_path: logs/analysis.log
+      level: info
+    birdnet:
+      enabled: true
+      file_path: logs/birdnet.log
+      level: info
+    audio:
+      enabled: true
+      file_path: logs/audio.log
+      level: info
+    datastore:
+      enabled: true
+      file_path: logs/datastore.log
+      level: info
+    spectrogram:
+      enabled: true
+      file_path: logs/spectrogram.log
+      level: info
+
+    # API and web modules
+    api:
+      enabled: true
+      file_path: logs/api.log
+      level: info
+    access:
+      enabled: true
+      file_path: logs/access.log
+      level: info
+    auth:
+      enabled: true
+      file_path: logs/auth.log
+      level: info
+    security:
+      enabled: true
+      file_path: logs/security.log
+      level: info
+
+    # Integration modules
+    mqtt:
+      enabled: false      # enable if using MQTT
+      file_path: logs/mqtt.log
+      level: info
+    birdweather:
+      enabled: false      # enable if using BirdWeather
+      file_path: logs/birdweather.log
+      level: info
+    weather:
+      enabled: false      # enable if using weather provider
+      file_path: logs/weather.log
+      level: info
+    ebird:
+      enabled: false      # enable if using eBird integration
+      file_path: logs/ebird.log
+      level: info
+
+    # System and support modules
+    backup:
+      enabled: true
+      file_path: logs/backup.log
+      level: info
+    config:
+      enabled: true
+      file_path: logs/config.log
+      level: info
+    diskmanager:
+      enabled: true
+      file_path: logs/diskmanager.log
+      level: info
+    events:
+      enabled: true
+      file_path: logs/events.log
+      level: info
+    imageprovider:
+      enabled: true
+      file_path: logs/imageprovider.log
+      level: info
+    monitor:
+      enabled: true
+      file_path: logs/monitor.log
+      level: info
+    notifications:
+      enabled: true
+      file_path: logs/notifications.log
+      level: info
+    securefs:
+      enabled: true
+      file_path: logs/securefs.log
+      level: info
+    support:
+      enabled: true
+      file_path: logs/support.log
+      level: info
+    telemetry:
+      enabled: true
+      file_path: logs/telemetry.log
+      level: info
+
+  # Per-module log level overrides (without separate files)
+  # Use this to adjust verbosity for specific modules
+  # Sub-modules can be specified with dot notation (e.g., analysis.processor)
+  module_levels:
+    # telemetry: warn     # reduce telemetry verbosity
+    # spectrogram: debug  # increase spectrogram verbosity for debugging
+    # analysis.processor: debug  # debug processor sub-module
+
 # Node specific settings
 main:
   name: BirdNET-Go        # name of node, can be used to identify source of notes
   timeas24h: true         # true for 24-hour time format, false for 12-hour time format
-  log:
-    enabled: true         # true to enable log file
-    path: birdnet.log     # path to log file
-    rotation: daily       # daily, weekly or size
-    maxsize: 1048576      # max size in bytes for size rotation
-    rotationday: "Sunday" # day of the week for weekly rotation, 0 = Sunday
 
 # BirdNET model specific settings
 birdnet:
@@ -36,7 +170,6 @@ realtime:
   
   audio:
     source: "sysdefault"  # audio source to use for analysis
-    useaudiocore: false   # true to use new audiocore package instead of myaudio
     soundlevel:
       enabled: false      # true to enable sound level monitoring
       interval: 10        # measurement interval in seconds (min 5 recommended, lower values increase CPU load)
@@ -78,12 +211,31 @@ realtime:
     min: 0.20             # dynamic threshold will not go lower than this
     validhours: 24        # number of hours to consider for dynamic confidence
 
-  rtsp:    
-    transport: tcp        # RTSP Transport Protocol
-    urls:                 # RTSP stream URLs
-      # - rtsp://user:password@example.com/stream1
-      # - rtsp://user:password@example.com/stream2
-      # - rtsp://user:password@example.com/stream3
+  rtsp:
+    streams: []           # Audio streams for analysis
+    # Example stream configurations:
+    # streams:
+    #   - name: Front Yard Camera       # Required: unique name for this stream
+    #     url: rtsp://${RTSP_USER}:${RTSP_PASS}@192.168.1.10:554/stream
+    #     # Note: Use environment variables for credentials instead of hardcoding
+    #     type: rtsp                    # Stream type: rtsp, http, hls, rtmp, udp
+    #     transport: tcp                # Transport protocol: tcp or udp (rtsp/rtmp only)
+    #   - name: Backyard Microphone
+    #     url: http://192.168.1.20:8000/audio
+    #     type: http
+    #   - name: HLS Stream
+    #     url: https://camera.local/live/playlist.m3u8
+    #     type: hls
+    #   - name: RTMP Feed
+    #     url: rtmp://192.168.1.30/live/birdcam
+    #     type: rtmp
+    #     transport: tcp
+    #   - name: UDP Audio
+    #     url: udp://192.168.1.5:1234
+    #     type: udp
+    health:
+      healthyDataThreshold: 60  # Seconds of data to consider stream healthy
+      monitoringInterval: 30    # Seconds between health checks
   
   log:
     enabled: false        # true to enable OBS chat log
@@ -199,7 +351,19 @@ security:
   # Can also be set via BIRDNET_HOST environment variable
   # Falls back to "localhost" if not configured (works for direct access only)
   host: ""
-  
+
+  # Base URL provides a complete external URL for reverse proxy setups
+  # When set, this URL is used as-is for:
+  # - Notification URLs in push notifications
+  # - OAuth redirect URLs (when using social authentication)
+  #
+  # This takes priority over host/autotls settings for URL generation
+  # Use this when your reverse proxy handles SSL termination
+  # (e.g., "https://birdnet.example.com" or "https://birdnet.home.arpa:8443")
+  #
+  # Can also be set via BIRDNET_URL environment variable
+  baseurl: ""
+
   # AutoTLS enables automatic TLS certificate management via Let's Encrypt
   # REQUIREMENTS:
   # - host must be set to a valid domain name
@@ -231,7 +395,14 @@ security:
     enabled: false           # true to enable GitHub OAuth2
     clientid: ""             # client id
     clientsecret: ""         # client secret
-    userid: ""               # user id# Ouput settings
+    userid: ""               # user id
+  microsoftauth:
+    enabled: false           # true to enable Microsoft Account OAuth2
+    clientid: ""             # client id from Azure App Registration
+    clientsecret: ""         # client secret
+    userid: ""               # user id
+
+# Ouput settings
 
 output:
   file:

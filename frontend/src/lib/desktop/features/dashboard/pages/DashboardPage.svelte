@@ -41,7 +41,7 @@ Performance Optimizations:
   import { onMount, untrack } from 'svelte';
   import ReconnectingEventSource from 'reconnecting-eventsource';
   import DailySummaryCard from '$lib/desktop/features/dashboard/components/DailySummaryCard.svelte';
-  import RecentDetectionsCard from '$lib/desktop/features/dashboard/components/RecentDetectionsCard.svelte';
+  import DetectionCardGrid from '$lib/desktop/features/dashboard/components/DetectionCardGrid.svelte';
   import { t } from '$lib/i18n';
   import type { DailySpeciesSummary, Detection } from '$lib/types/detection.types';
   import {
@@ -58,12 +58,18 @@ Performance Optimizations:
   } from '$lib/utils/datePersistence';
   import { getLogger } from '$lib/utils/logger';
   import { safeArrayAccess, isPlainObject } from '$lib/utils/security';
+  import { api } from '$lib/utils/api';
 
   const logger = getLogger('app');
 
   // Constants
   const ANIMATION_CLEANUP_DELAY = 2200; // Slightly longer than 2s animation duration
   const MIN_FETCH_LIMIT = 10; // Minimum number of detections to fetch for SSE processing
+  // Species limit buffer constants for SSE updates
+  // BUFFER_TRIGGER: When array exceeds limit + this, trigger cleanup
+  // BUFFER_TARGET: After cleanup, keep limit + this many species to avoid frequent re-sorting
+  const SPECIES_LIMIT_BUFFER_TRIGGER = 10;
+  const SPECIES_LIMIT_BUFFER_TARGET = 5;
 
   // SSE Detection Data Type
   type SSEDetectionData = {
@@ -110,9 +116,22 @@ Performance Optimizations:
   let summaryError = $state<string | null>(null);
   let detectionsError = $state<string | null>(null);
   let showThumbnails = $state(true); // Default to true for backward compatibility
+  let summaryLimit = $state(30); // Default from backend (conf/defaults.go) - species count limit for daily summary
 
   // SSE throttling timer
   let sseFetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Valid detection limit options for card grid layout
+  const VALID_DETECTION_LIMITS = [6, 12, 24, 48];
+  const DEFAULT_DETECTION_LIMIT = 6;
+
+  // Migration map from old values to new card grid values
+  const LIMIT_MIGRATION_MAP: Record<number, number> = {
+    5: 6,
+    10: 12,
+    25: 24,
+    50: 48,
+  };
 
   // Function to get initial detection limit from localStorage
   function getInitialDetectionLimit(): number {
@@ -120,15 +139,27 @@ Performance Optimizations:
       const savedLimit = localStorage.getItem('recentDetectionLimit');
       if (savedLimit) {
         const parsed = parseInt(savedLimit, 10);
-        if (!isNaN(parsed) && [5, 10, 25, 50].includes(parsed)) {
-          return parsed;
+        if (!isNaN(parsed)) {
+          // Check if it's a valid new value
+          if (VALID_DETECTION_LIMITS.includes(parsed)) {
+            return parsed;
+          }
+          // Migrate old values to new ones
+          const migrated = Object.hasOwn(LIMIT_MIGRATION_MAP, parsed)
+            ? LIMIT_MIGRATION_MAP[parsed as keyof typeof LIMIT_MIGRATION_MAP]
+            : undefined;
+          if (migrated !== undefined) {
+            // Update localStorage with migrated value
+            localStorage.setItem('recentDetectionLimit', migrated.toString());
+            return migrated;
+          }
         }
       }
     }
-    return 5; // Default value
+    return DEFAULT_DETECTION_LIMIT;
   }
 
-  // Detection limit state to sync with RecentDetectionsCard
+  // Detection limit state to sync with DetectionCardGrid
   let detectionLimit = $state(getInitialDetectionLimit());
 
   // Animation state for new detections
@@ -182,7 +213,9 @@ Performance Optimizations:
 
       // Cache miss or expired - fetch from API
       logger.debug(`Daily summary cache miss for ${selectedDate}, fetching from API`);
-      const response = await fetch(`/api/v2/analytics/species/daily?date=${selectedDate}`);
+      const response = await fetch(
+        `/api/v2/analytics/species/daily?date=${selectedDate}&limit=${summaryLimit}`
+      );
       if (!response.ok) {
         throw new Error(t('dashboard.errors.dailySummaryFetch', { status: response.statusText }));
       }
@@ -297,20 +330,22 @@ Performance Optimizations:
 
   async function fetchDashboardConfig() {
     try {
-      const response = await fetch('/api/v2/settings/dashboard');
-      if (!response.ok) {
-        throw new Error(t('dashboard.errors.configFetch', { status: response.statusText }));
+      interface DashboardConfig {
+        thumbnails?: { summary?: boolean };
+        summaryLimit?: number;
       }
-      const config = await response.json();
-      // API returns uppercase field names (e.g., "Summary" not "summary")
-      showThumbnails = config.Thumbnails?.Summary ?? true;
+      const config = await api.get<DashboardConfig>('/api/v2/settings/dashboard');
+      // API returns lowercase field names matching Go JSON tags
+      showThumbnails = config.thumbnails?.summary ?? true;
+      summaryLimit = config.summaryLimit ?? 30;
       logger.debug('Dashboard config loaded:', {
-        Summary: config.Thumbnails?.Summary,
+        thumbnails: config.thumbnails,
         showThumbnails,
+        summaryLimit,
       });
     } catch (error) {
       logger.error('Error fetching dashboard config:', error);
-      // Keep default value (true) on error
+      // Keep default values on error
     }
   }
 
@@ -691,11 +726,17 @@ Performance Optimizations:
     fetchDailySummary();
   }
 
-  // Handle detection limit change from RecentDetectionsCard
+  // Handle detection limit change from DetectionCardGrid
   function handleDetectionLimitChange(newLimit: number) {
     detectionLimit = newLimit;
-    // Trim existing detections to new limit
-    recentDetections = recentDetections.slice(0, newLimit);
+
+    if (newLimit > recentDetections.length) {
+      // Need more data than currently loaded - fetch from API
+      fetchRecentDetections();
+    } else {
+      // Just trim existing data to new limit
+      recentDetections = recentDetections.slice(0, newLimit);
+    }
   }
 
   // Derived state to check if we're viewing today's data
@@ -783,7 +824,7 @@ Performance Optimizations:
     const existingIndex = dailySummary.findIndex(s => s.species_code === detection.speciesCode);
 
     if (existingIndex >= 0) {
-      // Incremental update for existing species - minimize object creation
+      // Update existing species - DailySummaryCard's sortedData handles reordering
       const existing = safeArrayAccess(dailySummary, existingIndex);
       if (!existing) return;
       const updated = { ...existing };
@@ -799,34 +840,15 @@ Performance Optimizations:
       updated.hourlyUpdated = [hour];
       updated.latest_heard = detection.time;
 
-      // Optimized position update using $derived.by pattern
-      const currentPosition = existingIndex;
-      const newPosition = dailySummary.findIndex(
-        (species, i) => i < currentPosition && species.count < updated.count
+      // Update in place - sorting is handled by DailySummaryCard's sortedData derived value
+      dailySummary = [
+        ...dailySummary.slice(0, existingIndex),
+        updated,
+        ...dailySummary.slice(existingIndex + 1),
+      ];
+      logger.debug(
+        `Updated species: ${detection.commonName} (count: ${updated.count}, hour: ${hour})`
       );
-
-      if (newPosition !== -1) {
-        // Species needs to move up - rebuild array with minimal changes
-        dailySummary = [
-          ...dailySummary.slice(0, newPosition),
-          updated,
-          ...dailySummary.slice(newPosition, currentPosition),
-          ...dailySummary.slice(currentPosition + 1),
-        ];
-        logger.debug(
-          `Moved species up: ${detection.commonName} from position ${currentPosition} to ${newPosition} (count: ${updated.count})`
-        );
-      } else {
-        // Species stays in same position - just update in place
-        dailySummary = [
-          ...dailySummary.slice(0, currentPosition),
-          updated,
-          ...dailySummary.slice(currentPosition + 1),
-        ];
-        logger.debug(
-          `Updated species in place: ${detection.commonName} at position ${currentPosition} (count: ${updated.count})`
-        );
-      }
 
       // Update cache incrementally instead of invalidating
       updateDailySummaryCacheEntry(selectedDate, dailySummary);
@@ -858,7 +880,7 @@ Performance Optimizations:
         `count-${detection.speciesCode}`
       );
     } else {
-      // Add new species with optimized insertion
+      // Add new species - sorting is handled by DailySummaryCard's sortedData derived value
       const newSpecies: DailySpeciesSummary = {
         scientific_name: detection.scientificName,
         common_name: detection.commonName,
@@ -876,23 +898,20 @@ Performance Optimizations:
         newSpecies.hourly_counts.splice(hour, 1, 1);
       }
 
-      // Find insertion position with early termination for performance
-      const insertPosition = dailySummary.findIndex(s => s.count < newSpecies.count);
-      if (insertPosition === -1) {
-        // Add to end if it has the lowest count
-        dailySummary = [...dailySummary, newSpecies];
-      } else {
-        // Insert at the correct position
-        dailySummary = [
-          ...dailySummary.slice(0, insertPosition),
-          newSpecies,
-          ...dailySummary.slice(insertPosition),
-        ];
+      // Add to array - DailySummaryCard's sortedData will sort by count
+      dailySummary = [...dailySummary, newSpecies];
+
+      // Enforce species count limit to prevent grid from growing indefinitely
+      // Note: This is a safety limit before sorting; DailySummaryCard applies final limit after sorting
+      if (summaryLimit > 0 && dailySummary.length > summaryLimit + SPECIES_LIMIT_BUFFER_TRIGGER) {
+        // Keep a buffer above the limit to allow for proper sorting in DailySummaryCard
+        // Sort by count here to remove truly lowest-count species
+        dailySummary = [...dailySummary]
+          .sort((a, b) => b.count - a.count)
+          .slice(0, summaryLimit + SPECIES_LIMIT_BUFFER_TARGET);
       }
 
-      logger.debug(
-        `Added new species: ${detection.commonName} (count: 1, hour: ${hour}) at position ${insertPosition === -1 ? dailySummary.length - 1 : insertPosition}`
-      );
+      logger.debug(`Added new species: ${detection.commonName} (count: 1, hour: ${hour})`);
 
       // Update cache incrementally with new species included
       updateDailySummaryCacheEntry(selectedDate, dailySummary);
@@ -972,7 +991,9 @@ Performance Optimizations:
     // Fire-and-forget operation for performance optimization
     void untrack(() => {
       const datesParam = datesToPreload.join(',');
-      return fetch(`/api/v2/analytics/species/daily/batch?dates=${datesParam}`)
+      return fetch(
+        `/api/v2/analytics/species/daily/batch?dates=${datesParam}&limit=${summaryLimit}`
+      )
         .then(response => {
           if (!response.ok) {
             throw new Error(`Batch preload failed: ${response.statusText}`);
@@ -1006,7 +1027,7 @@ Performance Optimizations:
           // Fall back to individual requests if batch fails
           logger.debug('Falling back to individual preload requests');
           datesToPreload.forEach(dateString => {
-            fetch(`/api/v2/analytics/species/daily?date=${dateString}`)
+            fetch(`/api/v2/analytics/species/daily?date=${dateString}&limit=${summaryLimit}`)
               .then(response => (response.ok ? response.json() : null))
               .then(data => {
                 if (data) {
@@ -1095,8 +1116,9 @@ Performance Optimizations:
     queueDailySummaryUpdate(detection);
   }
 
-  // Handle detection click
-  function handleDetectionClick(detection: Detection) {
+  // Handle detection click - reserved for future card navigation implementation
+  // eslint-disable-next-line no-unused-vars
+  function _handleDetectionClick(detection: Detection) {
     // Navigate to detection detail view
     window.location.href = `/ui/detections/${detection.id}`;
   }
@@ -1110,6 +1132,7 @@ Performance Optimizations:
     error={summaryError}
     {selectedDate}
     {showThumbnails}
+    speciesLimit={summaryLimit}
     onPreviousDay={previousDay}
     onNextDay={nextDay}
     onGoToToday={goToToday}
@@ -1117,16 +1140,14 @@ Performance Optimizations:
   />
 
   <!-- Recent Detections Section -->
-  <RecentDetectionsCard
+  <DetectionCardGrid
     data={recentDetections}
     loading={isLoadingDetections}
     error={detectionsError}
     limit={detectionLimit}
     onLimitChange={handleDetectionLimitChange}
-    onRowClick={handleDetectionClick}
     onRefresh={handleManualRefresh}
     {newDetectionIds}
-    {detectionArrivalTimes}
     onFreezeStart={handleFreezeStart}
     onFreezeEnd={handleFreezeEnd}
     updatesAreFrozen={freezeCount > 0}

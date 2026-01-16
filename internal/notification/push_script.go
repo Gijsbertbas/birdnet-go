@@ -67,7 +67,9 @@ func (s *ScriptProvider) ValidateConfig() error {
 }
 
 func (s *ScriptProvider) Send(ctx context.Context, n *Notification) error {
-	cmd := exec.CommandContext(ctx, s.command, s.args...)
+	// G204: Command and args come from validated configuration, not user input.
+	// This is intentional design to allow administrators to configure custom notification scripts.
+	cmd := exec.CommandContext(ctx, s.command, s.args...) //nolint:gosec // Configuration-sourced command execution is intentional
 
 	// Environment variables
 	env := os.Environ()
@@ -113,7 +115,7 @@ func (s *ScriptProvider) Send(ctx context.Context, n *Notification) error {
 		if errors.As(err, &exitErr) {
 			_ = exitErr // caller decides retry policy; we just return the error
 		}
-		return fmt.Errorf("script '%s' failed: %w, output: %s", s.name, err, truncate(string(out), 512))
+		return fmt.Errorf("script '%s' failed: %w, output: %s", s.name, err, truncate(string(out), DefaultScriptOutputTruncateLength))
 	}
 	return nil
 }

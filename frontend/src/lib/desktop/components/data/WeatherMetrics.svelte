@@ -27,9 +27,23 @@
 -->
 <script lang="ts">
   import { cn } from '$lib/utils/cn';
-  import { t } from '$lib/i18n';
-  import { weatherIcons } from '$lib/utils/icons';
+  import { Thermometer, Wind } from '@lucide/svelte';
   import { safeGet } from '$lib/utils/security';
+  import {
+    convertTemperature,
+    convertWindSpeed,
+    getTemperatureSymbol,
+    getWindSpeedUnit,
+    type TemperatureUnit,
+  } from '$lib/utils/formatters';
+  import {
+    WEATHER_ICON_MAP,
+    UNKNOWN_WEATHER_INFO,
+    getEffectiveWeatherCode,
+    isNightTime,
+    translateWeatherCondition,
+    getWindOpacityClass,
+  } from '$lib/utils/weather';
 
   interface Props {
     weatherIcon?: string;
@@ -38,7 +52,7 @@
     temperature?: number;
     windSpeed?: number;
     windGust?: number;
-    units?: 'metric' | 'imperial' | 'standard';
+    units?: TemperatureUnit;
     size?: 'sm' | 'md' | 'lg';
     className?: string;
   }
@@ -87,93 +101,52 @@
   const showTemperatureGroup = $derived(containerWidth === 0 || containerWidth >= 30); // Always show temperature
   const showWindSpeedGroup = $derived(containerWidth === 0 || containerWidth >= 100); // Hide wind speed on narrow
 
-  // Get the appropriate unit labels based on the units setting
-  const temperatureUnit = $derived(() => {
-    switch (units) {
-      case 'imperial':
-        return '°F';
-      case 'standard':
-        return 'K';
-      default:
-        return '°C';
-    }
+  // Get the appropriate unit label based on the units setting
+  const temperatureUnit = $derived(getTemperatureSymbol(units));
+
+  // Convert temperature from Celsius (internal storage) to display unit
+  const displayTemperature = $derived.by(() => {
+    if (temperature === undefined) return undefined;
+    return convertTemperature(temperature, units);
   });
 
-  const windSpeedUnit = $derived(() => {
-    return units === 'imperial' ? 'mph' : 'm/s';
+  // Convert wind speed from m/s (internal storage) to display unit
+  const displayWindSpeed = $derived.by(() => {
+    if (windSpeed === undefined) return undefined;
+    return convertWindSpeed(windSpeed, units);
   });
 
-  // Weather icon mapping
-  const weatherIconMap: Record<string, { day: string; night: string; description: string }> = {
-    '01': { day: '☀️', night: '🌙', description: 'Clear sky' },
-    '02': { day: '⛅', night: '☁️', description: 'Few clouds' },
-    '03': { day: '⛅', night: '☁️', description: 'Scattered clouds' },
-    '04': { day: '⛅', night: '☁️', description: 'Broken clouds' },
-    '09': { day: '🌧️', night: '🌧️', description: 'Shower rain' },
-    '10': { day: '🌦️', night: '🌧️', description: 'Rain' },
-    '11': { day: '⛈️', night: '⛈️', description: 'Thunderstorm' },
-    '13': { day: '❄️', night: '❄️', description: 'Snow' },
-    '50': { day: '🌫️', night: '🌫️', description: 'Mist' },
-  };
-
-  // Extract base weather code
-  const weatherCode = $derived(() => {
-    if (!weatherIcon || typeof weatherIcon !== 'string') return '';
-    const match = weatherIcon.match(/^(\d{2})[dn]?$/);
-    return match ? match[1] : '';
+  // Convert wind gust from m/s (internal storage) to display unit
+  const displayWindGust = $derived.by(() => {
+    if (windGust === undefined) return undefined;
+    return convertWindSpeed(windGust, units);
   });
 
-  // Determine if it's night time
-  const isNight = $derived(timeOfDay === 'night' || weatherIcon?.endsWith('n'));
+  const windSpeedUnit = $derived(getWindSpeedUnit(units));
 
-  // Get weather emoji and description
+  // Extract base weather code using shared utility, with fallback to description-based derivation
+  const weatherCode = $derived(getEffectiveWeatherCode(weatherIcon, weatherDescription));
+
+  // Determine if it's night time using shared utility
+  const isNight = $derived(isNightTime(weatherIcon, timeOfDay));
+
+  // Get weather info from shared mapping
   const weatherInfo = $derived(
-    safeGet(weatherIconMap, weatherCode(), {
-      day: '❓',
-      night: '❓',
-      description: weatherDescription || 'Unknown',
+    safeGet(WEATHER_ICON_MAP, weatherCode, {
+      ...UNKNOWN_WEATHER_INFO,
+      description: weatherDescription || UNKNOWN_WEATHER_INFO.description,
     })
   );
 
   const weatherEmoji = $derived(isNight ? weatherInfo.night : weatherInfo.day);
 
-  // Helper function to translate weather conditions with fallbacks
-  function translateWeatherCondition(condition: string | undefined): string {
-    if (!condition) return '';
-
-    // Normalize the condition string
-    const normalized = condition.toLowerCase().replace(/ /g, '_');
-
-    // Try different key variations
-    const keys = [
-      `detections.weather.conditions.${normalized}`,
-      `detections.weather.conditions.${condition.toLowerCase()}`,
-      'detections.weather.conditions.unknown',
-    ];
-
-    // Return first successful translation or original
-    for (const key of keys) {
-      const translation = t(key);
-      if (translation !== key) {
-        return translation;
-      }
-    }
-
-    return condition;
-  }
-
-  // Get localized weather description
+  // Get localized weather description using shared utility
   const weatherDesc = $derived(
     translateWeatherCondition(weatherDescription || weatherInfo.description)
   );
 
-  // Get appropriate wind icon based on wind speed
-  const getWindIcon = $derived(() => {
-    if (windSpeed === undefined) return safeGet(weatherIcons, 'wind', '');
-    if (windSpeed < 3) return safeGet(weatherIcons, 'windLight', ''); // Light wind: 0-3 m/s
-    if (windSpeed < 8) return safeGet(weatherIcons, 'windModerate', ''); // Moderate wind: 3-8 m/s
-    return safeGet(weatherIcons, 'windStrong', ''); // Strong wind: 8+ m/s
-  });
+  // Get appropriate wind icon opacity based on wind speed using shared utility
+  const windOpacity = $derived(getWindOpacityClass(windSpeed));
 
   // Size classes
   const sizeClasses = {
@@ -202,13 +175,10 @@
 >
   <!-- Line 1: Weather Icon + Description -->
   {#if weatherIcon && showWeatherIcon}
-    <div class="wm-weather-group flex items-center gap-1 flex-shrink-0">
+    <div class="wm-weather-group flex items-center gap-1 shrink-0">
       <!-- Weather Icon - always visible when showWeatherIcon is true -->
       <span
-        class={cn(
-          'wm-weather-icon inline-block flex-shrink-0',
-          safeGet(emojiSizeClasses, size, '')
-        )}
+        class={cn('wm-weather-icon inline-block shrink-0', safeGet(emojiSizeClasses, size, ''))}
         aria-label={weatherDesc}
       >
         {weatherEmoji}
@@ -228,44 +198,41 @@
   <!-- Line 2: Temperature + Wind Speed -->
   <div class="flex items-center gap-2 overflow-hidden">
     <!-- Temperature Group -->
-    {#if temperature !== undefined && showTemperatureGroup}
-      <div class="wm-temperature-group flex items-center gap-1 flex-shrink-0">
+    {#if displayTemperature !== undefined && showTemperatureGroup}
+      <div class="wm-temperature-group flex items-center gap-1 shrink-0">
         <!-- Temperature Icon -->
         {#if SHOW_TEMPERATURE_ICON}
-          <div
-            class={cn(safeGet(sizeClasses, size, ''), 'flex-shrink-0')}
-            aria-label={`Temperature: ${temperature.toFixed(1)}°C`}
-          >
-            {@html safeGet(weatherIcons, 'temperature', '')}
-          </div>
+          <Thermometer
+            class={cn(safeGet(sizeClasses, size, ''), 'shrink-0')}
+            aria-label={`Temperature: ${displayTemperature.toFixed(1)}${temperatureUnit}`}
+          />
         {/if}
         <span
           class={cn(safeGet(textSizeClasses, size, ''), 'text-base-content/70 whitespace-nowrap')}
         >
-          {temperature.toFixed(1)}{temperatureUnit()}
+          {displayTemperature.toFixed(1)}{temperatureUnit}
         </span>
       </div>
     {/if}
 
     <!-- Wind Speed Group -->
-    {#if windSpeed !== undefined && showWindSpeedGroup}
-      <div class="wm-wind-group flex items-center gap-1 flex-shrink-0">
+    {#if displayWindSpeed !== undefined && showWindSpeedGroup}
+      <div class="wm-wind-group flex items-center gap-1 shrink-0">
         <!-- Wind Speed Icon -->
         {#if SHOW_WINDSPEED_ICON}
-          <div
-            class={cn(safeGet(sizeClasses, size, ''), 'flex-shrink-0')}
-            aria-label={`Wind speed: ${windSpeed.toFixed(1)} m/s`}
-          >
-            {@html getWindIcon()}
-          </div>
+          <Wind
+            class={cn(safeGet(sizeClasses, size, ''), windOpacity, 'shrink-0')}
+            aria-label={`Wind speed: ${displayWindSpeed.toFixed(0)} ${windSpeedUnit}`}
+          />
         {/if}
         <span
           class={cn(safeGet(textSizeClasses, size, ''), 'text-base-content/70 whitespace-nowrap')}
         >
-          {windSpeed.toFixed(0)}{windGust !== undefined && windGust > windSpeed
-            ? `(${windGust.toFixed(0)})`
+          {displayWindSpeed.toFixed(0)}{displayWindGust !== undefined &&
+          displayWindGust > displayWindSpeed
+            ? `(${displayWindGust.toFixed(0)})`
             : ''}
-          {windSpeedUnit()}
+          {windSpeedUnit}
         </span>
       </div>
     {/if}
@@ -302,22 +269,5 @@
     }
   }
 
-  /* Override the centralized icon sizing to match our component needs */
-  /* Use more specific selectors to override without !important */
-  .wm-temperature-group > div :global(svg.h-5.w-5),
-  .wm-wind-group > div :global(svg.h-5.w-5) {
-    height: inherit;
-    width: inherit;
-    margin-right: 0;
-  }
-
-  /* Ensure our size classes take precedence */
-  .wm-temperature-group > .h-5.w-5,
-  .wm-temperature-group > .h-6.w-6,
-  .wm-temperature-group > .h-8.w-8,
-  .wm-wind-group > .h-5.w-5,
-  .wm-wind-group > .h-6.w-6,
-  .wm-wind-group > .h-8.w-8 {
-    display: block;
-  }
+  /* No icon sizing overrides needed - Lucide icons accept classes directly */
 </style>

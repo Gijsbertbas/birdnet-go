@@ -3,14 +3,44 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/stretchr/testify/assert"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/notification"
 )
+
+// assertMapContainsExpected checks that result map contains all expected key-value pairs.
+func assertMapContainsExpected(t *testing.T, result, expected map[string]any) {
+	t.Helper()
+	for key, expectedValue := range expected {
+		actualValue, exists := result[key]
+		assert.True(t, exists, "createToastEventData() missing key %q", key)
+		if exists {
+			assert.Equal(t, expectedValue, actualValue, "createToastEventData() key %q mismatch", key)
+		}
+	}
+}
+
+// assertNoZeroDuration checks that zero duration is not included in result.
+func assertNoZeroDuration(t *testing.T, result, metadata map[string]any) {
+	t.Helper()
+	if metadata["duration"] == 0 {
+		_, exists := result["duration"]
+		assert.False(t, exists, "createToastEventData() should not include zero duration")
+	}
+}
+
+// assertNoNilAction checks that nil action is not included in result.
+func assertNoNilAction(t *testing.T, result, metadata map[string]any) {
+	t.Helper()
+	if metadata["action"] == nil {
+		_, exists := result["action"]
+		assert.False(t, exists, "createToastEventData() should not include nil action")
+	}
+}
 
 // mockController creates a controller with minimal setup for testing
 func mockController() *Controller {
@@ -115,33 +145,9 @@ func TestController_createToastEventData(t *testing.T) {
 			t.Parallel()
 
 			result := c.createToastEventData(tt.notif)
-
-			// Check each expected field
-			for key, expectedValue := range tt.expected {
-				actualValue, exists := result[key]
-				if !exists {
-					t.Errorf("createToastEventData() missing key %q", key)
-					continue
-				}
-
-				if !reflect.DeepEqual(actualValue, expectedValue) {
-					t.Errorf("createToastEventData() key %q = %v, want %v", key, actualValue, expectedValue)
-				}
-			}
-
-			// Check that zero duration is not included
-			if tt.notif.Metadata["duration"] == 0 {
-				if _, exists := result["duration"]; exists {
-					t.Error("createToastEventData() should not include zero duration")
-				}
-			}
-
-			// Check that nil action is not included
-			if tt.notif.Metadata["action"] == nil {
-				if _, exists := result["action"]; exists {
-					t.Error("createToastEventData() should not include nil action")
-				}
-			}
+			assertMapContainsExpected(t, result, tt.expected)
+			assertNoZeroDuration(t, result, tt.notif.Metadata)
+			assertNoNilAction(t, result, tt.notif.Metadata)
 		})
 	}
 }
@@ -219,8 +225,8 @@ func TestController_processNotificationEvent(t *testing.T) {
 
 			// The method will likely fail because sendSSEMessage isn't mocked,
 			// but we're mainly testing that it doesn't panic and follows the right path
-			if tt.expectErr && err == nil {
-				t.Error("processNotificationEvent() expected error but got none")
+			if tt.expectErr {
+				assert.Error(t, err, "processNotificationEvent() expected error but got none")
 			}
 
 			// The main value of this test is ensuring the method doesn't panic
@@ -229,17 +235,15 @@ func TestController_processNotificationEvent(t *testing.T) {
 	}
 }
 
-func TestController_setNotificationSSEHeaders(t *testing.T) {
+func Test_setSSEHeaders(t *testing.T) {
 	t.Parallel()
-
-	c := mockController()
 
 	e := echo.New()
 	req := httptest.NewRequest("GET", "/test", http.NoBody)
 	rec := httptest.NewRecorder()
 	ctx := e.NewContext(req, rec)
 
-	c.setNotificationSSEHeaders(ctx)
+	setSSEHeaders(ctx)
 
 	expectedHeaders := map[string]string{
 		"Content-Type":                 "text/event-stream",
@@ -251,9 +255,7 @@ func TestController_setNotificationSSEHeaders(t *testing.T) {
 
 	for key, expectedValue := range expectedHeaders {
 		actualValue := rec.Header().Get(key)
-		if actualValue != expectedValue {
-			t.Errorf("setNotificationSSEHeaders() header %q = %q, want %q", key, actualValue, expectedValue)
-		}
+		assert.Equal(t, expectedValue, actualValue, "setSSEHeaders() header %q mismatch", key)
 	}
 }
 
@@ -373,9 +375,7 @@ func TestMetadataExtraction(t *testing.T) {
 				isToast, _ = tt.metadata["isToast"].(bool)
 			}
 
-			if isToast != tt.wantBool {
-				t.Errorf("metadata extraction isToast = %v, want %v", isToast, tt.wantBool)
-			}
+			assert.Equal(t, tt.wantBool, isToast, "metadata extraction isToast mismatch")
 		})
 	}
 }

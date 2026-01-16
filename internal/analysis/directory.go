@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -14,21 +13,29 @@ import (
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/logger"
+	"github.com/tphakala/birdnet-go/internal/myaudio"
 )
 
 // cleanupProcessingFiles removes all .processing files from the output directory
 func cleanupProcessingFiles(outputPath string) {
+	log := GetLogger()
 	pattern := filepath.Join(outputPath, "*.processing")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		log.Printf("Error finding .processing files: %v", err)
+		log.Error("error finding processing files",
+			logger.String("pattern", pattern),
+			logger.Error(err))
 		return
 	}
 	for _, file := range matches {
 		if err := os.Remove(file); err != nil {
-			log.Printf("Error removing processing file %s: %v", file, err)
+			log.Error("error removing processing file",
+				logger.String("file", file),
+				logger.Error(err))
 		} else {
-			log.Printf("Cleaned up lock file: %s", file)
+			log.Info("cleaned up lock file",
+				logger.String("file", file))
 		}
 	}
 }
@@ -60,13 +67,20 @@ func isProcessed(path, outputPath string, processedFiles map[string]bool) bool {
 
 	// Check for processing lock file
 	if info, err := os.Stat(outputPathProcessing); err == nil {
+		log := GetLogger()
 		age := time.Since(info.ModTime())
-		log.Printf("Found lock file %s, age: %v", outputPathProcessing, age.Round(time.Second))
+		log.Debug("found lock file",
+			logger.String("lock_file", outputPathProcessing),
+			logger.Duration("age", age.Round(time.Second)))
 		// If lock file exists but is stale, remove it
 		if age > 60*time.Minute {
-			log.Printf("Lock file is stale (older than 60 minutes), removing: %s", outputPathProcessing)
+			log.Warn("lock file is stale, removing",
+				logger.String("lock_file", outputPathProcessing),
+				logger.Duration("age", age))
 			if err := os.Remove(outputPathProcessing); err != nil {
-				log.Printf("Failed to remove stale lock file: %v", err)
+				log.Error("failed to remove stale lock file",
+					logger.String("lock_file", outputPathProcessing),
+					logger.Error(err))
 			}
 			return false
 		}
@@ -86,23 +100,27 @@ func isFileLocked(path string) bool {
 		flag = os.O_RDONLY | syscall.O_NONBLOCK
 	}
 
-	file, err := os.OpenFile(path, flag, 0o666)
+	file, err := os.OpenFile(path, flag, 0o600) //nolint:gosec // G304: path is from directory walking, not user input
 	if err != nil {
 		// File is probably locked by another process
 		return true
 	}
 	if err := file.Close(); err != nil {
-		log.Printf("Failed to close file: %v", err)
+		GetLogger().Warn("failed to close file",
+			logger.String("path", path),
+			logger.Error(err))
 	}
 
 	// On Windows, also try write access to be sure
 	if runtime.GOOS == "windows" {
-		file, err = os.OpenFile(path, os.O_WRONLY, 0o666)
+		file, err = os.OpenFile(path, os.O_WRONLY, 0o600) //nolint:gosec // G304: path is from directory walking, not user input
 		if err != nil {
 			return true
 		}
 		if err := file.Close(); err != nil {
-			log.Printf("Failed to close file: %v", err)
+			GetLogger().Warn("failed to close file",
+				logger.String("path", path),
+				logger.Error(err))
 		}
 	}
 
@@ -122,8 +140,10 @@ func isFileSizeStable(path string, ctx context.Context) (bool, error) {
 		}
 
 		if i > 0 && info.Size() != lastSize {
-			log.Printf("File %s size changed from %d to %d, still copying...",
-				filepath.Base(path), lastSize, info.Size())
+			GetLogger().Debug("file size changed, still copying",
+				logger.String("file", filepath.Base(path)),
+				logger.Int64("previous_size", lastSize),
+				logger.Int64("current_size", info.Size()))
 			return false, nil
 		}
 		lastSize = info.Size()
@@ -141,20 +161,26 @@ func isFileSizeStable(path string, ctx context.Context) (bool, error) {
 
 // isFileReadyForProcessing checks if a file is ready to be processed
 func isFileReadyForProcessing(path string, ctx context.Context) (bool, error) {
-	log.Printf("Checking if file %s is ready for processing", filepath.Base(path))
+	log := GetLogger()
+	fileName := filepath.Base(path)
+	log.Debug("checking if file is ready for processing",
+		logger.String("file", fileName))
 	// Check if file is locked
 	if isFileLocked(path) {
-		log.Printf("File %s is locked, skipping...", filepath.Base(path))
+		log.Debug("file is locked, skipping",
+			logger.String("file", fileName))
 		return false, nil
 	}
 
 	// Check modification time
 	info, err := os.Stat(path)
 	if err != nil {
-		return false, fmt.Errorf("error checking modification time for %s: %w", filepath.Base(path), err)
+		return false, fmt.Errorf("error checking modification time for %s: %w", fileName, err)
 	}
 	if time.Since(info.ModTime()) < 30*time.Second {
-		log.Printf("File %s was modified too recently, waiting...", filepath.Base(path))
+		log.Debug("file was modified too recently, waiting",
+			logger.String("file", fileName),
+			logger.Duration("since_modified", time.Since(info.ModTime())))
 		return false, nil
 	}
 
@@ -164,10 +190,11 @@ func isFileReadyForProcessing(path string, ctx context.Context) (bool, error) {
 		if errors.Is(err, context.Canceled) {
 			return false, context.Canceled
 		}
-		return false, fmt.Errorf("error checking file size stability for %s: %w", filepath.Base(path), err)
+		return false, fmt.Errorf("error checking file size stability for %s: %w", fileName, err)
 	}
 	if !stable {
-		log.Printf("File %s size is not stable yet", filepath.Base(path))
+		log.Debug("file size is not stable yet",
+			logger.String("file", fileName))
 		return false, nil
 	}
 
@@ -200,21 +227,23 @@ func processFile(path string, settings *conf.Settings, processedFiles map[string
 	outputPath := filepath.Join(settings.Output.File.Path, filepath.Base(path))
 	ext := strings.ToLower(filepath.Ext(outputPath))
 	switch ext {
-	case ".wav":
-		outputPath = outputPath[:len(outputPath)-4]
-	case ".flac":
-		outputPath = outputPath[:len(outputPath)-5]
+	case myaudio.ExtWAV:
+		outputPath = outputPath[:len(outputPath)-len(myaudio.ExtWAV)]
+	case myaudio.ExtFLAC:
+		outputPath = outputPath[:len(outputPath)-len(myaudio.ExtFLAC)]
 	}
 	lockFile := outputPath + ".processing"
 
 	// Try to create lock file
-	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
+	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: lockFile derived from settings.Output.File.Path
 	if err != nil {
 		// Another instance is processing this file
 		return false, nil
 	}
 	if err := f.Close(); err != nil {
-		log.Printf("Failed to close lock file: %v", err)
+		GetLogger().Warn("failed to close lock file",
+			logger.String("lock_file", lockFile),
+			logger.Error(err))
 	}
 
 	// Save the original path and restore it after processing
@@ -246,7 +275,9 @@ func processFile(path string, settings *conf.Settings, processedFiles map[string
 
 	// Remove lock file regardless of processing result
 	if removeErr := os.Remove(lockFile); removeErr != nil {
-		log.Printf("Warning: failed to remove lock file %s: %v", lockFile, removeErr)
+		GetLogger().Warn("failed to remove lock file",
+			logger.String("lock_file", lockFile),
+			logger.Error(removeErr))
 	}
 
 	if analysisErr != nil {
@@ -263,7 +294,9 @@ func processFile(path string, settings *conf.Settings, processedFiles map[string
 
 // scanDirectory scans a directory for audio files and processes them
 func scanDirectory(watchDir string, settings *conf.Settings, processedFiles map[string]bool, ctx context.Context) error {
-	log.Printf("Scanning directory: %s", watchDir)
+	log := GetLogger()
+	log.Debug("scanning directory",
+		logger.String("directory", watchDir))
 	startTime := time.Now()
 	filesAnalyzed := 0
 
@@ -294,14 +327,16 @@ func scanDirectory(watchDir string, settings *conf.Settings, processedFiles map[
 
 		// Check for both .wav and .flac files (case-insensitive)
 		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if ext == ".wav" || ext == ".flac" {
+		if ext == myaudio.ExtWAV || ext == myaudio.ExtFLAC {
 			wasProcessed, err := processFile(path, settings, processedFiles, ctx)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return context.Canceled
 				}
 				// Log other errors but continue processing other files
-				log.Printf("Error processing file '%s': %v", path, err)
+				log.Error("error processing file",
+					logger.String("file", path),
+					logger.Error(err))
 				return nil
 			}
 			if wasProcessed {
@@ -321,16 +356,20 @@ func scanDirectory(watchDir string, settings *conf.Settings, processedFiles map[
 
 	if filesAnalyzed > 0 {
 		scanDuration := time.Since(startTime)
-		log.Printf("Directory analysis completed, processed %d new file(s) in %v", filesAnalyzed, scanDuration)
+		log.Info("directory analysis completed",
+			logger.Int("files_processed", filesAnalyzed),
+			logger.Duration("duration", scanDuration))
 	} else {
-		log.Printf("Directory scan completed, no new files to analyze")
+		log.Debug("directory scan completed, no new files to analyze")
 	}
 	return nil
 }
 
 // watchDirectory continuously monitors a directory for new files
 func watchDirectory(watchDir string, settings *conf.Settings, processedFiles map[string]bool, ctx context.Context) error {
-	log.Printf("Starting directory watch on %s (Press Ctrl+C to stop)", watchDir)
+	log := GetLogger()
+	log.Info("starting directory watch",
+		logger.String("directory", watchDir))
 	watchStartTime := time.Now()
 
 	timer := time.NewTimer(0) // Start first scan immediately
@@ -339,7 +378,8 @@ func watchDirectory(watchDir string, settings *conf.Settings, processedFiles map
 		case <-ctx.Done():
 			timer.Stop()
 			watchDuration := time.Since(watchStartTime).Round(time.Second)
-			log.Printf("Directory watch stopped after %v", watchDuration)
+			log.Info("directory watch stopped",
+				logger.Duration("duration", watchDuration))
 			cleanupProcessingFiles(settings.Output.File.Path)
 			return context.Canceled
 
@@ -350,7 +390,8 @@ func watchDirectory(watchDir string, settings *conf.Settings, processedFiles map
 					cleanupProcessingFiles(settings.Output.File.Path)
 					return context.Canceled
 				}
-				log.Printf("Directory scan error: %v", err)
+				log.Error("directory scan error",
+					logger.Error(err))
 			}
 
 			// Reset timer for next scan with random interval
@@ -362,9 +403,11 @@ func watchDirectory(watchDir string, settings *conf.Settings, processedFiles map
 
 // DirectoryAnalysis processes all audio files in the given directory.
 func DirectoryAnalysis(settings *conf.Settings, ctx context.Context) error {
+	log := GetLogger()
 	// Initialize BirdNET interpreter
 	if err := initializeBirdNET(settings); err != nil {
-		log.Printf("Failed to initialize BirdNET: %v", err)
+		log.Error("failed to initialize BirdNET",
+			logger.Error(err))
 		return err
 	}
 
@@ -372,8 +415,10 @@ func DirectoryAnalysis(settings *conf.Settings, ctx context.Context) error {
 	if settings.Output.File.Path == "" {
 		settings.Output.File.Path = "."
 	}
-	if err := os.MkdirAll(settings.Output.File.Path, 0o755); err != nil {
-		log.Printf("Failed to create output directory: %v", err)
+	if err := os.MkdirAll(settings.Output.File.Path, 0o750); err != nil {
+		log.Error("failed to create output directory",
+			logger.String("path", settings.Output.File.Path),
+			logger.Error(err))
 		return err
 	}
 
@@ -381,12 +426,14 @@ func DirectoryAnalysis(settings *conf.Settings, ctx context.Context) error {
 	processedFiles := make(map[string]bool)
 
 	// Do initial scan
-	log.Printf("Performing initial directory scan...")
+	log.Info("performing initial directory scan",
+		logger.String("path", settings.Input.Path))
 	if err := scanDirectory(settings.Input.Path, settings, processedFiles, ctx); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return context.Canceled
 		}
-		log.Printf("Initial scan failed: %v", err)
+		log.Error("initial scan failed",
+			logger.Error(err))
 		return err
 	}
 

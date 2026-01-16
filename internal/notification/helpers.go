@@ -2,7 +2,6 @@ package notification
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/tphakala/birdnet-go/internal/privacy"
 )
@@ -55,7 +54,7 @@ func NotifyDetection(species string, confidence float64, metadata map[string]any
 	}
 
 	title := fmt.Sprintf("Detected: %s", species)
-	message := fmt.Sprintf("Confidence: %.1f%%", confidence*100)
+	message := fmt.Sprintf("Confidence: %.1f%%", confidence*PercentMultiplier)
 
 	notification, err := service.CreateWithComponent(
 		TypeDetection,
@@ -128,7 +127,7 @@ func NotifyResourceAlert(resource string, current, threshold float64, unit strin
 			WithMetadata("current_value", current).
 			WithMetadata("threshold", threshold).
 			WithMetadata("unit", unit).
-			WithExpiry(30 * time.Minute) // Auto-expire resource alerts after 30 minutes
+			WithExpiry(DefaultResourceAlertExpiry) // Auto-expire resource alerts
 		_ = service.store.Update(notification)
 	}
 }
@@ -177,7 +176,7 @@ func NotifyStartup(version string) {
 
 	notification, _ := service.CreateWithComponent(TypeInfo, PriorityLow, title, message, "system")
 	if notification != nil {
-		notification.WithExpiry(5 * time.Minute) // Auto-expire after 5 minutes
+		notification.WithExpiry(DefaultQuickExpiry) // Auto-expire after 5 minutes
 		_ = service.store.Update(notification)
 	}
 }
@@ -203,6 +202,9 @@ func NotifyShutdown() {
 
 // scrubContextMap sanitizes a context map for logging by removing sensitive data
 func scrubContextMap(ctx map[string]any) map[string]any {
+	// Metadata keys for context scrubbing
+	const keyMessage = "message"
+
 	if ctx == nil {
 		return nil
 	}
@@ -213,7 +215,7 @@ func scrubContextMap(ctx map[string]any) map[string]any {
 		case "url", "endpoint", "uri", "rtsp_url", "stream_url":
 			// Scrub URLs
 			scrubbed[k] = privacy.AnonymizeURL(fmt.Sprint(v))
-		case "error", "message", "description", "reason":
+		case "error", keyMessage, "description", "reason":
 			// Scrub error messages
 			scrubbed[k] = privacy.ScrubMessage(fmt.Sprint(v))
 		case "ip", "client_ip", "remote_addr", "source_ip":
@@ -224,7 +226,7 @@ func scrubContextMap(ctx map[string]any) map[string]any {
 			scrubbed[k] = scrubPath(fmt.Sprint(v))
 		case "token", "api_key", "password", "secret":
 			// Never log sensitive credentials
-			scrubbed[k] = "[REDACTED]"
+			scrubbed[k] = privacy.RedactedMarker
 		default:
 			// Keep other values as-is
 			scrubbed[k] = v

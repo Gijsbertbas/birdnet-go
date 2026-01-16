@@ -26,7 +26,7 @@ jobs:
       actions: read # Required for Claude to read CI results on PRs
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -62,9 +62,6 @@ jobs:
             # Detect packages mentioned in the issue and add appropriate labels
             if echo "$COMBINED_TEXT" | grep -i "analysis\|processor" >/dev/null; then
               gh issue edit $ISSUE_NUMBER --add-label "pkg:analysis" 2>/dev/null || true
-            fi
-            if echo "$COMBINED_TEXT" | grep -i "audiocore\|audio.*core" >/dev/null; then
-              gh issue edit $ISSUE_NUMBER --add-label "pkg:audiocore" 2>/dev/null || true
             fi
             if echo "$COMBINED_TEXT" | grep -i "myaudio\|audio.*processing" >/dev/null; then
               gh issue edit $ISSUE_NUMBER --add-label "pkg:myaudio" 2>/dev/null || true

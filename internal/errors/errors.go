@@ -79,6 +79,9 @@ const (
 	PriorityCritical = "critical"
 )
 
+// ComponentUnknown is used when the component cannot be determined.
+const ComponentUnknown = "unknown"
+
 // EnhancedError wraps an error with additional context and metadata
 type EnhancedError struct {
 	Err       error          // Original error
@@ -131,7 +134,7 @@ func (ee *EnhancedError) GetComponent() string {
 		ee.detected = true
 		// Set to "unknown" if detection failed
 		if ee.component == "" {
-			ee.component = "unknown"
+			ee.component = ComponentUnknown
 		}
 	}
 
@@ -332,7 +335,7 @@ func (eb *ErrorBuilder) Build() *EnhancedError {
 		}
 		// Set defaults without expensive detection
 		if ee.component == "" {
-			ee.component = "unknown"
+			ee.component = ComponentUnknown
 			ee.detected = true
 		}
 		if ee.Category == "" {
@@ -388,7 +391,6 @@ func init() {
 	RegisterComponent("myaudio", "myaudio")
 	RegisterComponent("ffmpeg-manager", "ffmpeg-manager")
 	RegisterComponent("ffmpeg-stream", "ffmpeg-stream")
-	RegisterComponent("httpcontroller", "http-controller")
 	RegisterComponent("datastore", "datastore")
 	RegisterComponent("imageprovider", "imageprovider")
 	RegisterComponent("diskmanager", "diskmanager")
@@ -399,7 +401,6 @@ func init() {
 	RegisterComponent("telemetry", "telemetry")
 	RegisterComponent("birdweather", "birdweather")
 	RegisterComponent("backup", "backup")
-	RegisterComponent("audiocore", "audiocore")
 	RegisterComponent("api", "api")
 
 	// Analysis package components - use slash-separated paths for subpackages
@@ -444,7 +445,7 @@ func detectComponent() string {
 	// First try common call depths for performance (adjust based on profiling)
 	// Typical depths: 4-6 for direct error creation, 6-8 for wrapped errors
 	for _, depth := range []int{4, 5, 6, 7} {
-		if component := quickComponentLookup(depth); component != "" && component != "unknown" {
+		if component := quickComponentLookup(depth); component != "" && component != ComponentUnknown {
 			return component
 		}
 	}
@@ -481,12 +482,12 @@ func detectComponentFull() string {
 			continue
 		}
 
-		if component := lookupComponent(funcName); component != "unknown" {
+		if component := lookupComponent(funcName); component != ComponentUnknown {
 			return component
 		}
 	}
 
-	return "unknown"
+	return ComponentUnknown
 }
 
 // lookupComponent searches the registry for a matching component
@@ -510,7 +511,7 @@ func lookupComponent(funcName string) string {
 		}
 	}
 
-	return "unknown"
+	return ComponentUnknown
 }
 
 // detectCategory automatically detects error category based on error message and component

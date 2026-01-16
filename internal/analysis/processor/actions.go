@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,10 +22,12 @@ import (
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/events"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
 	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/notification"
 	"github.com/tphakala/birdnet-go/internal/observation"
+	"github.com/tphakala/birdnet-go/internal/privacy"
 )
 
 // Timeout and interval constants
@@ -51,7 +52,8 @@ const (
 	MQTTPublishTimeout = 10 * time.Second
 
 	// DatabaseSearchLimit is the maximum number of results when searching for notes
-	DatabaseSearchLimit = 10
+	// Set high enough to handle high-activity periods (e.g., dawn chorus)
+	DatabaseSearchLimit = 50
 
 	// CompositeActionTimeout is the default timeout for each action in a composite action
 	// This is generous to accommodate slow hardware (e.g., Raspberry Pi with SD cards)
@@ -217,6 +219,33 @@ type CompositeAction struct {
 	Timeout       *time.Duration // Optional: per-action timeout override (nil = use default)
 	CorrelationID string         // Detection correlation ID for log tracking
 	mu            sync.Mutex     // Protects concurrent access to Actions
+}
+
+// getBirdImageFromCache retrieves a bird image from cache with proper error handling and logging.
+// This helper consolidates duplicate image retrieval logic used by MqttAction and SSEAction.
+// Returns an empty BirdImage if the cache is nil or if retrieval fails.
+func getBirdImageFromCache(cache *imageprovider.BirdImageCache, scientificName, commonName, correlationID string) imageprovider.BirdImage {
+	if cache == nil {
+		GetLogger().Warn("BirdImageCache is nil, cannot fetch image",
+			logger.String("detection_id", correlationID),
+			logger.String("species", commonName),
+			logger.String("scientific_name", scientificName),
+			logger.String("operation", "check_bird_image_cache"))
+		return imageprovider.BirdImage{}
+	}
+
+	birdImage, err := cache.Get(scientificName)
+	if err != nil {
+		GetLogger().Warn("Error getting bird image from cache",
+			logger.String("detection_id", correlationID),
+			logger.Error(err),
+			logger.String("species", commonName),
+			logger.String("scientific_name", scientificName),
+			logger.String("operation", "get_bird_image"))
+		return imageprovider.BirdImage{}
+	}
+
+	return birdImage
 }
 
 // GetDescription returns a human-readable description of the LogAction
@@ -462,24 +491,24 @@ func (a *CompositeAction) executeActionWithRecovery(action Action, data any, ste
 					Context("total_steps", total).
 					Build()
 				GetLogger().Error("Composite action timed out",
-					"component", "analysis.processor.actions",
-					"detection_id", a.CorrelationID,
-					"step", step,
-					"total_steps", total,
-					"action_description", action.GetDescription(),
-					"timeout_seconds", timeout.Seconds(),
-					"operation", "composite_action_timeout")
+					logger.String("component", "analysis.processor.actions"),
+					logger.String("detection_id", a.CorrelationID),
+					logger.Int("step", step),
+					logger.Int("total_steps", total),
+					logger.String("action_description", action.GetDescription()),
+					logger.Float64("timeout_seconds", timeout.Seconds()),
+					logger.String("operation", "composite_action_timeout"))
 				return timeoutErr
 			}
 			// Log other errors
 			GetLogger().Error("Composite action failed",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"step", step,
-				"total_steps", total,
-				"action_description", action.GetDescription(),
-				"error", res.err,
-				"operation", "composite_action_execute")
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Int("step", step),
+				logger.Int("total_steps", total),
+				logger.String("action_description", action.GetDescription()),
+				logger.Error(res.err),
+				logger.String("operation", "composite_action_execute"))
 			return res.err
 		}
 		return nil
@@ -495,13 +524,13 @@ func (a *CompositeAction) executeActionWithRecovery(action Action, data any, ste
 			Context("total_steps", total).
 			Build()
 		GetLogger().Error("Composite action timed out",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"step", step,
-			"total_steps", total,
-			"action_description", action.GetDescription(),
-			"timeout_seconds", timeout.Seconds(),
-			"operation", "composite_action_context_timeout")
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Int("step", step),
+			logger.Int("total_steps", total),
+			logger.String("action_description", action.GetDescription()),
+			logger.Float64("timeout_seconds", timeout.Seconds()),
+			logger.String("operation", "composite_action_context_timeout"))
 		return timeoutErr
 	}
 }
@@ -511,10 +540,8 @@ func (a *LogAction) Execute(data any) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	speciesName := strings.ToLower(a.Note.CommonName)
-
-	// Check if the event should be handled for this species
-	if !a.EventTracker.TrackEvent(speciesName, LogToFile) {
+	// Check if the event should be handled for this species (supports scientific name lookup)
+	if !a.EventTracker.TrackEventWithNames(a.Note.CommonName, a.Note.ScientificName, LogToFile) {
 		return nil
 	}
 
@@ -523,23 +550,22 @@ func (a *LogAction) Execute(data any) error {
 		// If an error occurs when logging to a file, wrap and return the error.
 		// Add structured logging
 		GetLogger().Error("Failed to log note to file",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"error", err,
-			"species", a.Note.CommonName,
-			"confidence", a.Note.Confidence,
-			"clip_name", a.Note.ClipName,
-			"operation", "log_to_file")
-		log.Printf("❌ Failed to log note to file")
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(err),
+			logger.String("species", a.Note.CommonName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("clip_name", a.Note.ClipName),
+			logger.String("operation", "log_to_file"))
 	}
 	// Add structured logging for console output
 	GetLogger().Info("Detection logged",
-		"component", "analysis.processor.actions",
-		"detection_id", a.CorrelationID,
-		"species", a.Note.CommonName,
-		"confidence", a.Note.Confidence,
-		"time", a.Note.Time,
-		"operation", "console_output")
+		logger.String("component", "analysis.processor.actions"),
+		logger.String("detection_id", a.CorrelationID),
+		logger.String("species", a.Note.CommonName),
+		logger.Float64("confidence", a.Note.Confidence),
+		logger.String("time", a.Note.Time),
+		logger.String("operation", "console_output"))
 	fmt.Printf("%s %s %.2f\n", a.Note.Time, a.Note.CommonName, a.Note.Confidence)
 
 	return nil
@@ -550,10 +576,8 @@ func (a *DatabaseAction) Execute(data any) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	speciesName := strings.ToLower(a.Note.CommonName)
-
-	// Check event frequency
-	if !a.EventTracker.TrackEvent(speciesName, DatabaseSave) {
+	// Check event frequency (supports scientific name lookup)
+	if !a.EventTracker.TrackEventWithNames(a.Note.CommonName, a.Note.ScientificName, DatabaseSave) {
 		return nil
 	}
 
@@ -563,22 +587,21 @@ func (a *DatabaseAction) Execute(data any) error {
 	if a.NewSpeciesTracker != nil {
 		// Use atomic check-and-update to prevent duplicate "new species" notifications
 		// when multiple detections of the same species arrive concurrently
-		isNewSpecies, daysSinceFirstSeen = a.NewSpeciesTracker.CheckAndUpdateSpecies(a.Note.ScientificName, time.Now())
+		isNewSpecies, daysSinceFirstSeen = a.NewSpeciesTracker.CheckAndUpdateSpecies(a.Note.ScientificName, a.Note.BeginTime)
 	}
 
 	// Save note to database
 	if err := a.Ds.Save(&a.Note, a.Results); err != nil {
 		// Add structured logging
 		GetLogger().Error("Failed to save note and results to database",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"error", err,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"confidence", a.Note.Confidence,
-			"clip_name", a.Note.ClipName,
-			"operation", "database_save")
-		log.Printf("❌ Failed to save note and results to database")
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(err),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("clip_name", a.Note.ClipName),
+			logger.String("operation", "database_save"))
 		return err
 	}
 
@@ -591,27 +614,26 @@ func (a *DatabaseAction) Execute(data any) error {
 
 		// debug log note begin, end and capture length
 		GetLogger().Debug("Saving detection audio clip",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"begin_time", a.Note.BeginTime,
-			"end_time", a.Note.EndTime,
-			"capture_length", captureLength,
-			"operation", "note_begin_end_capture_length")
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Time("begin_time", a.Note.BeginTime),
+			logger.Time("end_time", a.Note.EndTime),
+			logger.Int("capture_length", captureLength),
+			logger.String("operation", "note_begin_end_capture_length"))
 
 		// export audio clip from capture buffer
 		pcmData, err := myaudio.ReadSegmentFromCaptureBuffer(a.Note.Source.ID, a.Note.BeginTime, captureLength)
 		if err != nil {
 			// Add structured logging
 			GetLogger().Error("Failed to read audio segment from buffer",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"species", a.Note.CommonName,
-				"source", a.Note.Source.SafeString,
-				"begin_time", a.Note.BeginTime,
-				"duration_seconds", 15,
-				"operation", "read_audio_segment")
-			log.Printf("❌ Failed to read audio segment from buffer")
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(err),
+				logger.String("species", a.Note.CommonName),
+				logger.String("source", a.Note.Source.SafeString),
+				logger.Time("begin_time", a.Note.BeginTime),
+				logger.Int("duration_seconds", captureLength),
+				logger.String("operation", "read_audio_segment"))
 			return err
 		}
 
@@ -628,29 +650,26 @@ func (a *DatabaseAction) Execute(data any) error {
 		if err := saveAudioAction.Execute(nil); err != nil {
 			// Add structured logging
 			GetLogger().Error("Failed to save audio clip",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"species", a.Note.CommonName,
-				"clip_name", a.Note.ClipName,
-				"operation", "save_audio_clip")
-			log.Printf("❌ Failed to save audio clip")
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(err),
+				logger.String("species", a.Note.CommonName),
+				logger.String("clip_name", a.Note.ClipName),
+				logger.String("operation", "save_audio_clip"))
 			return err
 		}
 
 		if a.Settings.Debug {
 			// Add structured logging
 			GetLogger().Debug("Saved audio clip successfully",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"species", a.Note.CommonName,
-				"clip_name", a.Note.ClipName,
-				"detection_time", a.Note.Time,
-				"begin_time", a.Note.BeginTime,
-				"end_time", time.Now(),
-				"operation", "save_audio_clip_debug")
-			log.Printf("✅ Saved audio clip to %s\n", a.Note.ClipName)
-			log.Printf("detection time %v, begin time %v, end time %v\n", a.Note.Time, a.Note.BeginTime, time.Now())
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.String("species", a.Note.CommonName),
+				logger.String("clip_name", a.Note.ClipName),
+				logger.String("detection_time", a.Note.Time),
+				logger.Time("begin_time", a.Note.BeginTime),
+				logger.Time("end_time", time.Now()),
+				logger.String("operation", "save_audio_clip_debug"))
 		}
 	}
 
@@ -682,17 +701,17 @@ func (a *DatabaseAction) publishNewSpeciesDetectionEvent(isNewSpecies bool, days
 
 	// Check notification suppression if tracker is available
 	if a.NewSpeciesTracker != nil {
-		notificationTime = time.Now()
+		notificationTime = a.Note.BeginTime
 
 		// Check if notification should be suppressed for this species
 		if a.NewSpeciesTracker.ShouldSuppressNotification(a.Note.ScientificName, notificationTime) {
 			if a.Settings.Debug {
 				GetLogger().Debug("Suppressing duplicate new species notification",
-					"component", "analysis.processor.actions",
-					"detection_id", a.CorrelationID,
-					"species", a.Note.CommonName,
-					"scientific_name", a.Note.ScientificName,
-					"operation", "suppress_notification")
+					logger.String("component", "analysis.processor.actions"),
+					logger.String("detection_id", a.CorrelationID),
+					logger.String("species", a.Note.CommonName),
+					logger.String("scientific_name", a.Note.ScientificName),
+					logger.String("operation", "suppress_notification"))
 			}
 			return
 		}
@@ -718,15 +737,14 @@ func (a *DatabaseAction) publishNewSpeciesDetectionEvent(isNewSpecies bool, days
 		if a.Settings.Debug {
 			// Add structured logging
 			GetLogger().Debug("Failed to create detection event",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"species", a.Note.CommonName,
-				"scientific_name", a.Note.ScientificName,
-				"is_new_species", isNewSpecies,
-				"days_since_first_seen", daysSinceFirstSeen,
-				"operation", "create_detection_event")
-			log.Printf("❌ Failed to create detection event: %v", err)
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(err),
+				logger.String("species", a.Note.CommonName),
+				logger.String("scientific_name", a.Note.ScientificName),
+				logger.Bool("is_new_species", isNewSpecies),
+				logger.Int("days_since_first_seen", daysSinceFirstSeen),
+				logger.String("operation", "create_detection_event"))
 		}
 		return
 	}
@@ -750,11 +768,11 @@ func (a *DatabaseAction) publishNewSpeciesDetectionEvent(isNewSpecies bool, days
 	} else {
 		// Log error if metadata is nil (shouldn't happen in normal operation)
 		GetLogger().Error("Detection event metadata is nil",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"operation", "publish_detection_event")
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.String("operation", "publish_detection_event"))
 	}
 
 	// Publish the detection event
@@ -767,15 +785,14 @@ func (a *DatabaseAction) publishNewSpeciesDetectionEvent(isNewSpecies bool, days
 		if a.Settings.Debug {
 			// Add structured logging
 			GetLogger().Debug("Published new species detection event",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"species", a.Note.CommonName,
-				"scientific_name", a.Note.ScientificName,
-				"confidence", a.Note.Confidence,
-				"is_new_species", isNewSpecies,
-				"days_since_first_seen", daysSinceFirstSeen,
-				"operation", "publish_detection_event")
-			log.Printf("🌟 Published new species detection event: %s", a.Note.CommonName)
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.String("species", a.Note.CommonName),
+				logger.String("scientific_name", a.Note.ScientificName),
+				logger.Float64("confidence", a.Note.Confidence),
+				logger.Bool("is_new_species", isNewSpecies),
+				logger.Int("days_since_first_seen", daysSinceFirstSeen),
+				logger.String("operation", "publish_detection_event"))
 		}
 	}
 }
@@ -789,16 +806,15 @@ func (a *SaveAudioAction) Execute(data any) error {
 	outputPath := filepath.Join(a.Settings.Realtime.Audio.Export.Path, a.ClipName)
 
 	// Ensure the directory exists
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o750); err != nil {
 		// Add structured logging
 		GetLogger().Error("Failed to create directory for audio clip",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"error", err,
-			"output_path", outputPath,
-			"clip_name", a.ClipName,
-			"operation", "create_directory")
-		log.Printf("❌ Error creating directory for audio clip")
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(err),
+			logger.String("output_path", outputPath),
+			logger.String("clip_name", a.ClipName),
+			logger.String("operation", "create_directory"))
 		return err
 	}
 
@@ -806,28 +822,26 @@ func (a *SaveAudioAction) Execute(data any) error {
 		if err := myaudio.SavePCMDataToWAV(outputPath, a.pcmData); err != nil {
 			// Add structured logging
 			GetLogger().Error("Failed to save audio clip to WAV",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"output_path", outputPath,
-				"clip_name", a.ClipName,
-				"format", "wav",
-				"operation", "save_wav")
-			log.Printf("❌ Error saving audio clip to WAV")
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(err),
+				logger.String("output_path", outputPath),
+				logger.String("clip_name", a.ClipName),
+				logger.String("format", "wav"),
+				logger.String("operation", "save_wav"))
 			return err
 		}
 	} else {
 		if err := myaudio.ExportAudioWithFFmpeg(a.pcmData, outputPath, &a.Settings.Realtime.Audio); err != nil {
 			// Add structured logging
 			GetLogger().Error("Failed to export audio clip with FFmpeg",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"output_path", outputPath,
-				"clip_name", a.ClipName,
-				"format", a.Settings.Realtime.Audio.Export.Type,
-				"operation", "ffmpeg_export")
-			log.Printf("❌ Error exporting audio clip with FFmpeg")
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(err),
+				logger.String("output_path", outputPath),
+				logger.String("clip_name", a.ClipName),
+				logger.String("format", a.Settings.Realtime.Audio.Export.Type),
+				logger.String("operation", "ffmpeg_export"))
 			return err
 		}
 	}
@@ -840,22 +854,22 @@ func (a *SaveAudioAction) Execute(data any) error {
 	} else {
 		// Debug log if we can't stat the file (shouldn't happen after successful write)
 		GetLogger().Debug("Failed to stat audio file for size logging",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"error", err,
-			"path", outputPath,
-			"operation", "audio_export_stat")
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(err),
+			logger.String("path", outputPath),
+			logger.String("operation", "audio_export_stat"))
 	}
 
 	// Log successful audio export at INFO level (BG-18)
 	// This provides evidence that audio export completed successfully
 	GetLogger().Info("Audio clip saved successfully",
-		"component", "analysis.processor.actions",
-		"detection_id", a.CorrelationID,
-		"clip_path", a.ClipName,
-		"file_size_bytes", fileSize,
-		"format", a.Settings.Realtime.Audio.Export.Type,
-		"operation", "audio_export_success")
+		logger.String("component", "analysis.processor.actions"),
+		logger.String("detection_id", a.CorrelationID),
+		logger.String("clip_path", a.ClipName),
+		logger.Int64("file_size_bytes", fileSize),
+		logger.String("format", a.Settings.Realtime.Audio.Export.Type),
+		logger.String("operation", "audio_export_success"))
 
 	// Submit for pre-rendering if enabled
 	if a.Settings.Realtime.Dashboard.Spectrogram.Enabled && a.PreRenderer != nil {
@@ -870,12 +884,12 @@ func (a *SaveAudioAction) Execute(data any) error {
 		// Non-blocking submission - errors logged but don't fail action
 		if err := a.PreRenderer.Submit(job); err != nil {
 			GetLogger().Warn("Failed to submit spectrogram pre-render job",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"note_id", a.NoteID,
-				"clip_path", outputPath,
-				"error", err,
-				"operation", "prerender_submit")
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Any("note_id", a.NoteID),
+				logger.String("clip_path", outputPath),
+				logger.Error(err),
+				logger.String("operation", "prerender_submit"))
 		}
 	}
 
@@ -887,10 +901,8 @@ func (a *BirdWeatherAction) Execute(data any) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	speciesName := strings.ToLower(a.Note.CommonName)
-
-	// Check event frequency
-	if !a.EventTracker.TrackEvent(speciesName, BirdWeatherSubmit) {
+	// Check event frequency (supports scientific name lookup)
+	if !a.EventTracker.TrackEventWithNames(a.Note.CommonName, a.Note.ScientificName, BirdWeatherSubmit) {
 		return nil
 	}
 
@@ -904,14 +916,12 @@ func (a *BirdWeatherAction) Execute(data any) error {
 		if a.Settings.Debug {
 			// Add structured logging
 			GetLogger().Debug("Skipping BirdWeather upload due to low confidence",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"species", speciesName,
-				"confidence", a.Note.Confidence,
-				"threshold", a.Settings.Realtime.Birdweather.Threshold,
-				"operation", "birdweather_threshold_check")
-			log.Printf("⛔ Skipping BirdWeather upload for %s: confidence %.2f below threshold %.2f\n",
-				speciesName, a.Note.Confidence, a.Settings.Realtime.Birdweather.Threshold)
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.String("species", a.Note.CommonName),
+				logger.Float64("confidence", a.Note.Confidence),
+				logger.Float64("threshold", float64(a.Settings.Realtime.Birdweather.Threshold)),
+				logger.String("operation", "birdweather_threshold_check"))
 		}
 		return nil
 	}
@@ -939,24 +949,19 @@ func (a *BirdWeatherAction) Execute(data any) error {
 	if err := a.BwClient.Publish(&note, pcmData); err != nil {
 		// Log the error with retry information if retries are enabled
 		// Sanitize error before logging
-		sanitizedErr := sanitizeError(err)
+		sanitizedErr := privacy.WrapError(err)
 		// Add structured logging
 		GetLogger().Error("Failed to upload to BirdWeather",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"error", sanitizedErr,
-			"species", note.CommonName,
-			"scientific_name", note.ScientificName,
-			"confidence", note.Confidence,
-			"clip_name", note.ClipName,
-			"retry_enabled", a.RetryConfig.Enabled,
-			"operation", "birdweather_upload")
-		if a.RetryConfig.Enabled {
-			log.Printf("❌ Error uploading %s (%s) to BirdWeather (confidence: %.2f, clip: %s) (will retry): %v\n",
-				note.CommonName, note.ScientificName, note.Confidence, note.ClipName, sanitizedErr)
-		} else {
-			log.Printf("❌ Error uploading %s (%s) to BirdWeather (confidence: %.2f, clip: %s): %v\n",
-				note.CommonName, note.ScientificName, note.Confidence, note.ClipName, sanitizedErr)
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(sanitizedErr),
+			logger.String("species", note.CommonName),
+			logger.String("scientific_name", note.ScientificName),
+			logger.Float64("confidence", note.Confidence),
+			logger.String("clip_name", note.ClipName),
+			logger.Bool("retry_enabled", a.RetryConfig.Enabled),
+			logger.String("operation", "birdweather_upload"))
+		if !a.RetryConfig.Enabled {
 			// Send notification for non-retryable failures
 			notification.NotifyIntegrationFailure("BirdWeather", err)
 		}
@@ -978,23 +983,28 @@ func (a *BirdWeatherAction) Execute(data any) error {
 	}
 
 	if a.Settings.Debug {
-		// Add structured logging
 		GetLogger().Debug("Successfully uploaded to BirdWeather",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"confidence", a.Note.Confidence,
-			"clip_name", a.Note.ClipName,
-			"operation", "birdweather_upload_success")
-		log.Printf("✅ Successfully uploaded %s to BirdWeather\n", a.Note.ClipName)
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("clip_name", a.Note.ClipName),
+			logger.String("operation", "birdweather_upload_success"))
 	}
 	return nil
 }
 
+// NoteWithBirdImage wraps a Note with bird image data for MQTT publishing.
+// The SourceID field enables Home Assistant to filter detections by source.
+//
+// IMPORTANT: JSON field names are part of the public MQTT API contract.
+// Changing them breaks existing Home Assistant and other MQTT integrations.
+// See: https://github.com/tphakala/birdnet-go/discussions/1759
 type NoteWithBirdImage struct {
 	datastore.Note
-	BirdImage imageprovider.BirdImage
+	SourceID  string                  `json:"sourceId"`  // Audio source ID for HA filtering (added for HA discovery)
+	BirdImage imageprovider.BirdImage `json:"BirdImage"` // PascalCase for backward compatibility - DO NOT CHANGE
 }
 
 // Execute sends the note to the MQTT broker
@@ -1005,16 +1015,14 @@ func (a *MqttAction) Execute(data any) error {
 	// Rely on background reconnect; fail action if not currently connected.
 	if !a.MqttClient.IsConnected() {
 		// Log slightly differently to indicate it's waiting for background reconnect
-		// Add structured logging
 		GetLogger().Warn("MQTT client not connected, skipping publish",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"confidence", a.Note.Confidence,
-			"operation", "mqtt_connection_check",
-			"status", "waiting_reconnect")
-		log.Printf("🟡 MQTT client is not connected, skipping publish for %s (%s). Waiting for automatic reconnect.", a.Note.CommonName, a.Note.ScientificName)
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("operation", "mqtt_connection_check"),
+			logger.String("status", "waiting_reconnect"))
 		// MQTT connection failures are retryable because:
 		// - The MQTT client has automatic reconnection logic
 		// - Connection may be temporarily lost due to network issues
@@ -1029,10 +1037,8 @@ func (a *MqttAction) Execute(data any) error {
 			Build()
 	}
 
-	speciesName := strings.ToLower(a.Note.CommonName)
-
-	// Check event frequency
-	if !a.EventTracker.TrackEvent(speciesName, MQTTPublish) {
+	// Check event frequency (supports scientific name lookup)
+	if !a.EventTracker.TrackEventWithNames(a.Note.CommonName, a.Note.ScientificName, MQTTPublish) {
 		return nil
 	}
 
@@ -1048,54 +1054,29 @@ func (a *MqttAction) Execute(data any) error {
 			Build()
 	}
 
-	// Get bird image of detected bird
-	birdImage := imageprovider.BirdImage{} // Default to empty image
-	// Add nil check for BirdImageCache before calling Get
-	if a.BirdImageCache != nil {
-		var err error
-		birdImage, err = a.BirdImageCache.Get(a.Note.ScientificName)
-		if err != nil {
-			// Add structured logging
-			GetLogger().Warn("Error getting bird image from cache",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"species", a.Note.CommonName,
-				"scientific_name", a.Note.ScientificName,
-				"operation", "get_bird_image")
-			log.Printf("⚠️ Error getting bird image from cache for %s: %v", a.Note.ScientificName, err)
-			// Continue with the default empty image
-		}
-	} else {
-		// Log if the cache is nil, maybe helpful for debugging setup issues
-		// Add structured logging
-		GetLogger().Warn("BirdImageCache is nil, cannot fetch image",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"operation", "check_bird_image_cache")
-		log.Printf("🟡 BirdImageCache is nil, cannot fetch image for %s", a.Note.ScientificName)
-	}
+	// Get bird image of detected bird using the shared helper
+	birdImage := getBirdImageFromCache(a.BirdImageCache, a.Note.ScientificName, a.Note.CommonName, a.CorrelationID)
 
 	// Create a copy of the Note (source is already sanitized in SafeString field)
 	noteCopy := a.Note
 
-	// Wrap note with bird image (using copy)
-	noteWithBirdImage := NoteWithBirdImage{Note: noteCopy, BirdImage: birdImage}
+	// Wrap note with bird image (using copy) and include SourceID for HA filtering
+	noteWithBirdImage := NoteWithBirdImage{
+		Note:      noteCopy,
+		SourceID:  noteCopy.Source.ID,
+		BirdImage: birdImage,
+	}
 
 	// Create a JSON representation of the note
 	noteJson, err := json.Marshal(noteWithBirdImage)
 	if err != nil {
-		// Add structured logging
 		GetLogger().Error("Failed to marshal note to JSON",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"error", err,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"operation", "json_marshal")
-		log.Printf("❌ Error marshalling note to JSON")
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(err),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.String("operation", "json_marshal"))
 		return err
 	}
 
@@ -1108,36 +1089,28 @@ func (a *MqttAction) Execute(data any) error {
 	if err != nil {
 		// Log the error with retry information if retries are enabled
 		// Sanitize error before logging
-		sanitizedErr := sanitizeError(err)
+		sanitizedErr := privacy.WrapError(err)
 
 		// Check if this is an EOF error which indicates connection was closed unexpectedly
 		// This is a common issue with MQTT brokers and should be treated as retryable
 		isEOFErr := isEOFError(err)
 
-		// Add structured logging
 		GetLogger().Error("Failed to publish to MQTT",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"error", sanitizedErr,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"confidence", a.Note.Confidence,
-			"clip_name", a.Note.ClipName,
-			"topic", a.Settings.Realtime.MQTT.Topic,
-			"retry_enabled", a.RetryConfig.Enabled,
-			"is_eof_error", isEOFErr,
-			"operation", "mqtt_publish")
-		if a.RetryConfig.Enabled {
-			log.Printf("❌ Error publishing %s (%s) to MQTT topic %s (confidence: %.2f, clip: %s) (will retry): %v\n",
-				a.Note.CommonName, a.Note.ScientificName, a.Settings.Realtime.MQTT.Topic, a.Note.Confidence, a.Note.ClipName, sanitizedErr)
-		} else {
-			log.Printf("❌ Error publishing %s (%s) to MQTT topic %s (confidence: %.2f, clip: %s): %v\n",
-				a.Note.CommonName, a.Note.ScientificName, a.Settings.Realtime.MQTT.Topic, a.Note.Confidence, a.Note.ClipName, sanitizedErr)
-			// Only send notification for non-EOF errors when retries are disabled
-			// EOF errors are typically transient connection issues
-			if !isEOFErr {
-				notification.NotifyIntegrationFailure("MQTT", err)
-			}
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(sanitizedErr),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("clip_name", a.Note.ClipName),
+			logger.String("topic", a.Settings.Realtime.MQTT.Topic),
+			logger.Bool("retry_enabled", a.RetryConfig.Enabled),
+			logger.Bool("is_eof_error", isEOFErr),
+			logger.String("operation", "mqtt_publish"))
+		// Only send notification for non-EOF errors when retries are disabled
+		// EOF errors are typically transient connection issues
+		if !a.RetryConfig.Enabled && !isEOFErr {
+			notification.NotifyIntegrationFailure("MQTT", err)
 		}
 
 		// Enhance error context with EOF detection
@@ -1158,17 +1131,14 @@ func (a *MqttAction) Execute(data any) error {
 	}
 
 	if a.Settings.Debug {
-		// Add structured logging
 		GetLogger().Debug("Successfully published to MQTT",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"confidence", a.Note.Confidence,
-			"topic", a.Settings.Realtime.MQTT.Topic,
-			"operation", "mqtt_publish_success")
-		log.Printf("✅ Successfully published %s to MQTT topic %s\n",
-			a.Note.CommonName, a.Settings.Realtime.MQTT.Topic)
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("topic", a.Settings.Realtime.MQTT.Topic),
+			logger.String("operation", "mqtt_publish_success"))
 	}
 	return nil
 }
@@ -1191,9 +1161,9 @@ func (a *UpdateRangeFilterAction) Execute(data any) error {
 		a.Settings.ResetRangeFilterUpdateFlag()
 
 		GetLogger().Error("Failed to get probable species for range filter",
-			"error", err,
-			"date", today.Format("2006-01-02"),
-			"operation", "update_range_filter")
+			logger.Error(err),
+			logger.String("date", today.Format("2006-01-02")),
+			logger.String("operation", "update_range_filter"))
 		return err
 	}
 
@@ -1208,10 +1178,9 @@ func (a *UpdateRangeFilterAction) Execute(data any) error {
 
 	if a.Settings.Debug {
 		GetLogger().Info("Range filter updated successfully",
-			"species_count", len(includedSpecies),
-			"date", today.Format("2006-01-02"),
-			"operation", "update_range_filter_success")
-		log.Printf("✅ Range filter updated with %d species for %s", len(includedSpecies), today.Format("2006-01-02"))
+			logger.Int("species_count", len(includedSpecies)),
+			logger.String("date", today.Format("2006-01-02")),
+			logger.String("operation", "update_range_filter_success"))
 	}
 
 	return nil
@@ -1227,10 +1196,8 @@ func (a *SSEAction) Execute(data any) error {
 		return nil // Silently skip if no broadcaster is configured
 	}
 
-	speciesName := strings.ToLower(a.Note.CommonName)
-
-	// Check event frequency
-	if !a.EventTracker.TrackEvent(speciesName, SSEBroadcast) {
+	// Check event frequency (supports scientific name lookup)
+	if !a.EventTracker.TrackEventWithNames(a.Note.CommonName, a.Note.ScientificName, SSEBroadcast) {
 		return nil
 	}
 
@@ -1245,15 +1212,13 @@ func (a *SSEAction) Execute(data any) error {
 	if a.Note.ClipName != "" {
 		if err := a.waitForAudioFile(); err != nil {
 			// Log warning but don't fail the SSE broadcast
-			// Add structured logging
 			GetLogger().Warn("Audio file not ready for SSE broadcast",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"species", a.Note.CommonName,
-				"clip_name", a.Note.ClipName,
-				"operation", "sse_wait_audio_file")
-			log.Printf("⚠️ Audio file not ready for %s, broadcasting without waiting: %v", a.Note.CommonName, err)
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(err),
+				logger.String("species", a.Note.CommonName),
+				logger.String("clip_name", a.Note.ClipName),
+				logger.String("operation", "sse_wait_audio_file"))
 		}
 	}
 
@@ -1261,48 +1226,21 @@ func (a *SSEAction) Execute(data any) error {
 	// This ensures the frontend can properly load audio/spectrogram via API endpoints
 	if a.Note.ID == 0 {
 		if err := a.waitForDatabaseID(); err != nil {
-			// Log warning but don't fail the SSE broadcast
-			// Add structured logging
-			GetLogger().Warn("Database ID not ready for SSE broadcast",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"species", a.Note.CommonName,
-				"note_id", a.Note.ID,
-				"operation", "sse_wait_database_id")
-			log.Printf("⚠️ Database ID not ready for %s, broadcasting with ID=0: %v", a.Note.CommonName, err)
+			// Cannot broadcast without database ID - frontend would fail to load audio/spectrogram
+			// Skip SSE broadcast gracefully - the detection is still saved and will appear on page refresh
+			GetLogger().Warn("Skipping SSE broadcast - database ID not available within timeout",
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.String("species", a.Note.CommonName),
+				logger.Error(err),
+				logger.Duration("timeout", SSEDatabaseIDTimeout),
+				logger.String("operation", "sse_broadcast_skipped"))
+			return nil // Not an error - graceful degradation
 		}
 	}
 
-	// Get bird image of detected bird
-	birdImage := imageprovider.BirdImage{} // Default to empty image
-	// Add nil check for BirdImageCache before calling Get
-	if a.BirdImageCache != nil {
-		var err error
-		birdImage, err = a.BirdImageCache.Get(a.Note.ScientificName)
-		if err != nil {
-			// Add structured logging
-			GetLogger().Warn("Error getting bird image from cache",
-				"component", "analysis.processor.actions",
-				"detection_id", a.CorrelationID,
-				"error", err,
-				"species", a.Note.CommonName,
-				"scientific_name", a.Note.ScientificName,
-				"operation", "get_bird_image")
-			log.Printf("⚠️ Error getting bird image from cache for %s: %v", a.Note.ScientificName, err)
-			// Continue with the default empty image
-		}
-	} else {
-		// Log if the cache is nil, maybe helpful for debugging setup issues
-		// Add structured logging
-		GetLogger().Warn("BirdImageCache is nil, cannot fetch image",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"operation", "check_bird_image_cache")
-		log.Printf("🟡 BirdImageCache is nil, cannot fetch image for %s", a.Note.ScientificName)
-	}
+	// Get bird image of detected bird using the shared helper
+	birdImage := getBirdImageFromCache(a.BirdImageCache, a.Note.ScientificName, a.Note.CommonName, a.CorrelationID)
 
 	// Create a copy of the Note (source is already sanitized in SafeString field)
 	noteCopy := a.Note
@@ -1311,25 +1249,17 @@ func (a *SSEAction) Execute(data any) error {
 	if err := a.SSEBroadcaster(&noteCopy, &birdImage); err != nil {
 		// Log the error with retry information if retries are enabled
 		// Sanitize error before logging
-		sanitizedErr := sanitizeError(err)
-		// Add structured logging
+		sanitizedErr := privacy.WrapError(err)
 		GetLogger().Error("Failed to broadcast via SSE",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"error", sanitizedErr,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"confidence", a.Note.Confidence,
-			"clip_name", a.Note.ClipName,
-			"retry_enabled", a.RetryConfig.Enabled,
-			"operation", "sse_broadcast")
-		if a.RetryConfig.Enabled {
-			log.Printf("❌ Error broadcasting %s (%s) via SSE (confidence: %.2f, clip: %s) (will retry): %v\n",
-				a.Note.CommonName, a.Note.ScientificName, a.Note.Confidence, a.Note.ClipName, sanitizedErr)
-		} else {
-			log.Printf("❌ Error broadcasting %s (%s) via SSE (confidence: %.2f, clip: %s): %v\n",
-				a.Note.CommonName, a.Note.ScientificName, a.Note.Confidence, a.Note.ClipName, sanitizedErr)
-		}
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(sanitizedErr),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("clip_name", a.Note.ClipName),
+			logger.Bool("retry_enabled", a.RetryConfig.Enabled),
+			logger.String("operation", "sse_broadcast"))
 		return errors.New(err).
 			Component("analysis.processor").
 			Category(errors.CategoryBroadcast).
@@ -1342,16 +1272,14 @@ func (a *SSEAction) Execute(data any) error {
 	}
 
 	if a.Settings.Debug {
-		// Add structured logging
 		GetLogger().Debug("Successfully broadcasted via SSE",
-			"component", "analysis.processor.actions",
-			"detection_id", a.CorrelationID,
-			"species", a.Note.CommonName,
-			"scientific_name", a.Note.ScientificName,
-			"confidence", a.Note.Confidence,
-			"clip_name", a.Note.ClipName,
-			"operation", "sse_broadcast_success")
-		log.Printf("✅ Successfully broadcasted %s via SSE\n", a.Note.CommonName)
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("clip_name", a.Note.ClipName),
+			logger.String("operation", "sse_broadcast_success"))
 	}
 
 	return nil
@@ -1375,15 +1303,13 @@ func (a *SSEAction) waitForAudioFile() error {
 			// File exists, check if it has reasonable size
 			if info.Size() > MinAudioFileSize {
 				if a.Settings.Debug {
-					// Add structured logging
 					GetLogger().Debug("Audio file ready for SSE broadcast",
-						"component", "analysis.processor.actions",
-						"detection_id", a.CorrelationID,
-						"clip_name", a.Note.ClipName,
-						"file_size_bytes", info.Size(),
-						"species", a.Note.CommonName,
-						"operation", "wait_audio_file_success")
-					log.Printf("🎵 Audio file ready for SSE broadcast: %s (size: %d bytes)", a.Note.ClipName, info.Size())
+						logger.String("component", "analysis.processor.actions"),
+						logger.String("detection_id", a.CorrelationID),
+						logger.String("clip_name", a.Note.ClipName),
+						logger.Int64("file_size_bytes", info.Size()),
+						logger.String("species", a.Note.CommonName),
+						logger.String("operation", "wait_audio_file_success"))
 				}
 				return nil
 			}
@@ -1416,15 +1342,13 @@ func (a *SSEAction) waitForDatabaseID() error {
 			// Found the note with an ID, update our copy
 			a.Note.ID = updatedNote.ID
 			if a.Settings.Debug {
-				// Add structured logging
 				GetLogger().Debug("Found database ID for SSE broadcast",
-					"component", "analysis.processor.actions",
-					"detection_id", a.CorrelationID,
-					"database_id", updatedNote.ID,
-					"species", a.Note.CommonName,
-					"scientific_name", a.Note.ScientificName,
-					"operation", "wait_database_id_success")
-				log.Printf("🔍 Found database ID %d for SSE broadcast: %s", updatedNote.ID, a.Note.CommonName)
+					logger.String("component", "analysis.processor.actions"),
+					logger.String("detection_id", a.CorrelationID),
+					logger.Any("database_id", updatedNote.ID),
+					logger.String("species", a.Note.CommonName),
+					logger.String("scientific_name", a.Note.ScientificName),
+					logger.String("operation", "wait_database_id_success"))
 			}
 			return nil
 		}
@@ -1432,14 +1356,13 @@ func (a *SSEAction) waitForDatabaseID() error {
 		time.Sleep(SSEDatabaseCheckInterval)
 	}
 
-	// Timeout reached
-	return errors.Newf("database ID not assigned for %s after %v timeout", a.Note.CommonName, SSEDatabaseIDTimeout).
-		Component("analysis.processor").
-		Category(errors.CategoryTimeout).
-		Context("operation", "wait_for_database_id").
-		Context("species", a.Note.CommonName).
-		Context("timeout_seconds", SSEDatabaseIDTimeout.Seconds()).
-		Build()
+	// Timeout reached - intentionally using fmt.Errorf instead of errors.Newf to avoid
+	// triggering user notifications. This is a transient timing issue, not a user-actionable
+	// problem. The structured error system converts errors to notifications, which we want
+	// to avoid for this non-critical timeout.
+	// Note: Species name is NOT included in error message to prevent log injection.
+	// The species is already captured in structured log fields by the caller.
+	return fmt.Errorf("database ID not found after %v", SSEDatabaseIDTimeout)
 }
 
 // findNoteInDatabase searches for the note in database by unique characteristics
@@ -1469,13 +1392,19 @@ func (a *SSEAction) findNoteInDatabase() (*datastore.Note, error) {
 			Build()
 	}
 
-	// Filter results to find the exact match based on date and time
+	// Filter results to find the exact match based on BeginTime and source
+	// Using BeginTime (time.Time) is more robust than Date+Time strings as it's the
+	// actual detection timestamp and avoids string formatting/precision issues
 	for i := range notes {
 		note := &notes[i]
 		// Check if this note matches our expected characteristics
-		if note.Date == a.Note.Date &&
-			note.ScientificName == a.Note.ScientificName &&
-			note.Time == a.Note.Time { // Exact time match
+		// Include SourceNode to prevent matching wrong detection in high-activity periods
+		// Only compare SourceNode if both have values (handles legacy data)
+		sourceMatches := a.Note.SourceNode == "" || note.SourceNode == "" || note.SourceNode == a.Note.SourceNode
+		// Truncate to millisecond precision for comparison to handle potential database precision loss
+		if note.ScientificName == a.Note.ScientificName &&
+			note.BeginTime.Truncate(time.Millisecond).Equal(a.Note.BeginTime.Truncate(time.Millisecond)) &&
+			sourceMatches {
 			return note, nil
 		}
 	}
@@ -1485,7 +1414,6 @@ func (a *SSEAction) findNoteInDatabase() (*datastore.Note, error) {
 		Category(errors.CategoryNotFound).
 		Context("operation", "find_note_in_database").
 		Context("species", a.Note.ScientificName).
-		Context("date", a.Note.Date).
-		Context("time", a.Note.Time).
+		Context("begin_time", a.Note.BeginTime.Format("2006-01-02 15:04:05.000")).
 		Build()
 }

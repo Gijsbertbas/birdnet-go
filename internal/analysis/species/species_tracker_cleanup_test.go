@@ -14,6 +14,8 @@ import (
 
 // TestPruneOldEntries_CriticalReliability tests old entry pruning to prevent memory leaks
 // CRITICAL: Without proper pruning, tracker will consume unbounded memory over time
+//
+//nolint:gocognit // Table-driven test with comprehensive scenario coverage requires complex verification
 func TestPruneOldEntries_CriticalReliability(t *testing.T) {
 	t.Parallel()
 
@@ -56,9 +58,11 @@ func TestPruneOldEntries_CriticalReliability(t *testing.T) {
 				tracker.yearlyWindowDays = 7
 				tracker.resetMonth = 1 // January reset
 				tracker.resetDay = 1
-				// Add entry from last year (before Jan 1)
-				tracker.speciesThisYear["Last_Year_Species"] = now.AddDate(-1, 0, 0)  // 1 year ago - should be pruned
-				tracker.speciesThisYear["This_Year_Species"] = now.AddDate(0, 0, -10) // 10 days ago - should NOT be pruned
+				// Calculate year start (Jan 1 of current year) for proper entry placement
+				yearStart := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, now.Location())
+				// Add entry from before year start (should be pruned) and after year start (should NOT be pruned)
+				tracker.speciesThisYear["Last_Year_Species"] = yearStart.AddDate(0, 0, -1) // Day before year start - should be pruned
+				tracker.speciesThisYear["This_Year_Species"] = yearStart.AddDate(0, 0, 1)  // Day after year start - should NOT be pruned
 			},
 			time.Now(),
 			1,

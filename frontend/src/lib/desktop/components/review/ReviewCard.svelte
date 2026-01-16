@@ -15,7 +15,7 @@
 <script lang="ts">
   import { fetchWithCSRF } from '$lib/utils/api';
   import { t } from '$lib/i18n';
-  import { alertIconsSvg, navigationIcons } from '$lib/utils/icons';
+  import { XCircle, TriangleAlert, ChevronRight } from '@lucide/svelte';
   import type { Detection } from '$lib/types/detection.types';
 
   interface Props {
@@ -46,7 +46,9 @@
           ? detection.comments[0]?.entry || ''
           : '';
       comment = firstComment;
-      showCommentSection = !!comment;
+      // Use firstComment (local variable) instead of comment ($state) to avoid
+      // creating a reactive dependency that would reset the section when typing
+      showCommentSection = !!firstComment;
       reviewErrorMessage = null;
     }
   });
@@ -61,13 +63,12 @@
     try {
       const desiredLockState = detection.locked ? !lockDetection : lockDetection;
 
-      await fetchWithCSRF('/api/v2/detections/review', {
+      await fetchWithCSRF(`/api/v2/detections/${detection.id}/review`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          id: detection.id,
           verified: reviewStatus,
           lock_detection: desiredLockState,
           ignore_species: ignoreSpecies ? detection.commonName : null,
@@ -96,7 +97,7 @@
   }
 </script>
 
-<div class="card bg-base-100 shadow-sm border border-base-300">
+<div class="card bg-base-100 shadow-xs border border-base-300">
   <div class="card-body">
     <h3 class="card-title text-lg font-semibold mb-4">
       {t('common.review.form.reviewDetectionTitle')}
@@ -105,9 +106,7 @@
     <!-- Error message display -->
     {#if reviewErrorMessage}
       <div class="alert alert-error mb-4">
-        <div class="h-6 w-6">
-          {@html alertIconsSvg.error}
-        </div>
+        <XCircle class="size-6" />
         <span>{reviewErrorMessage}</span>
       </div>
     {/if}
@@ -143,9 +142,7 @@
 
           {#if detection.locked}
             <div class="text-sm text-base-content/70 mt-2">
-              <span class="inline-block w-4 h-4 mr-1">
-                {@html alertIconsSvg.warning}
-              </span>
+              <TriangleAlert class="inline-block size-4 mr-1" />
               {t('common.review.form.detectionLocked')}
             </div>
           {/if}
@@ -211,12 +208,9 @@
             class="btn btn-ghost btn-sm justify-start gap-2 p-2"
             onclick={() => (showCommentSection = !showCommentSection)}
           >
-            <span
-              class="w-4 h-4 transition-transform duration-200"
-              class:rotate-90={showCommentSection}
-            >
-              {@html navigationIcons.chevronRight}
-            </span>
+            <div class="transition-transform duration-200" class:rotate-90={showCommentSection}>
+              <ChevronRight class="size-4" />
+            </div>
             <span class="text-sm">
               {showCommentSection
                 ? t('common.review.form.hideComment')
@@ -238,7 +232,7 @@
               <textarea
                 id="comment-textarea"
                 bind:value={comment}
-                class="textarea textarea-bordered h-24 w-full"
+                class="textarea h-24 w-full"
                 placeholder={t('common.review.form.commentPlaceholder')}
               ></textarea>
             </div>

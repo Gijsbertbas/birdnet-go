@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,12 +15,22 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // TempExt is the temporary file extension used when exporting audio with FFmpeg.
 // Audio files are written with this suffix during recording and renamed upon
 // completion to ensure atomic file operations.
 const TempExt = ".temp"
+
+// Audio format constants for FFmpeg export operations.
+const (
+	FormatAAC  = "aac"
+	FormatFLAC = "flac"
+	FormatALAC = "alac"
+	FormatOpus = "opus"
+	FormatMP3  = "mp3"
+)
 
 // ExportAudioWithFFmpeg exports PCM data to the specified format using FFmpeg
 // outputPath is full path with audio file name and extension based on format
@@ -85,6 +94,71 @@ func ExportAudioWithFFmpeg(pcmData []byte, outputPath string, settings *conf.Aud
 			fileMetrics.RecordFileOperationError("export_ffmpeg", settings.Export.Type, "empty_data")
 		}
 		return enhancedErr
+	}
+
+	// Debug: Log PCM data statistics before export to diagnose audio corruption
+	if settings.Export.Debug {
+		log := GetLogger()
+		isAligned := len(pcmData)%2 == 0 // 16-bit alignment check
+
+		// Calculate basic PCM statistics
+		var maxSample, minSample int16
+		var sumAbsSamples int64
+		numSamples := len(pcmData) / 2
+		if numSamples > 0 {
+			// Initialize min/max with first sample to handle all-positive or all-negative audio
+			firstSample := int16(pcmData[0]) | int16(pcmData[1])<<8
+			maxSample, minSample = firstSample, firstSample
+
+			for i := 0; i < len(pcmData)-1; i += 2 {
+				sample := int16(pcmData[i]) | int16(pcmData[i+1])<<8
+				if sample > maxSample {
+					maxSample = sample
+				}
+				if sample < minSample {
+					minSample = sample
+				}
+				if sample < 0 {
+					sumAbsSamples += int64(-sample)
+				} else {
+					sumAbsSamples += int64(sample)
+				}
+			}
+		}
+		avgAbsSample := int64(0)
+		if numSamples > 0 {
+			avgAbsSample = sumAbsSamples / int64(numSamples)
+		}
+
+		// Get first 10 samples for inspection
+		firstSamples := make([]int16, 0, 10)
+		for i := 0; i < min(20, len(pcmData)-1); i += 2 {
+			sample := int16(pcmData[i]) | int16(pcmData[i+1])<<8
+			firstSamples = append(firstSamples, sample)
+		}
+
+		log.Debug("PCM data before FFmpeg export",
+			logger.Int("pcm_size_bytes", len(pcmData)),
+			logger.Int("num_samples", numSamples),
+			logger.Bool("size_aligned", isAligned),
+			logger.Int("max_sample", int(maxSample)),
+			logger.Int("min_sample", int(minSample)),
+			logger.Int64("avg_abs_sample", avgAbsSample),
+			logger.String("first_10_samples", fmt.Sprintf("%v", firstSamples)),
+			logger.String("output_path", outputPath),
+			logger.String("format", settings.Export.Type))
+
+		// Warn if audio appears to be silence or noise
+		if avgAbsSample < 100 {
+			log.Warn("PCM data appears to be near-silence",
+				logger.Int64("avg_abs_sample", avgAbsSample),
+				logger.String("output_path", outputPath))
+		} else if avgAbsSample > 20000 {
+			log.Warn("PCM data has unusually high amplitude - possible noise/corruption",
+				logger.Int64("avg_abs_sample", avgAbsSample),
+				logger.Int("max_sample", int(maxSample)),
+				logger.String("output_path", outputPath))
+		}
 	}
 
 	// Create a temporary file for FFmpeg output, returns full path with TempExt
@@ -169,7 +243,7 @@ func createTempFile(outputPath string) (string, error) {
 	}
 
 	outputDir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+	if err := os.MkdirAll(outputDir, 0o750); err != nil {
 		enhancedErr := errors.New(err).
 			Component("myaudio").
 			Category(errors.CategoryFileIO).
@@ -270,6 +344,7 @@ func finalizeOutput(tempFilePath string) error {
 // runFFmpegCommand executes the FFmpeg command to process the audio
 // This version includes a context timeout to prevent hangs.
 func runFFmpegCommand(ffmpegPath string, pcmData []byte, tempFilePath string, settings *conf.AudioSettings) error {
+	log := GetLogger()
 	// Build the FFmpeg command arguments
 	args := buildFFmpegArgs(tempFilePath, settings)
 
@@ -278,7 +353,7 @@ func runFFmpegCommand(ffmpegPath string, pcmData []byte, tempFilePath string, se
 	defer cancel()
 
 	// Create the FFmpeg command with context
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...) //nolint:gosec // G204: ffmpegPath is from validated settings, args built internally
 
 	// Create a pipe to send PCM data to FFmpeg's stdin
 	stdin, err := cmd.StdinPipe()
@@ -304,7 +379,9 @@ func runFFmpegCommand(ffmpegPath string, pcmData []byte, tempFilePath string, se
 	go func() {
 		defer func() {
 			if err := stdin.Close(); err != nil {
-				log.Printf("Failed to close FFmpeg stdin: %v", err)
+				log.Warn("failed to close FFmpeg stdin",
+					logger.Error(err),
+					logger.String("output_path", tempFilePath))
 			}
 		}() // Close stdin when writing is done
 
@@ -411,15 +488,15 @@ func buildAudioFilter(settings *conf.AudioSettings) string {
 // getCodec returns the appropriate codec to use with FFmpeg based on the format
 func getEncoder(format string) string {
 	switch format {
-	case "flac":
-		return "flac"
-	case "alac":
-		return "alac"
-	case "opus":
+	case FormatFLAC:
+		return FormatFLAC
+	case FormatALAC:
+		return FormatALAC
+	case FormatOpus:
 		return "libopus"
-	case "aac":
-		return "aac"
-	case "mp3":
+	case FormatAAC:
+		return FormatAAC
+	case FormatMP3:
 		return "libmp3lame"
 	default:
 		return format
@@ -429,16 +506,16 @@ func getEncoder(format string) string {
 // getOutputFormat returns the appropriate output format for FFmpeg based on the export type
 func getOutputFormat(exportType string) string {
 	switch exportType {
-	case "flac":
-		return "flac"
-	case "alac":
+	case FormatFLAC:
+		return FormatFLAC
+	case FormatALAC:
 		return "ipod" // ALAC uses the iPod container format
-	case "opus":
-		return "opus"
-	case "aac":
+	case FormatOpus:
+		return FormatOpus
+	case FormatAAC:
 		return "mp4" // AAC typically uses the iPod/MP4 container format
-	case "mp3":
-		return "mp3"
+	case FormatMP3:
+		return FormatMP3
 	default:
 		return exportType
 	}
@@ -447,11 +524,11 @@ func getOutputFormat(exportType string) string {
 // getMaxBitrate limits the bitrate to the maximum allowed by the format
 func getMaxBitrate(format, requestedBitrate string) string {
 	switch format {
-	case "opus":
+	case FormatOpus:
 		if requestedBitrate > "256k" {
 			return "256k"
 		}
-	case "mp3":
+	case FormatMP3:
 		if requestedBitrate > "320k" {
 			return "320k"
 		}
@@ -573,6 +650,7 @@ func ExportAudioWithCustomFFmpegArgsContext(ctx context.Context, pcmData []byte,
 // runCustomFFmpegCommandToBufferWithContext executes FFmpeg, piping PCM input and capturing codec output to a buffer.
 // This version accepts a context to allow for timeout/cancellation.
 func runCustomFFmpegCommandToBufferWithContext(ctx context.Context, ffmpegPath string, pcmData []byte, customArgs []string) (*bytes.Buffer, error) {
+	log := GetLogger()
 	// Get standard input format arguments
 	ffmpegSampleRate, ffmpegNumChannels, ffmpegFormat := getFFmpegFormat(conf.SampleRate, conf.NumChannels, conf.BitDepth)
 
@@ -592,7 +670,7 @@ func runCustomFFmpegCommandToBufferWithContext(ctx context.Context, ffmpegPath s
 	args = append(args, "pipe:1")
 
 	// Create the FFmpeg command with context
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...) //nolint:gosec // G204: ffmpegPath is from validated settings, args built internally
 
 	// Create pipes for stdin and stdout
 	stdin, err := cmd.StdinPipe()
@@ -619,7 +697,9 @@ func runCustomFFmpegCommandToBufferWithContext(ctx context.Context, ffmpegPath s
 	go func() {
 		defer func() {
 			if err := stdin.Close(); err != nil {
-				log.Printf("Failed to close FFmpeg stdin: %v", err)
+				log.Warn("failed to close FFmpeg stdin",
+					logger.Error(err),
+					logger.String("operation", "custom_ffmpeg_to_buffer"))
 			}
 		}() // Close stdin when writing is done
 
@@ -744,6 +824,7 @@ func AnalyzeAudioLoudness(pcmData []byte, ffmpegPath string) (*LoudnessStats, er
 // AnalyzeAudioLoudnessWithContext analyzes audio loudness using FFmpeg's loudnorm filter in analyze mode
 // This is the context-aware version of AnalyzeAudioLoudness that allows timeout/cancellation
 func AnalyzeAudioLoudnessWithContext(ctx context.Context, pcmData []byte, ffmpegPath string) (*LoudnessStats, error) {
+	log := GetLogger()
 	// Assume ffmpegPath is valid (validated by caller, usually via conf.ValidateAudioSettings)
 	if ffmpegPath == "" {
 		return nil, fmt.Errorf("FFmpeg path provided is empty")
@@ -765,7 +846,7 @@ func AnalyzeAudioLoudnessWithContext(ctx context.Context, pcmData []byte, ffmpeg
 	}
 
 	// Create the FFmpeg command with context
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...) //nolint:gosec // G204: ffmpegPath is from validated settings, args built internally
 
 	// Create a pipe to write PCM data to FFmpeg's stdin
 	stdin, err := cmd.StdinPipe()
@@ -788,7 +869,9 @@ func AnalyzeAudioLoudnessWithContext(ctx context.Context, pcmData []byte, ffmpeg
 	go func() {
 		defer func() {
 			if err := stdin.Close(); err != nil {
-				log.Printf("Failed to close FFmpeg stdin: %v", err)
+				log.Warn("failed to close FFmpeg stdin",
+					logger.Error(err),
+					logger.String("operation", "analyze_loudness"))
 			}
 		}() // Close stdin when done
 

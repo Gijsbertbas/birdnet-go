@@ -15,6 +15,37 @@ import (
 	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
+// isFieldSkipped checks if a field name appears in the skipped fields list.
+func isFieldSkipped(skippedFields []any, expectedSkip string) bool {
+	for _, skipped := range skippedFields {
+		skippedStr, ok := skipped.(string)
+		if !ok {
+			continue
+		}
+		if skippedStr == expectedSkip ||
+			skippedStr == "BirdNET."+expectedSkip ||
+			skippedStr == "BirdNET.RangeFilter."+expectedSkip {
+			return true
+		}
+	}
+	return false
+}
+
+// verifySkippedFields checks that all expected fields were skipped.
+func verifySkippedFields(t *testing.T, response map[string]any, shouldSkip []string) {
+	t.Helper()
+	skippedFields, ok := response["skippedFields"].([]any)
+	if !ok || len(shouldSkip) == 0 {
+		return
+	}
+	t.Logf("Skipped fields: %v", skippedFields)
+	for _, expectedSkip := range shouldSkip {
+		if !isFieldSkipped(skippedFields, expectedSkip) {
+			t.Logf("Expected field %s to be skipped but it wasn't", expectedSkip)
+		}
+	}
+}
+
 // TestBoundaryValues verifies the system handles boundary values correctly
 func TestBoundaryValues(t *testing.T) {
 	t.Parallel()
@@ -331,37 +362,18 @@ func TestFieldPermissionEnforcement(t *testing.T) {
 
 			err = controller.UpdateSectionSettings(ctx)
 
-			// All sections should succeed but skip runtime fields
 			if err != nil {
 				t.Logf("Update failed: %v", err)
-			} else {
-				assert.Equal(t, http.StatusOK, rec.Code)
-
-				// Check response for skipped fields
-				var response map[string]any
-				err = json.Unmarshal(rec.Body.Bytes(), &response)
-				require.NoError(t, err)
-
-				if skippedFields, ok := response["skippedFields"].([]any); ok && len(tt.shouldSkip) > 0 {
-					t.Logf("Skipped fields: %v", skippedFields)
-					// Verify expected fields were skipped
-					for _, expectedSkip := range tt.shouldSkip {
-						found := false
-						for _, skipped := range skippedFields {
-							if skippedStr, ok := skipped.(string); ok &&
-								(skippedStr == expectedSkip ||
-									skippedStr == "BirdNET."+expectedSkip ||
-									skippedStr == "BirdNET.RangeFilter."+expectedSkip) {
-								found = true
-								break
-							}
-						}
-						if !found {
-							t.Logf("Expected field %s to be skipped but it wasn't", expectedSkip)
-						}
-					}
-				}
+				return
 			}
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+
+			var response map[string]any
+			err = json.Unmarshal(rec.Body.Bytes(), &response)
+			require.NoError(t, err)
+
+			verifySkippedFields(t, response, tt.shouldSkip)
 		})
 	}
 }
@@ -372,9 +384,10 @@ func TestComplexNestedPreservation(t *testing.T) {
 	controller := getTestController(t, e)
 
 	// Update controller settings with complex initial state
+	// Use lowercase keys since that's what a real config would have after normalization
 	controller.Settings.Realtime.Species.Include = []string{"Robin", "Eagle", "Owl"}
 	controller.Settings.Realtime.Species.Exclude = []string{"Crow", "Pigeon"}
-	controller.Settings.Realtime.Species.Config["Robin"] = conf.SpeciesConfig{
+	controller.Settings.Realtime.Species.Config["robin"] = conf.SpeciesConfig{
 		Threshold: 0.8,
 		Interval:  30,
 		Actions: []conf.SpeciesAction{{
@@ -382,7 +395,7 @@ func TestComplexNestedPreservation(t *testing.T) {
 			Command: "/usr/bin/notify",
 		}},
 	}
-	controller.Settings.Realtime.Species.Config["Eagle"] = conf.SpeciesConfig{
+	controller.Settings.Realtime.Species.Config["eagle"] = conf.SpeciesConfig{
 		Threshold: 0.9,
 		Interval:  60,
 	}
@@ -423,14 +436,14 @@ func TestComplexNestedPreservation(t *testing.T) {
 	assert.Equal(t, initialInclude, settings.Realtime.Species.Include)
 	assert.Equal(t, initialExclude, settings.Realtime.Species.Exclude)
 
-	// Robin config
-	robinConfig := settings.Realtime.Species.Config["Robin"]
+	// Robin config (keys normalized to lowercase after API update)
+	robinConfig := settings.Realtime.Species.Config["robin"]
 	assert.InDelta(t, 0.85, robinConfig.Threshold, 0.0001) // Changed
 	assert.Equal(t, 30, robinConfig.Interval)              // Preserved
 	assert.Len(t, robinConfig.Actions, 1)                  // Preserved
 
-	// Eagle config completely preserved
-	eagleConfig := settings.Realtime.Species.Config["Eagle"]
+	// Eagle config completely preserved (keys normalized to lowercase)
+	eagleConfig := settings.Realtime.Species.Config["eagle"]
 	assert.InDelta(t, 0.9, eagleConfig.Threshold, 0.0001)
 	assert.Equal(t, 60, eagleConfig.Interval)
 }

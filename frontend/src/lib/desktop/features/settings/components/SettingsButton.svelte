@@ -1,40 +1,40 @@
 <!--
   SettingsButton Component
-  
-  Purpose: A reusable button component that matches the .settings-input-group button styles
-  from custom.css. Used for action buttons in settings forms like "Test Connection".
-  
+
+  Purpose: A reusable button component for action buttons in settings forms
+  like "Test Connection". Uses DaisyUI's btn component for proper theming.
+
   Features:
-  - Matches exact styling from custom.css (.settings-input-group button)
+  - Uses DaisyUI btn-primary for consistent theming across Tailwind v4/DaisyUI 5
   - Auto-sizing width to fit content
   - Loading state support with spinner
   - Disabled state handling
-  - CSS-based hover effects for better performance
-  - Theme-compatible colors using CSS variables
-  
+  - Theme-compatible colors
+  - Multiple style variants (primary, secondary, ghost)
+
   Props:
   - onclick: Click handler function
   - disabled: Whether button is disabled
   - loading: Whether to show loading spinner
   - loadingText: Text to show when loading (default: from translation)
+  - variant: Button style variant (primary, secondary, ghost)
   - className: Additional CSS classes
   - children: Button content snippet
-  
-  Performance Optimizations:
-  - Replaced inline style manipulation with CSS hover effects
-  - Uses $derived for reactive default loading text
-  - Minimal re-renders through proper state management
-  
+
   @component
 -->
 <script lang="ts">
   import { t } from '$lib/i18n';
+  import { cn } from '$lib/utils/cn';
+
+  type ButtonVariant = 'primary' | 'secondary' | 'ghost';
 
   interface Props {
     onclick?: () => void;
     disabled?: boolean;
     loading?: boolean;
     loadingText?: string;
+    variant?: ButtonVariant;
     className?: string;
     children?: import('svelte').Snippet;
   }
@@ -44,6 +44,7 @@
     disabled = false,
     loading = false,
     loadingText,
+    variant = 'primary',
     className = '',
     children,
   }: Props = $props();
@@ -53,62 +54,33 @@
 
   // Combined disabled state for both loading and disabled
   let isDisabled = $derived(disabled || loading);
+
+  // Map variant to DaisyUI class
+  const variantClasses: Record<ButtonVariant, string> = {
+    primary: 'btn-primary',
+    secondary: 'btn-secondary',
+    ghost: 'btn-ghost',
+  };
+
+  // Runtime type guard to satisfy static analysis (object injection sink warning)
+  const isButtonVariant = (v: unknown): v is ButtonVariant =>
+    typeof v === 'string' && v in variantClasses;
+
+  // eslint-disable-next-line security/detect-object-injection -- Validated by isButtonVariant type guard
+  let variantClass = $derived(isButtonVariant(variant) ? variantClasses[variant] : 'btn-primary');
 </script>
 
 <button
   type="button"
-  class="settings-button {className}"
-  class:settings-button--disabled={isDisabled}
+  class={cn('btn btn-sm gap-2', variantClass, className)}
   onclick={() => !isDisabled && onclick?.()}
   disabled={isDisabled}
   aria-busy={loading}
 >
   {#if loading}
-    <div class="loading loading-spinner loading-sm"></div>
+    <span class="loading loading-spinner loading-xs"></span>
     {defaultLoadingText}
   {:else if children}
     {@render children()}
   {/if}
 </button>
-
-<style>
-  /* Base button styles matching .settings-input-group button */
-  .settings-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-shrink: 0;
-    height: 2rem;
-    min-height: 2rem;
-    margin-left: 0.5rem;
-    margin-right: 0.5rem;
-    padding: 0 0.75rem;
-    font-size: 0.875rem;
-    line-height: 1.25rem;
-    font-weight: 600;
-    border: none;
-    cursor: pointer;
-    white-space: nowrap;
-    border-radius: var(--rounded-btn, 0.5rem);
-    background-color: var(--fallback-p, oklch(var(--p) / 1));
-    color: var(--fallback-pc, oklch(var(--pc) / 1));
-    transition: background-color 0.2s ease;
-  }
-
-  /* Hover state - using CSS instead of JavaScript for better performance */
-  .settings-button:hover:not(.settings-button--disabled) {
-    background-color: color-mix(in oklab, var(--fallback-p, oklch(var(--p) / 1)) 90%, black);
-  }
-
-  /* Disabled state */
-  .settings-button--disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  /* Focus visible for accessibility */
-  .settings-button:focus-visible {
-    outline: 2px solid var(--fallback-p, oklch(var(--p) / 1));
-    outline-offset: 2px;
-  }
-</style>

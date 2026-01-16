@@ -3,8 +3,6 @@ package telemetry
 
 import (
 	"fmt"
-	"log"
-	"log/slog"
 	"runtime"
 	"strings"
 	"sync"
@@ -14,8 +12,21 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/privacy"
 )
+
+// Error title truncation limits
+const (
+	// panicMessageMaxLen is the maximum length for panic messages in error titles
+	panicMessageMaxLen = 50
+	// errorMessageMaxLen is the maximum length for general error messages in titles
+	errorMessageMaxLen = 60
+)
+
+// sentryDSN is the Sentry DSN for the BirdNET-Go project
+// Defined at package level to avoid duplication across initialization functions
+const sentryDSN = "https://b9269b6c0f8fae154df65be5a97e0435@o4509553065525248.ingest.de.sentry.io/4509553112186960"
 
 // DeferredMessage represents a message that was captured before Sentry initialization
 type DeferredMessage struct {
@@ -33,6 +44,18 @@ var (
 	attachmentUploader *AttachmentUploader
 	testMode           int32 // testMode allows tests to bypass settings checks (0=false, 1=true)
 )
+
+// shouldSkipTelemetry returns true if telemetry should be skipped.
+// It checks test mode and whether Sentry is enabled in settings.
+// This helper reduces code duplication across telemetry functions.
+func shouldSkipTelemetry() bool {
+	// In test mode, never skip (telemetry is always "enabled" for testing)
+	if atomic.LoadInt32(&testMode) == 1 {
+		return false
+	}
+	settings := conf.GetSettings()
+	return settings == nil || !settings.Sentry.Enabled
+}
 
 // PlatformInfo holds privacy-safe platform information for telemetry
 type PlatformInfo struct {
@@ -70,7 +93,7 @@ func collectPlatformInfo() PlatformInfo {
 func InitSentry(settings *conf.Settings) error {
 	// Check if Sentry is explicitly enabled (opt-in)
 	if !settings.Sentry.Enabled {
-		log.Println("Sentry telemetry is disabled (opt-in required)")
+		GetLogger().Info("Sentry telemetry is disabled (opt-in required)")
 		return nil
 	}
 
@@ -104,15 +127,12 @@ func InitSentry(settings *conf.Settings) error {
 
 // enableDebugLogging enables debug logging for telemetry
 func enableDebugLogging() {
-	serviceLevelVar.Set(slog.LevelDebug)
-	logTelemetryInfo(nil, "telemetry debug logging enabled")
+	// Log level is now controlled by the central logger package
+	GetLogger().Info("telemetry debug logging enabled")
 }
 
 // initializeSentrySDK initializes the Sentry SDK with privacy-compliant options
 func initializeSentrySDK(settings *conf.Settings) error {
-	// Use hardcoded DSN for BirdNET-Go project
-	const sentryDSN = "https://b9269b6c0f8fae154df65be5a97e0435@o4509553065525248.ingest.de.sentry.io/4509553112186960"
-
 	// Initialize Sentry with privacy-compliant options
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:        sentryDSN,
@@ -141,7 +161,7 @@ func initializeSentrySDK(settings *conf.Settings) error {
 // createBeforeSendHook creates the BeforeSend hook for privacy filtering
 func createBeforeSendHook(settings *conf.Settings) func(*sentry.Event, *sentry.EventHint) *sentry.Event {
 	return func(event *sentry.Event, hint *sentry.EventHint) *sentry.Event {
-		if serviceLogger != nil && settings.Sentry.Debug {
+		if settings.Sentry.Debug {
 			return applyPrivacyFiltersWithLogging(event)
 		}
 		return applyPrivacyFilters(event)
@@ -221,25 +241,25 @@ func applyPrivacyFiltersWithLogging(event *sentry.Event) *sentry.Event {
 
 // logEventBeforeFiltering logs event details before privacy filtering
 func logEventBeforeFiltering(event *sentry.Event) {
-	logTelemetryDebug(nil, "applying privacy filters to event",
-		"event_id", event.EventID,
-		"has_user_data", !event.User.IsEmpty(),
-		"has_server_name", event.ServerName != "",
-		"contexts_count", len(event.Contexts),
-		"extra_count", len(event.Extra),
-		"tags_count", len(event.Tags),
-	)
+	log := GetLogger()
+	log.Debug("applying privacy filters to event",
+		logger.Any("event_id", event.EventID),
+		logger.Bool("has_user_data", !event.User.IsEmpty()),
+		logger.Bool("has_server_name", event.ServerName != ""),
+		logger.Int("contexts_count", len(event.Contexts)),
+		logger.Int("extra_count", len(event.Extra)),
+		logger.Int("tags_count", len(event.Tags)))
 }
 
 // logEventAfterFiltering logs event details after privacy filtering
 func logEventAfterFiltering(event *sentry.Event, filtersApplied []string) {
-	logTelemetryDebug(nil, "privacy filters applied",
-		"event_id", event.EventID,
-		"filters_applied", filtersApplied,
-		"remaining_contexts", len(event.Contexts),
-		"remaining_extra", len(event.Extra),
-		"remaining_tags", len(event.Tags),
-	)
+	log := GetLogger()
+	log.Debug("privacy filters applied",
+		logger.Any("event_id", event.EventID),
+		logger.Any("filters_applied", filtersApplied),
+		logger.Int("remaining_contexts", len(event.Contexts)),
+		logger.Int("remaining_extra", len(event.Extra)),
+		logger.Int("remaining_tags", len(event.Tags)))
 }
 
 // removePrivacyContexts removes sensitive contexts and returns what was removed
@@ -348,21 +368,23 @@ func processDeferredMessages() int {
 // logInitializationSuccess logs the successful initialization of Sentry
 func logInitializationSuccess(settings *conf.Settings, deferredCount int) {
 	platformInfo := collectPlatformInfo()
-
-	logTelemetryInfo(nil, "Sentry telemetry initialized",
-		"system_id", settings.SystemID,
-		"version", settings.Version,
-		"debug", settings.Sentry.Debug,
-		"platform", platformInfo.OS,
-		"arch", platformInfo.Architecture,
-		"deferred_messages", deferredCount,
-	)
+	log := GetLogger()
 
 	if deferredCount > 0 {
-		log.Printf("Sentry telemetry initialized successfully, processed %d deferred messages (System ID: %s)",
-			deferredCount, settings.SystemID)
+		log.Info("Sentry telemetry initialized successfully",
+			logger.String("system_id", settings.SystemID),
+			logger.String("version", settings.Version),
+			logger.Bool("debug", settings.Sentry.Debug),
+			logger.String("platform", platformInfo.OS),
+			logger.String("arch", platformInfo.Architecture),
+			logger.Int("deferred_messages_processed", deferredCount))
 	} else {
-		log.Printf("Sentry telemetry initialized successfully (opt-in enabled, System ID: %s)", settings.SystemID)
+		log.Info("Sentry telemetry initialized successfully (opt-in enabled)",
+			logger.String("system_id", settings.SystemID),
+			logger.String("version", settings.Version),
+			logger.Bool("debug", settings.Sentry.Debug),
+			logger.String("platform", platformInfo.OS),
+			logger.String("arch", platformInfo.Architecture))
 	}
 }
 
@@ -381,73 +403,101 @@ func generateErrorTitle(scrubbedErrorMsg, component string) string {
 	return errorType
 }
 
+// errorTypePattern represents a pattern-to-result mapping for error type parsing
+type errorTypePattern struct {
+	pattern string
+	result  string
+}
+
+// errorTypePatterns maps error message patterns to human-readable error types
+// Order matters: more specific patterns should come before more general ones
+var errorTypePatterns = []errorTypePattern{
+	{"nil pointer dereference", "Nil Pointer Dereference"},
+	{"invalid memory address", "Invalid Memory Access"},
+	{"index out of range", "Index Out of Range"},
+	{"slice bounds out of range", "Slice Bounds Out of Range"},
+	{"integer divide by zero", "Integer Divide by Zero"},
+	{"send on closed channel", "Send on Closed Channel"},
+	{"close of closed channel", "Close of Closed Channel"},
+}
+
+// parseConcurrentMapError returns the appropriate error type for concurrent map errors
+func parseConcurrentMapError(lower string) string {
+	if strings.Contains(lower, "read") {
+		return "Concurrent Map Access"
+	}
+	if strings.Contains(lower, "write") {
+		return "Concurrent Map Write"
+	}
+	return "Concurrent Map Access"
+}
+
+// parseInterfaceConversionError returns the appropriate error type for interface conversion errors
+func parseInterfaceConversionError(lower string) string {
+	if strings.Contains(lower, "is nil") {
+		return "Interface Conversion: Nil Value"
+	}
+	return "Interface Conversion Failed"
+}
+
+// parsePanicMessage extracts and formats the panic message from an error string
+func parsePanicMessage(errMsg string) string {
+	const panicPrefix = "panic:"
+	panicMsg := errMsg[len(panicPrefix):]
+	// Trim leading whitespace (handles both "panic: " and "panic:")
+	panicMsg = strings.TrimLeft(panicMsg, " \t")
+	// Trim at first newline to exclude stack traces
+	if idx := strings.IndexByte(panicMsg, '\n'); idx >= 0 {
+		panicMsg = panicMsg[:idx]
+	}
+	// Truncate if still too long
+	if len(panicMsg) > panicMessageMaxLen {
+		panicMsg = panicMsg[:panicMessageMaxLen] + "..."
+	}
+	return fmt.Sprintf("Panic: %s", panicMsg)
+}
+
+// truncateErrorMessage trims and truncates an error message for display
+func truncateErrorMessage(errMsg string) string {
+	// Trim at first newline
+	if idx := strings.IndexByte(errMsg, '\n'); idx >= 0 {
+		errMsg = errMsg[:idx]
+	}
+	// Truncate very long messages
+	if len(errMsg) > errorMessageMaxLen {
+		return errMsg[:errorMessageMaxLen] + "..."
+	}
+	return errMsg
+}
+
 // parseErrorType extracts a human-readable error type from the error message
 // Uses case-insensitive matching for robustness and trims multi-line content
 func parseErrorType(errMsg string) string {
 	// Normalize for case-insensitive matching
 	lower := strings.ToLower(errMsg)
 
-	// Check for common runtime panic patterns
+	// Check simple pattern mappings first (order matters for overlapping patterns)
+	for _, p := range errorTypePatterns {
+		if strings.Contains(lower, p.pattern) {
+			return p.result
+		}
+	}
+
+	// Handle patterns with conditional logic
 	switch {
-	case strings.Contains(lower, "nil pointer dereference"):
-		return "Nil Pointer Dereference"
-	case strings.Contains(lower, "index out of range"):
-		return "Index Out of Range"
-	case strings.Contains(lower, "slice bounds out of range"):
-		return "Slice Bounds Out of Range"
-	case strings.Contains(lower, "integer divide by zero"):
-		return "Integer Divide by Zero"
-	case strings.Contains(lower, "invalid memory address"):
-		return "Invalid Memory Access"
-	case strings.Contains(lower, "send on closed channel"):
-		return "Send on Closed Channel"
-	case strings.Contains(lower, "close of closed channel"):
-		return "Close of Closed Channel"
 	case strings.Contains(lower, "concurrent map"):
-		// Check for "read" first to handle "concurrent map read and map write"
-		if strings.Contains(lower, "read") {
-			return "Concurrent Map Access"
-		}
-		if strings.Contains(lower, "write") {
-			return "Concurrent Map Write"
-		}
-		return "Concurrent Map Access"
+		return parseConcurrentMapError(lower)
 	case strings.Contains(lower, "interface conversion"):
-		if strings.Contains(lower, "is nil") {
-			return "Interface Conversion: Nil Value"
-		}
-		return "Interface Conversion Failed"
+		return parseInterfaceConversionError(lower)
 	case strings.HasPrefix(lower, "panic:"):
-		// Extract panic message after "panic:" and handle optional space
-		const panicPrefix = "panic:"
-		panicMsg := errMsg[len(panicPrefix):]
-		// Trim leading whitespace (handles both "panic: " and "panic:")
-		panicMsg = strings.TrimLeft(panicMsg, " \t")
-		// Trim at first newline to exclude stack traces
-		if idx := strings.IndexByte(panicMsg, '\n'); idx >= 0 {
-			panicMsg = panicMsg[:idx]
-		}
-		// Truncate if still too long
-		if len(panicMsg) > 50 {
-			panicMsg = panicMsg[:50] + "..."
-		}
-		return fmt.Sprintf("Panic: %s", panicMsg)
+		return parsePanicMessage(errMsg)
 	default:
-		// For unknown errors, use a generic title
-		// Trim at first newline
-		if idx := strings.IndexByte(errMsg, '\n'); idx >= 0 {
-			errMsg = errMsg[:idx]
-		}
-		// Truncate very long messages
-		if len(errMsg) > 60 {
-			return errMsg[:60] + "..."
-		}
-		return errMsg
+		return truncateErrorMessage(errMsg)
 	}
 }
 
 // titleCaseComponent converts component names to title case for better readability
-// Examples: "httpcontroller" -> "HTTP Controller", "datastore" -> "Datastore"
+// Examples: "datastore" -> "Datastore", "api-server" -> "API Server"
 // Uses prefix-only matching to avoid mid-word replacements (e.g., "capistrano" stays intact)
 func titleCaseComponent(component string) string {
 	// Normalize: trim, lowercase, split on separators
@@ -501,24 +551,20 @@ func titleCaseComponent(component string) string {
 
 // CaptureError captures an error with privacy-compliant context
 func CaptureError(err error, component string) {
-	// Skip settings check in test mode
-	if atomic.LoadInt32(&testMode) == 0 {
-		settings := conf.GetSettings()
-		if settings == nil || !settings.Sentry.Enabled {
-			return
-		}
+	if shouldSkipTelemetry() {
+		return
 	}
 
 	// Create a scrubbed error for privacy - this prevents PII leakage
 	scrubbedErrorMsg := privacy.ScrubMessage(err.Error())
+	log := GetLogger()
 
 	// Log the error being sent (privacy-safe)
-	logTelemetryDebug(nil, "sending error event",
-		"event_type", "error",
-		"component", component,
-		"error_type", fmt.Sprintf("%T", err),
-		"scrubbed_message", scrubbedErrorMsg,
-	)
+	log.Debug("sending error event",
+		logger.String("event_type", "error"),
+		logger.String("component", component),
+		logger.String("error_type", fmt.Sprintf("%T", err)),
+		logger.String("scrubbed_message", scrubbedErrorMsg))
 
 	sentry.WithScope(func(scope *sentry.Scope) {
 		// Generate meaningful error title from scrubbed message to prevent PII leakage
@@ -556,31 +602,25 @@ func CaptureError(err error, component string) {
 	})
 
 	// Log successful submission
-	logTelemetryDebug(nil, "error event sent successfully",
-		"component", component,
-	)
+	log.Debug("error event sent successfully", logger.String("component", component))
 }
 
 // CaptureMessage captures a message with privacy-compliant context
 func CaptureMessage(message string, level sentry.Level, component string) {
-	// Skip settings check in test mode
-	if atomic.LoadInt32(&testMode) == 0 {
-		settings := conf.GetSettings()
-		if settings == nil || !settings.Sentry.Enabled {
-			return
-		}
+	if shouldSkipTelemetry() {
+		return
 	}
 
 	// Scrub sensitive information from the message
 	scrubbedMessage := privacy.ScrubMessage(message)
+	log := GetLogger()
 
 	// Log the message being sent (privacy-safe)
-	logTelemetryDebug(nil, "sending message event",
-		"event_type", "message",
-		"sentry_level", string(level),
-		"component", component,
-		"scrubbed_message", scrubbedMessage,
-	)
+	log.Debug("sending message event",
+		logger.String("event_type", "message"),
+		logger.String("sentry_level", string(level)),
+		logger.String("component", component),
+		logger.String("scrubbed_message", scrubbedMessage))
 
 	sentry.WithScope(func(scope *sentry.Scope) {
 		scope.SetTag("component", component)
@@ -589,21 +629,16 @@ func CaptureMessage(message string, level sentry.Level, component string) {
 	})
 
 	// Log successful submission
-	logTelemetryDebug(nil, "message event sent successfully",
-		"component", component,
-		"sentry_level", string(level),
-	)
+	log.Debug("message event sent successfully",
+		logger.String("component", component),
+		logger.String("sentry_level", string(level)))
 }
 
 // CaptureMessageDeferred captures a message for later processing if Sentry is not yet initialized
 // If Sentry is already initialized, it immediately sends the message
 func CaptureMessageDeferred(message string, level sentry.Level, component string) {
-	// Skip settings check in test mode
-	if atomic.LoadInt32(&testMode) == 0 {
-		settings := conf.GetSettings()
-		if settings == nil || !settings.Sentry.Enabled {
-			return
-		}
+	if shouldSkipTelemetry() {
+		return
 	}
 
 	deferredMutex.Lock()
@@ -627,23 +662,18 @@ func CaptureMessageDeferred(message string, level sentry.Level, component string
 
 	// Log deferred message
 	scrubbedMessage := privacy.ScrubMessage(message)
-	logTelemetryDebug(nil, "deferring message for later processing",
-		"event_type", "deferred_message",
-		"sentry_level", string(level),
-		"component", component,
-		"scrubbed_message", scrubbedMessage,
-		"deferred_count", len(deferredMessages),
-	)
+	GetLogger().Debug("deferring message for later processing",
+		logger.String("event_type", "deferred_message"),
+		logger.String("sentry_level", string(level)),
+		logger.String("component", component),
+		logger.String("scrubbed_message", scrubbedMessage),
+		logger.Int("deferred_count", len(deferredMessages)))
 }
 
 // Flush ensures all buffered events are sent to Sentry
 func Flush(timeout time.Duration) {
-	// Skip settings check in test mode
-	if atomic.LoadInt32(&testMode) == 0 {
-		settings := conf.GetSettings()
-		if settings == nil || !settings.Sentry.Enabled {
-			return
-		}
+	if shouldSkipTelemetry() {
+		return
 	}
 
 	sentry.Flush(timeout)
@@ -673,10 +703,7 @@ func InitMinimalSentryForSupport(systemID, version string) error {
 		return nil
 	}
 
-	// Use the same DSN as full initialization
-	const sentryDSN = "https://b9269b6c0f8fae154df65be5a97e0435@o4509553065525248.ingest.de.sentry.io/4509553112186960"
-
-	// Initialize with minimal configuration
+	// Initialize with minimal configuration (uses package-level sentryDSN)
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              sentryDSN,
 		SampleRate:       0, // Don't capture any errors automatically
@@ -712,8 +739,8 @@ func InitMinimalSentryForSupport(systemID, version string) error {
 	// Create an enabled attachment uploader
 	attachmentUploader = NewAttachmentUploader(true)
 
-	logTelemetryInfo(nil, "telemetry: minimal Sentry initialized for support uploads only",
-		"system_id", systemID)
+	GetLogger().Info("minimal Sentry initialized for support uploads only",
+		logger.String("system_id", systemID))
 
 	return nil
 }

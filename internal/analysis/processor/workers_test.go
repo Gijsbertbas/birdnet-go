@@ -4,271 +4,70 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tphakala/birdnet-go/internal/analysis/jobqueue"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
+	"github.com/tphakala/birdnet-go/internal/privacy"
 )
 
-// MockJobQueue is a mock implementation of the job queue interface
-type MockJobQueue struct {
-	mu              sync.Mutex
-	startCalled     bool
-	startCount      int
-	startCtx        context.Context
-	stopCalled      bool
-	stopCount       int
-	stopTimeout     time.Duration
-	enqueueErr      error
-	enqueueJob      *jobqueue.Job
-	enqueueCalls    []mockEnqueueCall
-	maxJobs         int
-	processingTime  time.Duration
-	getStatsCount   int
-	getMaxJobsCount int
-}
+// Mock types are now defined in test_helpers_test.go:
+// - MockJobQueue
+// - MockAction
+// - MockBirdWeatherAction
+// - MockMqttAction
+// - MockSettings
+// - testAudioSource()
 
-// mockEnqueueCall tracks the arguments passed to Enqueue
-type mockEnqueueCall struct {
-	ctx    context.Context
-	action jobqueue.Action
-	data   any
-	config jobqueue.RetryConfig
-}
-
-func (m *MockJobQueue) Start() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.startCalled = true
-	m.startCount++
-}
-
-func (m *MockJobQueue) StartWithContext(ctx context.Context) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.startCalled = true
-	m.startCount++
-	m.startCtx = ctx
-}
-
-func (m *MockJobQueue) Stop() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.stopCalled = true
-	m.stopCount++
-	return nil
-}
-
-func (m *MockJobQueue) StopWithTimeout(timeout time.Duration) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.stopCalled = true
-	m.stopCount++
-	m.stopTimeout = timeout
-	return nil
-}
-
-func (m *MockJobQueue) Enqueue(ctx context.Context, action jobqueue.Action, data any, config jobqueue.RetryConfig) (*jobqueue.Job, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Record this call
-	m.enqueueCalls = append(m.enqueueCalls, mockEnqueueCall{
-		ctx:    ctx,
-		action: action,
-		data:   data,
-		config: config,
-	})
-
-	if m.enqueueErr != nil {
-		return nil, m.enqueueErr
-	}
-
-	if m.enqueueJob != nil {
-		return m.enqueueJob, nil
-	}
-
-	// Create a default job if none is specified
-	return &jobqueue.Job{ID: fmt.Sprintf("mock-job-%d", len(m.enqueueCalls))}, nil
-}
-
-func (m *MockJobQueue) GetMaxJobs() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.getMaxJobsCount++
-	if m.maxJobs > 0 {
-		return m.maxJobs
-	}
-	return 100
-}
-
-func (m *MockJobQueue) GetStats() jobqueue.JobStatsSnapshot {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.getStatsCount++
-	return jobqueue.JobStatsSnapshot{}
-}
-
-func (m *MockJobQueue) SetProcessingInterval(interval time.Duration) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.processingTime = interval
-}
-
-// Helper methods for verification in tests
-func (m *MockJobQueue) EnqueueCallCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.enqueueCalls)
-}
-
-func (m *MockJobQueue) GetEnqueueCall(index int) (mockEnqueueCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if index < 0 || index >= len(m.enqueueCalls) {
-		return mockEnqueueCall{}, fmt.Errorf("index out of range: %d", index)
-	}
-	return m.enqueueCalls[index], nil
-}
-
-func (m *MockJobQueue) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.startCalled = false
-	m.startCount = 0
-	m.startCtx = nil
-	m.stopCalled = false
-	m.stopCount = 0
-	m.stopTimeout = 0
-	m.enqueueCalls = nil
-	m.getStatsCount = 0
-	m.getMaxJobsCount = 0
-}
-
-// MockAction is a mock implementation of the Action interface
-type MockAction struct {
-	mu           sync.Mutex
-	ExecuteFunc  func(data any) error
-	ExecuteCount int
-	ExecuteData  []any
-}
-
-func (m *MockAction) Execute(data any) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ExecuteCount++
-	m.ExecuteData = append(m.ExecuteData, data)
-	if m.ExecuteFunc != nil {
-		return m.ExecuteFunc(data)
-	}
-	return nil
-}
-
-// GetDescription implements the Action interface
-func (m *MockAction) GetDescription() string {
-	return "Mock Action for testing"
-}
-
-// Reset resets the mock action state
-func (m *MockAction) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ExecuteCount = 0
-	m.ExecuteData = nil
-}
-
-// MockBirdWeatherAction is a mock implementation of BirdWeatherAction
-type MockBirdWeatherAction struct {
-	MockAction
-	RetryConfig jobqueue.RetryConfig
-}
-
-// GetDescription returns a description for the MockBirdWeatherAction
-func (m *MockBirdWeatherAction) GetDescription() string {
-	return "Mock BirdWeather Action for testing"
-}
-
-// MockMqttAction is a mock implementation of MqttAction
-type MockMqttAction struct {
-	MockAction
-	RetryConfig jobqueue.RetryConfig
-}
-
-// GetDescription returns a description for the MockMqttAction
-func (m *MockMqttAction) GetDescription() string {
-	return "Mock MQTT Action for testing"
-}
-
-// MockSettings implements the necessary methods from conf.Settings for testing
-type MockSettings struct {
-	Debug bool
-}
-
-func (s *MockSettings) IsDebug() bool {
-	return s.Debug
-}
-
-// testAudioSource returns a standard test audio source to avoid duplication
-func testAudioSource() datastore.AudioSource {
-	return datastore.AudioSource{
-		ID:          "test-source",
-		SafeString:  "test-source",
-		DisplayName: "test-source",
-	}
-}
-
-func TestSanitizeError(t *testing.T) {
+// TestPrivacyWrapError tests that privacy.WrapError correctly sanitizes errors
+// These tests verify the integration with the centralized privacy package.
+func TestPrivacyWrapError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		err      error
-		expected string
+		name             string
+		err              error
+		shouldContain    []string // Strings that SHOULD be in the sanitized output
+		shouldNotContain []string // Strings that should NOT be in the sanitized output
 	}{
 		{
-			name:     "nil error",
-			err:      nil,
-			expected: "",
+			name:          "nil error",
+			err:           nil,
+			shouldContain: nil,
 		},
 		{
-			name:     "simple error",
-			err:      errors.New("simple error message"),
-			expected: "simple error message",
+			name:          "simple error",
+			err:           errors.New("simple error message"),
+			shouldContain: []string{"simple error message"},
 		},
 		{
-			name:     "RTSP URL with credentials",
-			err:      errors.New("failed to connect to rtsp://admin:password123@192.168.1.100:554/stream"),
-			expected: "failed to connect to rtsp://[redacted]@192.168.1.100:554/stream",
-		},
-		{
-			name:     "MQTT URL with credentials",
-			err:      errors.New("failed to connect to mqtt://user:secret@mqtt.example.com:1883"),
-			expected: "failed to connect to mqtt://[redacted]@mqtt.example.com:1883",
+			name:             "RTSP URL with credentials",
+			err:              errors.New("failed to connect to rtsp://admin:password123@192.168.1.100:554/stream"),
+			shouldContain:    []string{"failed to connect to"},
+			shouldNotContain: []string{"admin", "password123"},
 		},
 		{
 			name: "API key in error",
 			// NOTE: This is a fake API key used only for testing the sanitization function.
-			// It is deliberately included as a test fixture and is not a real credential.
-			err:      errors.New("API request failed: api_key=abc123xyz789"),
-			expected: "API request failed: api_key=[REDACTED]",
+			err:              errors.New("API request failed: api_key=abc123xyz789"),
+			shouldContain:    []string{"API request failed"},
+			shouldNotContain: []string{"abc123xyz789"},
 		},
 		{
-			name:     "Token in error",
-			err:      errors.New("authentication failed: token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),
-			expected: "authentication failed: token=[REDACTED]",
+			name:             "Token in error",
+			err:              errors.New("authentication failed: token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),
+			shouldContain:    []string{"authentication failed", "[TOKEN]"},
+			shouldNotContain: []string{"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"},
 		},
 		{
-			name:     "Password in error",
-			err:      errors.New("login failed: password=supersecret123"),
-			expected: "login failed: password=[REDACTED]",
-		},
-		{
-			name:     "Multiple sensitive data",
-			err:      errors.New("failed: rtsp://user:pass@example.com and api_key=12345 and password=secret"),
-			expected: "failed: rtsp://[redacted]@example.com and api_key=[REDACTED] and password=[REDACTED]",
+			name:             "Email in error",
+			err:              errors.New("notification failed for user@example.com"),
+			shouldContain:    []string{"notification failed for", "[EMAIL]"},
+			shouldNotContain: []string{"user@example.com"},
 		},
 	}
 
@@ -276,56 +75,49 @@ func TestSanitizeError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if tt.err == nil {
-				if sanitizeError(tt.err) != nil {
-					t.Errorf("sanitizeError(nil) should return nil")
-				}
+				assert.NoError(t, privacy.WrapError(tt.err), "privacy.WrapError(nil) should return nil")
 				return
 			}
 
-			sanitized := sanitizeError(tt.err)
-			if sanitized == nil {
-				t.Errorf("sanitizeError() returned nil for non-nil error")
-				return
+			sanitized := privacy.WrapError(tt.err)
+			require.Error(t, sanitized, "privacy.WrapError() returned nil for non-nil error")
+
+			// Check that expected strings are present
+			for _, s := range tt.shouldContain {
+				assert.Contains(t, sanitized.Error(), s, "sanitized error should contain %q", s)
 			}
 
-			// Check that the sanitized error message matches the expected value
-			if sanitized.Error() != tt.expected {
-				t.Errorf("sanitizeError() = %q, want %q", sanitized.Error(), tt.expected)
+			// Check that sensitive strings are NOT present
+			for _, s := range tt.shouldNotContain {
+				assert.NotContains(t, sanitized.Error(), s, "sanitized error should NOT contain %q", s)
 			}
 
-			// Check that the original error is preserved
-			if !errors.Is(sanitized, tt.err) {
-				t.Errorf("errors.Is(sanitized, original) = false, want true")
-			}
+			// Check that the original error is preserved via Unwrap
+			assert.ErrorIs(t, sanitized, tt.err, "errors.Is(sanitized, original) = false, want true")
 		})
 	}
 }
 
-// TestSanitizeErrorWrapped tests that sanitizeError works with wrapped errors
-func TestSanitizeErrorWrapped(t *testing.T) {
+// TestPrivacyWrapErrorWrapped tests that privacy.WrapError works with wrapped errors
+func TestPrivacyWrapErrorWrapped(t *testing.T) {
 	t.Parallel()
 	// Create a wrapped error with sensitive information
-	baseErr := errors.New("password=secret123")
-	wrappedErr := fmt.Errorf("operation failed: %w", baseErr)
+	baseErr := errors.New("user@example.com")
+	wrappedErr := fmt.Errorf("operation failed for: %w", baseErr)
 
 	// Sanitize the wrapped error
-	sanitized := sanitizeError(wrappedErr)
+	sanitized := privacy.WrapError(wrappedErr)
 
 	// Check that the sensitive information was removed
-	expected := "operation failed: password=[REDACTED]"
-	if sanitized.Error() != expected {
-		t.Errorf("sanitizeError() = %q, want %q", sanitized.Error(), expected)
-	}
+	assert.Contains(t, sanitized.Error(), "operation failed for:")
+	assert.Contains(t, sanitized.Error(), "[EMAIL]")
+	assert.NotContains(t, sanitized.Error(), "user@example.com")
 
 	// Check that the original error is preserved
-	if !errors.Is(sanitized, wrappedErr) {
-		t.Errorf("errors.Is(sanitized, wrappedErr) = false, want true")
-	}
+	require.ErrorIs(t, sanitized, wrappedErr, "errors.Is(sanitized, wrappedErr) = false, want true")
 
 	// Check that we can still access the base error
-	if !errors.Is(sanitized, baseErr) {
-		t.Errorf("errors.Is(sanitized, baseErr) = false, want true")
-	}
+	require.ErrorIs(t, sanitized, baseErr, "errors.Is(sanitized, baseErr) = false, want true")
 }
 
 // TestStartWorkerPool tests the startWorkerPool function
@@ -343,14 +135,11 @@ func TestStartWorkerPool(t *testing.T) {
 	processor.startWorkerPool()
 
 	// Verify the cancel function was stored
-	if processor.workerCancel == nil {
-		t.Errorf("Cancel function was not stored")
-	}
+	assert.NotNil(t, processor.workerCancel, "Cancel function was not stored")
 
 	// Clean up
-	if err := realQueue.Stop(); err != nil {
-		t.Errorf("Failed to stop queue: %v", err)
-	}
+	err := realQueue.Stop()
+	assert.NoError(t, err, "Failed to stop queue")
 }
 
 // TestGetJobQueueRetryConfig tests that the getJobQueueRetryConfig function correctly extracts retry configuration from different action types
@@ -453,36 +242,19 @@ func TestGetJobQueueRetryConfig(t *testing.T) {
 			}
 
 			// Check if the configuration matches expectations
-			if config.Enabled != tt.wantEnabled {
-				t.Errorf("getJobQueueRetryConfig() Enabled = %v, want %v", config.Enabled, tt.wantEnabled)
-			}
-
-			if config.MaxRetries != tt.wantMaxRetries {
-				t.Errorf("getJobQueueRetryConfig() MaxRetries = %v, want %v", config.MaxRetries, tt.wantMaxRetries)
-			}
+			assert.Equal(t, tt.wantEnabled, config.Enabled, "getJobQueueRetryConfig() Enabled")
+			assert.Equal(t, tt.wantMaxRetries, config.MaxRetries, "getJobQueueRetryConfig() MaxRetries")
 
 			// For actions with retry configuration, check if the full configuration is preserved
 			switch tt.action.(type) {
 			case *BirdWeatherAction:
-				if config.InitialDelay != bwRetryConfig.InitialDelay {
-					t.Errorf("getJobQueueRetryConfig() InitialDelay = %v, want %v", config.InitialDelay, bwRetryConfig.InitialDelay)
-				}
-				if config.MaxDelay != bwRetryConfig.MaxDelay {
-					t.Errorf("getJobQueueRetryConfig() MaxDelay = %v, want %v", config.MaxDelay, bwRetryConfig.MaxDelay)
-				}
-				if config.Multiplier != bwRetryConfig.Multiplier {
-					t.Errorf("getJobQueueRetryConfig() Multiplier = %v, want %v", config.Multiplier, bwRetryConfig.Multiplier)
-				}
+				assert.Equal(t, bwRetryConfig.InitialDelay, config.InitialDelay, "getJobQueueRetryConfig() InitialDelay")
+				assert.Equal(t, bwRetryConfig.MaxDelay, config.MaxDelay, "getJobQueueRetryConfig() MaxDelay")
+				assert.InDelta(t, bwRetryConfig.Multiplier, config.Multiplier, 0, "getJobQueueRetryConfig() Multiplier")
 			case *MqttAction:
-				if config.InitialDelay != mqttRetryConfig.InitialDelay {
-					t.Errorf("getJobQueueRetryConfig() InitialDelay = %v, want %v", config.InitialDelay, mqttRetryConfig.InitialDelay)
-				}
-				if config.MaxDelay != mqttRetryConfig.MaxDelay {
-					t.Errorf("getJobQueueRetryConfig() MaxDelay = %v, want %v", config.MaxDelay, mqttRetryConfig.MaxDelay)
-				}
-				if config.Multiplier != mqttRetryConfig.Multiplier {
-					t.Errorf("getJobQueueRetryConfig() Multiplier = %v, want %v", config.Multiplier, mqttRetryConfig.Multiplier)
-				}
+				assert.Equal(t, mqttRetryConfig.InitialDelay, config.InitialDelay, "getJobQueueRetryConfig() InitialDelay")
+				assert.Equal(t, mqttRetryConfig.MaxDelay, config.MaxDelay, "getJobQueueRetryConfig() MaxDelay")
+				assert.InDelta(t, mqttRetryConfig.Multiplier, config.Multiplier, 0, "getJobQueueRetryConfig() Multiplier")
 			}
 		})
 	}
@@ -499,9 +271,7 @@ func TestEnqueueTask(t *testing.T) {
 		realQueue := jobqueue.NewJobQueue()
 		realQueue.Start()
 		defer func() {
-			if err := realQueue.Stop(); err != nil {
-				t.Errorf("Failed to stop queue: %v", err)
-			}
+			assert.NoError(t, realQueue.Stop(), "Failed to stop queue")
 		}()
 
 		// Create a processor with the real queue
@@ -558,9 +328,7 @@ func TestEnqueueTask(t *testing.T) {
 
 				// Enqueue the task
 				err := processor.EnqueueTask(task)
-				if err != nil {
-					t.Errorf("Failed to enqueue task with %s: %v", tc.name, err)
-				}
+				assert.NoError(t, err, "Failed to enqueue task with %s", tc.name)
 			})
 		}
 	})
@@ -571,9 +339,7 @@ func TestEnqueueTask(t *testing.T) {
 		// Create a new queue that we'll stop immediately
 		stoppedQueue := jobqueue.NewJobQueue()
 		stoppedQueue.Start()
-		if err := stoppedQueue.Stop(); err != nil {
-			t.Errorf("Failed to stop queue: %v", err)
-		}
+		require.NoError(t, stoppedQueue.Stop(), "Failed to stop queue")
 
 		// Create a processor with the stopped queue
 		stoppedProcessor := &Processor{
@@ -601,11 +367,8 @@ func TestEnqueueTask(t *testing.T) {
 
 		// Enqueue the task, expecting an error
 		err := stoppedProcessor.EnqueueTask(task)
-		if err == nil {
-			t.Errorf("Expected error when enqueueing to stopped queue, got nil")
-		} else if !errors.Is(err, jobqueue.ErrQueueStopped) {
-			t.Errorf("Expected error to be ErrQueueStopped, got %v", err)
-		}
+		require.Error(t, err, "Expected error when enqueueing to stopped queue")
+		assert.ErrorIs(t, err, jobqueue.ErrQueueStopped, "Expected error to be ErrQueueStopped")
 	})
 
 	// Test with a full queue
@@ -615,9 +378,7 @@ func TestEnqueueTask(t *testing.T) {
 		tinyQueue := jobqueue.NewJobQueueWithOptions(2, 1, false)
 		tinyQueue.Start()
 		defer func() {
-			if err := tinyQueue.Stop(); err != nil {
-				t.Errorf("Failed to stop queue: %v", err)
-			}
+			assert.NoError(t, tinyQueue.Stop(), "Failed to stop queue")
 		}()
 
 		// Create a processor with the tiny queue
@@ -653,8 +414,8 @@ func TestEnqueueTask(t *testing.T) {
 
 			// Enqueue the task, but don't fail the test if we get a queue full error
 			err := tinyProcessor.EnqueueTask(task)
-			if err != nil && !errors.Is(err, jobqueue.ErrQueueFull) {
-				t.Errorf("Unexpected error: %v", err)
+			if err != nil {
+				require.ErrorIs(t, err, jobqueue.ErrQueueFull, "Unexpected error")
 			}
 		}
 
@@ -672,9 +433,7 @@ func TestEnqueueTask(t *testing.T) {
 		realQueue := jobqueue.NewJobQueue()
 		realQueue.Start()
 		defer func() {
-			if err := realQueue.Stop(); err != nil {
-				t.Errorf("Failed to stop queue: %v", err)
-			}
+			assert.NoError(t, realQueue.Stop(), "Failed to stop queue")
 		}()
 
 		// Create a processor with the real queue
@@ -714,9 +473,7 @@ func TestEnqueueTask(t *testing.T) {
 
 		// Enqueue the task
 		err := processor.EnqueueTask(task)
-		if err != nil {
-			t.Errorf("Failed to enqueue task with large detection: %v", err)
-		}
+		assert.NoError(t, err, "Failed to enqueue task with large detection")
 	})
 }
 
@@ -739,11 +496,8 @@ func TestEnqueueTaskBasic(t *testing.T) {
 
 	// Test case 1: Nil task
 	err := processor.EnqueueTask(nil)
-	if err == nil {
-		t.Errorf("Expected error for nil task, got nil")
-	} else if !errors.Is(err, ErrNilTask) {
-		t.Errorf("Expected error to be ErrNilTask, got %v", err)
-	}
+	require.Error(t, err, "Expected error for nil task")
+	require.ErrorIs(t, err, ErrNilTask, "Expected error to be ErrNilTask")
 
 	// Test case 2: Nil action
 	task := &Task{
@@ -752,11 +506,8 @@ func TestEnqueueTaskBasic(t *testing.T) {
 		Action:    nil,
 	}
 	err = processor.EnqueueTask(task)
-	if err == nil {
-		t.Errorf("Expected error for nil action, got nil")
-	} else if !errors.Is(err, ErrNilAction) {
-		t.Errorf("Expected error to be ErrNilAction, got %v", err)
-	}
+	require.Error(t, err, "Expected error for nil action")
+	require.ErrorIs(t, err, ErrNilAction, "Expected error to be ErrNilAction")
 
 	// Test case 3: Successful enqueue
 	task = &Task{
@@ -765,14 +516,11 @@ func TestEnqueueTaskBasic(t *testing.T) {
 		Action:    &MockAction{},
 	}
 	err = processor.EnqueueTask(task)
-	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
-	}
+	require.NoError(t, err, "Unexpected error")
 
 	// Clean up
-	if err := realQueue.Stop(); err != nil {
-		t.Errorf("Failed to stop queue: %v", err)
-	}
+	err = realQueue.Stop()
+	assert.NoError(t, err, "Failed to stop queue")
 }
 
 // TestEnqueueMultipleTasks tests enqueueing multiple tasks with Scandinavian bird species
@@ -782,9 +530,7 @@ func TestEnqueueMultipleTasks(t *testing.T) {
 	realQueue := jobqueue.NewJobQueue()
 	realQueue.Start()
 	defer func() {
-		if err := realQueue.Stop(); err != nil {
-			t.Errorf("Failed to stop queue: %v", err)
-		}
+		assert.NoError(t, realQueue.Stop(), "Failed to stop queue")
 	}()
 
 	// Create a processor with the real queue
@@ -867,8 +613,7 @@ func TestEnqueueMultipleTasks(t *testing.T) {
 
 			// Enqueue the task
 			err := processor.EnqueueTask(task)
-			if err != nil {
-				t.Errorf("Failed to enqueue task for %s (%s): %v", b.CommonName, b.ScientificName, err)
+			if !assert.NoError(t, err, "Failed to enqueue task for %s (%s)", b.CommonName, b.ScientificName) {
 				successChan <- false
 			} else {
 				successChan <- true
@@ -889,17 +634,13 @@ func TestEnqueueMultipleTasks(t *testing.T) {
 	}
 
 	// Verify all tasks were enqueued successfully
-	if successCount != len(scandinavianBirds) {
-		t.Errorf("Expected %d successful enqueues, got %d", len(scandinavianBirds), successCount)
-	}
+	assert.Equal(t, len(scandinavianBirds), successCount, "Expected all tasks to be enqueued successfully")
 
 	// Get job queue stats
 	stats := realQueue.GetStats()
 
 	// Verify the job queue has the expected number of jobs
-	if stats.TotalJobs < len(scandinavianBirds) {
-		t.Errorf("Expected at least %d total jobs, got %d", len(scandinavianBirds), stats.TotalJobs)
-	}
+	assert.GreaterOrEqual(t, stats.TotalJobs, len(scandinavianBirds), "Expected at least %d total jobs", len(scandinavianBirds))
 
 	// Log some statistics
 	t.Logf("Successfully enqueued %d tasks", successCount)
@@ -921,9 +662,7 @@ func TestIntegrationWithJobQueue(t *testing.T) {
 	realQueue.SetProcessingInterval(50 * time.Millisecond) // Process jobs quickly for testing
 	realQueue.Start()
 	defer func() {
-		if err := realQueue.Stop(); err != nil {
-			t.Errorf("Failed to stop queue: %v", err)
-		}
+		assert.NoError(t, realQueue.Stop(), "Failed to stop queue")
 	}()
 
 	// Create a processor with the real queue
@@ -964,9 +703,7 @@ func TestIntegrationWithJobQueue(t *testing.T) {
 
 	// Enqueue the task
 	err := processor.EnqueueTask(task)
-	if err != nil {
-		t.Fatalf("Failed to enqueue task: %v", err)
-	}
+	require.NoError(t, err, "Failed to enqueue task")
 
 	// Wait for the action to be executed with a timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
@@ -975,13 +712,11 @@ func TestIntegrationWithJobQueue(t *testing.T) {
 	case <-executionChan:
 		// Action was executed successfully
 	case <-ctx.Done():
-		t.Fatalf("Timeout waiting for action to be executed")
+		require.Fail(t, "Timeout waiting for action to be executed")
 	}
 
 	// Verify that the action was executed exactly once
-	if mockAction.ExecuteCount != 1 {
-		t.Errorf("Expected action to be executed once, got %d executions", mockAction.ExecuteCount)
-	}
+	assert.Equal(t, 1, mockAction.ExecuteCount, "Expected action to be executed once")
 
 	// Wait a bit for the job queue to update its statistics
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -990,9 +725,7 @@ func TestIntegrationWithJobQueue(t *testing.T) {
 
 	// Verify that the job queue statistics reflect the completed job
 	stats := realQueue.GetStats()
-	if stats.SuccessfulJobs != 1 {
-		t.Errorf("Expected 1 successful job, got %d", stats.SuccessfulJobs)
-	}
+	assert.Equal(t, 1, stats.SuccessfulJobs, "Expected 1 successful job")
 
 	// Test with a failing action
 	failingAction := &MockAction{
@@ -1019,9 +752,7 @@ func TestIntegrationWithJobQueue(t *testing.T) {
 
 	// Enqueue the failing task
 	err = processor.EnqueueTask(failingTask)
-	if err != nil {
-		t.Fatalf("Failed to enqueue failing task: %v", err)
-	}
+	require.NoError(t, err, "Failed to enqueue failing task")
 
 	// Wait for the job queue to process the failing job
 	processCtx, processCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -1029,15 +760,11 @@ func TestIntegrationWithJobQueue(t *testing.T) {
 	<-processCtx.Done()
 
 	// Verify that the failing action was executed
-	if failingAction.ExecuteCount != 1 {
-		t.Errorf("Expected failing action to be executed once, got %d executions", failingAction.ExecuteCount)
-	}
+	assert.Equal(t, 1, failingAction.ExecuteCount, "Expected failing action to be executed once")
 
 	// Verify that the job queue statistics reflect the failed job
 	stats = realQueue.GetStats()
-	if stats.FailedJobs < 1 {
-		t.Errorf("Expected at least 1 failed job, got %d", stats.FailedJobs)
-	}
+	assert.GreaterOrEqual(t, stats.FailedJobs, 1, "Expected at least 1 failed job")
 
 	// Log final statistics
 	t.Logf("Job queue stats: Total=%d, Successful=%d, Failed=%d",
@@ -1061,9 +788,7 @@ func TestRetryLogic(t *testing.T) {
 	realQueue.SetProcessingInterval(50 * time.Millisecond) // Process jobs quickly for testing
 	realQueue.StartWithContext(ctx)
 	defer func() {
-		if err := realQueue.Stop(); err != nil {
-			t.Errorf("Failed to stop queue: %v", err)
-		}
+		assert.NoError(t, realQueue.Stop(), "Failed to stop queue")
 	}()
 
 	// Create a counter for tracking attempts
@@ -1141,9 +866,7 @@ func TestRetryLogic(t *testing.T) {
 
 	// Enqueue the task
 	err := processor.EnqueueTask(task)
-	if err != nil {
-		t.Fatalf("Failed to enqueue task: %v", err)
-	}
+	require.NoError(t, err, "Failed to enqueue task")
 
 	// Wait for the job to succeed with a timeout
 	successCtx, successCancel := context.WithTimeout(context.Background(), 5*time.Second) // Increased timeout for CI environments
@@ -1153,7 +876,7 @@ func TestRetryLogic(t *testing.T) {
 		// Job succeeded after retries
 		t.Log("Success channel received signal")
 	case <-successCtx.Done():
-		t.Fatalf("Timeout waiting for job to succeed after retries")
+		require.Fail(t, "Timeout waiting for job to succeed after retries")
 	}
 
 	// Wait a bit more to ensure all job stats are updated
@@ -1166,18 +889,12 @@ func TestRetryLogic(t *testing.T) {
 	finalAttemptCount := attemptCount
 	attemptMutex.Unlock()
 
-	if finalAttemptCount != failCount+1 {
-		t.Errorf("Expected action to be executed %d times, got %d executions", failCount+1, finalAttemptCount)
-	}
+	assert.Equal(t, failCount+1, finalAttemptCount, "Expected action to be executed %d times", failCount+1)
 
 	// Verify that the job queue statistics reflect the retries and successful completion
 	stats := realQueue.GetStats()
-	if stats.SuccessfulJobs != 1 {
-		t.Errorf("Expected 1 successful job, got %d", stats.SuccessfulJobs)
-	}
-	if stats.RetryAttempts < failCount {
-		t.Errorf("Expected at least %d retry attempts, got %d", failCount, stats.RetryAttempts)
-	}
+	assert.Equal(t, 1, stats.SuccessfulJobs, "Expected 1 successful job")
+	assert.GreaterOrEqual(t, stats.RetryAttempts, failCount, "Expected at least %d retry attempts", failCount)
 
 	// Test with an action that always fails and exhausts retries
 	maxRetries := 2
@@ -1248,9 +965,7 @@ func TestRetryLogic(t *testing.T) {
 
 	// Enqueue the exhausting task
 	err = processor.EnqueueTask(exhaustingTask)
-	if err != nil {
-		t.Fatalf("Failed to enqueue exhausting task: %v", err)
-	}
+	require.NoError(t, err, "Failed to enqueue exhausting task")
 
 	// Wait for all attempts to complete with an increased timeout
 	exhaustCtx, exhaustCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1260,7 +975,7 @@ func TestRetryLogic(t *testing.T) {
 		// All attempts completed
 		t.Log("All exhaustion attempts completed")
 	case <-exhaustCtx.Done():
-		t.Fatalf("Timeout waiting for all exhaustion attempts to complete")
+		require.Fail(t, "Timeout waiting for all exhaustion attempts to complete")
 	}
 
 	// Wait a bit more to ensure all processing is complete
@@ -1273,25 +988,15 @@ func TestRetryLogic(t *testing.T) {
 	finalExhaustionCount := attemptCount
 	attemptMutex.Unlock()
 
-	if finalExhaustionCount != maxRetries+1 {
-		t.Errorf("Expected exhausting action to be executed %d times, got %d executions", maxRetries+1, finalExhaustionCount)
-	}
+	assert.Equal(t, maxRetries+1, finalExhaustionCount, "Expected exhausting action to be executed %d times", maxRetries+1)
 
 	// Verify that the job queue statistics reflect the failed job
 	stats = realQueue.GetStats()
 
 	// Total jobs should be 2 (1 successful from first test, 1 failed from exhaustion test)
-	if stats.TotalJobs != 2 {
-		t.Errorf("Expected 2 total jobs, got %d", stats.TotalJobs)
-	}
-
-	if stats.SuccessfulJobs != 1 {
-		t.Errorf("Expected 1 successful job, got %d", stats.SuccessfulJobs)
-	}
-
-	if stats.FailedJobs != 1 {
-		t.Errorf("Expected 1 failed job, got %d", stats.FailedJobs)
-	}
+	assert.Equal(t, 2, stats.TotalJobs, "Expected 2 total jobs")
+	assert.Equal(t, 1, stats.SuccessfulJobs, "Expected 1 successful job")
+	assert.Equal(t, 1, stats.FailedJobs, "Expected 1 failed job")
 
 	// Log final statistics
 	t.Logf("Job queue stats: Total=%d, Successful=%d, Failed=%d, Retries=%d",
@@ -1382,9 +1087,7 @@ func TestEdgeCases(t *testing.T) {
 			if tt.name == "Nil processor" {
 				// Use defer/recover to catch the expected panic
 				defer func() {
-					if r := recover(); r == nil {
-						t.Errorf("Expected panic but none occurred")
-					}
+					assert.NotNil(t, recover(), "Expected panic but none occurred")
 				}()
 			}
 
@@ -1393,20 +1096,19 @@ func TestEdgeCases(t *testing.T) {
 			// Clean up job queue if it exists
 			if p != nil && p.JobQueue != nil {
 				defer func() {
-					if err := p.JobQueue.Stop(); err != nil {
-						t.Errorf("Failed to stop queue: %v", err)
-					}
+					assert.NoError(t, p.JobQueue.Stop(), "Failed to stop queue")
 				}()
 			}
 
 			err := p.EnqueueTask(task)
 
-			if (err != nil) != tt.wantErr {
-				t.Errorf("EnqueueTask() error = %v, wantErr %v", err, tt.wantErr)
-			}
-
-			if err != nil && tt.expectedErr != "" && !strings.Contains(err.Error(), tt.expectedErr) {
-				t.Errorf("EnqueueTask() error = %v, expected to contain %v", err, tt.expectedErr)
+			if tt.wantErr {
+				require.Error(t, err, "EnqueueTask() expected error")
+				if tt.expectedErr != "" {
+					assert.Contains(t, err.Error(), tt.expectedErr, "EnqueueTask() error message")
+				}
+			} else {
+				assert.NoError(t, err, "EnqueueTask() unexpected error")
 			}
 		})
 	}
@@ -1464,62 +1166,61 @@ func BenchmarkEnqueueTask(b *testing.B) {
 	// Run the benchmark
 	for b.Loop() {
 		err := enqueueTaskBench(task)
-		if err != nil {
-			b.Fatalf("EnqueueTask failed: %v", err)
-		}
+		require.NoError(b, err, "EnqueueTask failed")
 	}
 }
 
-// TestSanitizeActionType tests that the sanitizeActionType function correctly sanitizes sensitive information
-func TestSanitizeActionType(t *testing.T) {
+// TestPrivacyScrubMessage tests that privacy.ScrubMessage correctly sanitizes sensitive information in strings
+// This replaces the old TestSanitizeActionType test.
+func TestPrivacyScrubMessage(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		input    string
-		expected string
+		name             string
+		input            string
+		shouldContain    []string // Strings that SHOULD be in the sanitized output
+		shouldNotContain []string // Strings that should NOT be in the sanitized output
 	}{
 		{
-			name:     "simple type",
-			input:    "*processor.MockAction",
-			expected: "*processor.MockAction",
+			name:          "simple type",
+			input:         "*processor.MockAction",
+			shouldContain: []string{"*processor.MockAction"},
 		},
 		{
-			name:     "RTSP URL with credentials",
-			input:    "*actions.RTSPAction{URL:rtsp://admin:password123@192.168.1.100:554/stream}",
-			expected: "*actions.RTSPAction{URL:rtsp://[redacted]@192.168.1.100:554/stream}",
+			name:             "RTSP URL with credentials",
+			input:            "*actions.RTSPAction{URL:rtsp://admin:password123@192.168.1.100:554/stream}",
+			shouldContain:    []string{"*actions.RTSPAction"},
+			shouldNotContain: []string{"admin", "password123"},
 		},
 		{
-			name:     "MQTT URL with credentials",
-			input:    "*actions.MQTTAction{Broker:mqtt://user:secret@mqtt.example.com:1883}",
-			expected: "*actions.MQTTAction{Broker:mqtt://[redacted]@mqtt.example.com:1883}",
+			name:             "API key in type",
+			input:            "*actions.APIAction{Key:api_key=abc123xyz789}",
+			shouldContain:    []string{"*actions.APIAction", "[TOKEN]"},
+			shouldNotContain: []string{"abc123xyz789"},
 		},
 		{
-			name:     "API key in type",
-			input:    "*actions.APIAction{Key:api_key=abc123xyz789}",
-			expected: "*actions.APIAction{Key:api_key=[REDACTED]}",
-		},
-		{
-			name:     "Password in type",
-			input:    "*actions.LoginAction{Username:user,password=supersecret123}",
-			expected: "*actions.LoginAction{Username:user,password=[REDACTED]",
-		},
-		{
-			name:     "Multiple sensitive data",
-			input:    "*actions.MultiAction{RTSP:rtsp://user:pass@example.com,API:api_key=12345,Auth:password=secret}",
-			expected: "*actions.MultiAction{RTSP:rtsp://[redacted]@example.com,API:api_key=[REDACTED],Auth=[REDACTED]",
+			name:             "Email in string",
+			input:            "notification for user@example.com failed",
+			shouldContain:    []string{"notification for", "[EMAIL]", "failed"},
+			shouldNotContain: []string{"user@example.com"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sanitized := sanitizeActionType(tt.input)
+			sanitized := privacy.ScrubMessage(tt.input)
 			// Print the actual output for debugging
 			t.Logf("Input: %q", tt.input)
 			t.Logf("Actual: %q", sanitized)
-			t.Logf("Expected: %q", tt.expected)
-			if sanitized != tt.expected {
-				t.Errorf("sanitizeActionType() = %q, want %q", sanitized, tt.expected)
+
+			// Check that expected strings are present
+			for _, s := range tt.shouldContain {
+				assert.Contains(t, sanitized, s, "sanitized should contain %q", s)
+			}
+
+			// Check that sensitive strings are NOT present
+			for _, s := range tt.shouldNotContain {
+				assert.NotContains(t, sanitized, s, "sanitized should NOT contain %q", s)
 			}
 		})
 	}

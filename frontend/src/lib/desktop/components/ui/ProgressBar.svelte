@@ -51,7 +51,7 @@
   let percentage = $derived(Math.min(Math.max((value / max) * 100, 0), 100));
 
   // Determine variant based on thresholds
-  let currentVariant = $derived(() => {
+  let currentVariant = $derived.by(() => {
     if (colorThresholds.length === 0) return variant;
 
     const percentValue = (value / max) * 100;
@@ -86,16 +86,18 @@
     error: 'bg-error',
   };
 
-  const containerClasses = cn(
-    'w-full bg-base-300 rounded-full overflow-hidden relative',
-    safeGet(sizeClasses, size, 'h-2'),
-    className
+  const containerClasses = $derived(
+    cn(
+      'w-full bg-base-300 rounded-full overflow-hidden relative',
+      safeGet(sizeClasses, size, 'h-2'),
+      className
+    )
   );
 
   let progressBarClasses = $derived(
     cn(
       'h-full transition-all duration-300 ease-out',
-      variantClasses[currentVariant()],
+      safeGet(variantClasses, currentVariant, 'bg-primary'),
       {
         'bg-stripes': striped,
         'animate-stripes': striped && animated,

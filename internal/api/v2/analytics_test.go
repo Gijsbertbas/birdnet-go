@@ -4,15 +4,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"errors"
 
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -24,6 +21,24 @@ import (
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/observability"
 )
+
+// Test date constant used across multiple test cases
+const testDate = "2023-01-01"
+
+// assertAnalyticsErrorResponse validates analytics error responses.
+func assertAnalyticsErrorResponse(t *testing.T, rec *httptest.ResponseRecorder, expectedStatus int, expectedBody string) {
+	t.Helper()
+	assert.Equal(t, expectedStatus, rec.Code)
+	if expectedStatus == http.StatusOK || expectedBody == "" {
+		return
+	}
+	var errorResp map[string]any
+	err := json.Unmarshal(rec.Body.Bytes(), &errorResp)
+	require.NoError(t, err)
+	errVal, ok := errorResp["error"]
+	require.True(t, ok, "error response JSON should contain an 'error' field")
+	assert.Contains(t, fmt.Sprint(errVal), expectedBody)
+}
 
 // TestGetSpeciesSummary tests the species summary endpoint
 func TestGetSpeciesSummary(t *testing.T) {
@@ -222,7 +237,7 @@ func TestGetHourlyAnalytics(t *testing.T) {
 	e, mockDS, controller := setupAnalyticsTestEnvironment(t)
 
 	// Create mock data
-	date := "2023-01-01"
+	date := testDate
 	species := "Turdus migratorius"
 
 	mockHourlyData := []datastore.HourlyAnalyticsData{
@@ -290,13 +305,13 @@ func TestGetDailyAnalytics(t *testing.T) {
 	e, mockDS, controller := setupAnalyticsTestEnvironment(t)
 
 	// Create mock data
-	startDate := "2023-01-01"
+	startDate := testDate
 	endDate := "2023-01-07"
 	species := "Turdus migratorius"
 
 	mockDailyData := []datastore.DailyAnalyticsData{
 		{
-			Date:  "2023-01-01",
+			Date:  testDate,
 			Count: 12,
 		},
 		{
@@ -346,7 +361,7 @@ func TestGetDailyAnalytics(t *testing.T) {
 
 		// Check first data item
 		item1 := data[0].(map[string]any)
-		assert.Equal(t, "2023-01-01", item1["date"])
+		assert.Equal(t, testDate, item1["date"])
 		assert.InDelta(t, 12, item1["count"], 0.01)
 
 		// Check second data item
@@ -367,7 +382,7 @@ func TestGetDailyAnalyticsWithoutSpecies(t *testing.T) {
 	e, mockDS, controller := setupAnalyticsTestEnvironment(t)
 
 	// Create mock data
-	startDate := "2023-01-01"
+	startDate := testDate
 	endDate := "2023-01-07"
 
 	mockDailyData := []datastore.DailyAnalyticsData{
@@ -503,9 +518,7 @@ func TestGetInvalidAnalyticsRequests(t *testing.T) {
 	}
 	mockImageCache := imageprovider.InitCache("test", stubProvider, testMetrics, mockDS)
 	t.Cleanup(func() {
-		if err := mockImageCache.Close(); err != nil {
-			t.Errorf("Failed to close image cache: %v", err)
-		}
+		assert.NoError(t, mockImageCache.Close(), "Failed to close image cache")
 	})
 
 	for _, tc := range testCases {
@@ -515,7 +528,6 @@ func TestGetInvalidAnalyticsRequests(t *testing.T) {
 				DS:             mockDS,
 				Settings:       appSettings,
 				BirdImageCache: mockImageCache,
-				logger:         log.New(io.Discard, "", 0),
 				// sunCalc and controlChan might be needed depending on handlers tested
 			}
 
@@ -528,27 +540,8 @@ func TestGetInvalidAnalyticsRequests(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
 			rec := httptest.NewRecorder()
 
-			// Let Echo's router handle the request routing
 			e.ServeHTTP(rec, req)
-
-			// Check response
-			if tc.expectedStatus == http.StatusOK {
-				assert.Equal(t, tc.expectedStatus, rec.Code)
-			} else {
-				// For error cases, check the error message
-				assert.Equal(t, tc.expectedStatus, rec.Code)
-				if tc.expectedBody != "" {
-					var errorResp map[string]any
-					err := json.Unmarshal(rec.Body.Bytes(), &errorResp)
-					require.NoError(t, err)
-					if errVal, ok := errorResp["error"]; ok {
-						assert.Contains(t, fmt.Sprint(errVal), tc.expectedBody)
-					}
-				}
-			}
-
-			// Only assert expectations if the handler was expected to interact with the mock
-			// mockDS.AssertExpectations(t) // May need selective assertion
+			assertAnalyticsErrorResponse(t, rec, tc.expectedStatus, tc.expectedBody)
 		})
 	}
 }
@@ -680,16 +673,13 @@ func TestGetDailySpeciesSummary_MultipleDetections(t *testing.T) {
 	testMetrics, _ := observability.NewMetrics() // Create a dummy metrics instance
 	imageCache := imageprovider.InitCache("test", mockImageProvider, testMetrics, mockDS)
 	t.Cleanup(func() {
-		if err := imageCache.Close(); err != nil {
-			t.Errorf("Failed to close image cache: %v", err)
-		}
+		assert.NoError(t, imageCache.Close(), "Failed to close image cache")
 	})
 
 	// Create a controller with our mocks
 	controller := &Controller{
 		DS:             mockDS,
 		BirdImageCache: imageCache,
-		logger:         log.New(io.Discard, "", 0), // Use discarded logger for tests
 	}
 
 	// Create a request with the date we want to test
@@ -732,27 +722,31 @@ func TestGetDailySpeciesSummary_MultipleDetections(t *testing.T) {
 	// Verify the American Crow details
 	assert.NotNil(t, amcro, "American Crow should be in the response")
 	if amcro != nil {
-		assert.Equal(t, "American Crow", amcro.CommonName)
-		assert.Equal(t, "AMCRO", amcro.SpeciesCode)
-		assert.Equal(t, amcroTotal, amcro.Count, "American Crow count mismatch") // Count is sum of hourly
-		assert.Equal(t, expectedAmcroHourlyCounts[:], amcro.HourlyCounts, "American Crow hourly counts mismatch")
-		assert.Equal(t, "08:15:00", amcro.FirstHeard, "American Crow first heard time")
-		assert.Equal(t, "14:45:00", amcro.LatestHeard, "American Crow latest heard time")
-		assert.True(t, amcro.HighConfidence, "American Crow should be high confidence") // Based on 0.95 > 0.8
-		assert.Contains(t, amcro.ThumbnailURL, "Corvus brachyrhynchos", "American Crow thumbnail URL")
+		assertSpeciesDailySummary(t, amcro, &SpeciesDailySummaryExpected{
+			CommonName:          "American Crow",
+			SpeciesCode:         "AMCRO",
+			Count:               amcroTotal,
+			HourlyCounts:        expectedAmcroHourlyCounts[:],
+			FirstHeard:          "08:15:00",
+			LatestHeard:         "14:45:00",
+			HighConfidence:      true, // Based on 0.95 > 0.8
+			ThumbnailURLContain: "Corvus brachyrhynchos",
+		})
 	}
 
 	// Verify the Red-bellied Woodpecker details
 	assert.NotNil(t, rbwo, "Red-bellied Woodpecker should be in the response")
 	if rbwo != nil {
-		assert.Equal(t, "Red-bellied Woodpecker", rbwo.CommonName)
-		assert.Equal(t, "RBWO", rbwo.SpeciesCode)
-		assert.Equal(t, rbwoTotal, rbwo.Count, "Red-bellied Woodpecker count mismatch") // Count is sum of hourly
-		assert.Equal(t, expectedRbwoHourlyCounts[:], rbwo.HourlyCounts, "Red-bellied Woodpecker hourly counts mismatch")
-		assert.Equal(t, "10:20:00", rbwo.FirstHeard, "Red-bellied Woodpecker first heard time")
-		assert.Equal(t, "16:05:00", rbwo.LatestHeard, "Red-bellied Woodpecker latest heard time")
-		assert.True(t, rbwo.HighConfidence, "Red-bellied Woodpecker should be high confidence") // Based on 0.8 >= 0.8
-		assert.Contains(t, rbwo.ThumbnailURL, "Melanerpes carolinus", "Red-bellied Woodpecker thumbnail URL")
+		assertSpeciesDailySummary(t, rbwo, &SpeciesDailySummaryExpected{
+			CommonName:          "Red-bellied Woodpecker",
+			SpeciesCode:         "RBWO",
+			Count:               rbwoTotal,
+			HourlyCounts:        expectedRbwoHourlyCounts[:],
+			FirstHeard:          "10:20:00",
+			LatestHeard:         "16:05:00",
+			HighConfidence:      true, // Based on 0.8 >= 0.8
+			ThumbnailURLContain: "Melanerpes carolinus",
+		})
 	}
 
 	// Assert that all expectations were met
@@ -841,7 +835,6 @@ func TestGetDailySpeciesSummary_SingleDetection(t *testing.T) {
 	controller := &Controller{
 		DS:             mockDS,
 		BirdImageCache: imageCache,
-		logger:         log.New(io.Discard, "", 0), // Add logger
 	}
 
 	// Create a request with the date we want to test
@@ -872,9 +865,7 @@ func TestGetDailySpeciesSummary_SingleDetection(t *testing.T) {
 	}
 
 	// Close the image cache to clean up resources
-	if err := imageCache.Close(); err != nil {
-		t.Errorf("Failed to close image cache: %v", err)
-	}
+	require.NoError(t, imageCache.Close(), "Failed to close image cache")
 
 	// Assert that all expectations were met
 	mockDS.AssertExpectations(t)
@@ -897,8 +888,7 @@ func TestGetDailySpeciesSummary_EmptyResult(t *testing.T) {
 
 	// Create a controller with our mock
 	controller := &Controller{
-		DS:     mockDS,
-		logger: log.New(io.Discard, "", 0), // Add logger
+		DS: mockDS,
 	}
 
 	// Create a request with the date we want to test
@@ -980,8 +970,7 @@ func TestGetDailySpeciesSummary_TimeHandling(t *testing.T) {
 
 	// Create a controller with our mock
 	controller := &Controller{
-		DS:     mockDS,
-		logger: log.New(io.Discard, "", 0), // Add logger
+		DS: mockDS,
 	}
 
 	// Create a request with the date we want to test
@@ -1065,8 +1054,7 @@ func TestGetDailySpeciesSummary_ConfidenceFilter(t *testing.T) {
 
 	// Create a controller with our mock
 	controller := &Controller{
-		DS:     mockDS,
-		logger: log.New(io.Discard, "", 0), // Add logger
+		DS: mockDS,
 	}
 
 	// Test with a confidence threshold of "70"
@@ -1160,8 +1148,7 @@ func TestGetDailySpeciesSummary_LimitParameter(t *testing.T) {
 
 	// Create a controller with our mock
 	controller := &Controller{
-		DS:     mockDS,
-		logger: log.New(io.Discard, "", 0), // Add logger
+		DS: mockDS,
 	}
 
 	// Create a request with a limit of 2

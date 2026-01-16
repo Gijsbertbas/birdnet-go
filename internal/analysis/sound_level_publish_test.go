@@ -17,6 +17,9 @@ import (
 	"github.com/tphakala/birdnet-go/internal/myaudio"
 )
 
+// Test constant for MQTT topic testing.
+const testMQTTTopic = "test/soundlevel"
+
 // TestSoundLevelJSONMarshaling tests JSON marshaling with various edge cases
 func TestSoundLevelJSONMarshaling(t *testing.T) {
 	t.Parallel()
@@ -798,7 +801,7 @@ func TestSoundLevelPublishIntervalBoundaries(t *testing.T) {
 			case soundData := <-testSoundLevelChan:
 				// Simulate immediate MQTT publish
 				ctx := context.Background()
-				topic := "test/soundlevel"
+				topic := testMQTTTopic
 
 				// Convert to compact format
 				compactData := CompactSoundLevelData{
@@ -810,10 +813,7 @@ func TestSoundLevelPublishIntervalBoundaries(t *testing.T) {
 				}
 
 				jsonData, err := json.Marshal(compactData)
-				if err != nil {
-					t.Errorf("Failed to marshal compact data: %v", err)
-					return
-				}
+				assert.NoError(t, err, "Failed to marshal compact data") // nolint:testifylint // require.NoError would call runtime.Goexit in goroutine
 				if err := mockProc.PublishMQTT(ctx, topic, string(jsonData)); err != nil {
 					// In test context, we expect the mock to handle the publish
 					// Log error but don't fail since mock behavior is controlled by test
@@ -844,7 +844,7 @@ func TestSoundLevelPublishIntervalBoundaries(t *testing.T) {
 		assert.Equal(t, "test-source", published.Source)
 		assert.Equal(t, 5, published.Duration)
 	case <-time.After(1 * time.Second):
-		t.Fatal("No publish when data sent to channel")
+		require.Fail(t, "No publish when data sent to channel")
 	}
 
 	// Test multiple publishes in sequence
@@ -866,7 +866,7 @@ func TestSoundLevelPublishIntervalBoundaries(t *testing.T) {
 			assert.Equal(t, fmt.Sprintf("sequence-source-%d", i), published.Source)
 			assert.Equal(t, 10, published.Duration)
 		case <-time.After(1 * time.Second):
-			t.Fatalf("No publish for sequence %d", i)
+			require.Fail(t, fmt.Sprintf("No publish for sequence %d", i))
 		}
 	}
 
@@ -903,7 +903,7 @@ func TestSoundLevelPublishIntervalChange(t *testing.T) {
 				return
 			case soundData := <-testSoundLevelChan:
 				ctx := context.Background()
-				topic := "test/soundlevel"
+				topic := testMQTTTopic
 				compactData := CompactSoundLevelData{
 					TS:   soundData.Timestamp.Format(time.RFC3339),
 					Src:  soundData.Source,
@@ -911,10 +911,7 @@ func TestSoundLevelPublishIntervalChange(t *testing.T) {
 					Dur:  soundData.Duration,
 				}
 				jsonData, err := json.Marshal(compactData)
-				if err != nil {
-					t.Errorf("Failed to marshal compact data: %v", err)
-					return
-				}
+				assert.NoError(t, err, "Failed to marshal compact data") // nolint:testifylint // require.NoError would call runtime.Goexit in goroutine
 				if err := mockProc.PublishMQTT(ctx, topic, string(jsonData)); err != nil {
 					t.Logf("Mock publish returned error (expected in some tests): %v", err)
 				}
@@ -971,7 +968,7 @@ func TestSoundLevelPublishIntervalChange(t *testing.T) {
 		assert.InDelta(t, float64(initialInterval*1000), float64(secondInterval.Milliseconds()), 200,
 			"Second publish should still be at ~%d seconds", initialInterval)
 	case <-time.After(6 * time.Second):
-		t.Fatal("No second publish received")
+		require.Fail(t, "No second publish received")
 	}
 
 	// Cleanup
@@ -1197,14 +1194,11 @@ func startMQTTPublisher(t *testing.T, wg *sync.WaitGroup, stopChan chan struct{}
 func publishSoundLevelData(t *testing.T, soundData myaudio.SoundLevelData, mockProc *processor.Processor) {
 	t.Helper()
 	ctx := context.Background()
-	topic := "test/soundlevel"
+	topic := testMQTTTopic
 
 	compactData := convertToCompactFormat(soundData)
 	jsonData, err := json.Marshal(compactData)
-	if err != nil {
-		t.Errorf("Failed to marshal compact data: %v", err)
-		return
-	}
+	assert.NoError(t, err, "Failed to marshal compact data") // nolint:testifylint // require.NoError would call runtime.Goexit in goroutine
 
 	if err := mockProc.PublishMQTT(ctx, topic, string(jsonData)); err != nil {
 		t.Logf("Mock publish returned error (expected in some tests): %v", err)
@@ -1293,7 +1287,7 @@ func startMockMQTTPublisher(t *testing.T, wg *sync.WaitGroup, stopChan <-chan st
 				return
 			case soundData := <-testSoundLevelChan:
 				ctx := context.Background()
-				topic := "test/soundlevel"
+				topic := testMQTTTopic
 				compactData := CompactSoundLevelData{
 					TS:    soundData.Timestamp.Format(time.RFC3339),
 					Src:   soundData.Source,
@@ -1310,10 +1304,7 @@ func startMockMQTTPublisher(t *testing.T, wg *sync.WaitGroup, stopChan <-chan st
 					}
 				}
 				jsonData, err := json.Marshal(compactData)
-				if err != nil {
-					t.Errorf("Failed to marshal compact data: %v", err)
-					return
-				}
+				assert.NoError(t, err, "Failed to marshal compact data") // nolint:testifylint // require.NoError would call runtime.Goexit in goroutine
 				if err := mockProc.PublishMQTT(ctx, topic, string(jsonData)); err != nil {
 					t.Logf("Mock publish returned error (expected in some tests): %v", err)
 				}
@@ -1419,7 +1410,7 @@ func TestMQTTPublishIntervalWithNoData(t *testing.T) {
 			case soundData := <-testSoundLevelChan:
 				// The publisher publishes immediately when receiving data
 				ctx := context.Background()
-				topic := "test/soundlevel"
+				topic := testMQTTTopic
 				compactData := CompactSoundLevelData{
 					TS:    soundData.Timestamp.Format(time.RFC3339),
 					Src:   soundData.Source,
@@ -1428,10 +1419,7 @@ func TestMQTTPublishIntervalWithNoData(t *testing.T) {
 					Bands: make(map[string]CompactBandData),
 				}
 				jsonData, err := json.Marshal(compactData)
-				if err != nil {
-					t.Errorf("Failed to marshal compact data: %v", err)
-					return
-				}
+				assert.NoError(t, err, "Failed to marshal compact data") // nolint:testifylint // require.NoError would call runtime.Goexit in goroutine
 				if err := mockProc.PublishMQTT(ctx, topic, string(jsonData)); err != nil {
 					t.Logf("Mock publish returned error (expected in some tests): %v", err)
 				}
@@ -1446,7 +1434,7 @@ func TestMQTTPublishIntervalWithNoData(t *testing.T) {
 	// Wait for either a publish event (which would be an error) or timeout
 	select {
 	case event := <-publishEvents:
-		t.Fatalf("Unexpected MQTT publish without data: %v", event)
+		require.Fail(t, fmt.Sprintf("Unexpected MQTT publish without data: %v", event))
 	case <-timer.C:
 		// Good - no publish occurred within the timeout period
 		t.Log("No publish occurred as expected when no data was sent")
@@ -1527,7 +1515,7 @@ func TestMQTTPublishIntervalWithErrors(t *testing.T) {
 	case <-attemptsDone:
 		// All attempts processed
 	case <-time.After(2 * time.Second):
-		t.Fatal("Timeout waiting for all publish attempts")
+		require.Fail(t, "Timeout waiting for all publish attempts")
 	}
 
 	// Verify all data was attempted to be published despite errors
@@ -1575,6 +1563,17 @@ func (m *mockMQTTClient) TestConnection(ctx context.Context, resultChan chan<- m
 }
 
 func (m *mockMQTTClient) SetControlChannel(ch chan string) {
+	// Not needed for our tests
+}
+
+func (m *mockMQTTClient) PublishWithRetain(ctx context.Context, topic, payload string, retain bool) error {
+	if m.publishFunc != nil {
+		return m.publishFunc(ctx, topic, payload)
+	}
+	return nil
+}
+
+func (m *mockMQTTClient) RegisterOnConnectHandler(handler mqtt.OnConnectHandler) {
 	// Not needed for our tests
 }
 

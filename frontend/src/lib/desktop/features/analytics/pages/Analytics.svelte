@@ -1,15 +1,17 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
-  import Chart from 'chart.js/auto';
-  import 'chartjs-adapter-date-fns';
-  import StatCard from '../components/ui/StatCard.svelte';
-  import ChartCard from '../components/ui/ChartCard.svelte';
-  import FilterForm from '../components/forms/FilterForm.svelte';
-  import { alertIconsSvg } from '$lib/utils/icons';
   import { t } from '$lib/i18n';
+  import { api } from '$lib/utils/api';
+  import { getLocalDateString, parseLocalDateString } from '$lib/utils/date';
   import { getLogger } from '$lib/utils/logger';
   import { safeArrayAccess, safeGet } from '$lib/utils/security';
-  import { parseLocalDateString, getLocalDateString } from '$lib/utils/date';
+  import { XCircle } from '@lucide/svelte';
+  import Chart from 'chart.js/auto';
+  import 'chartjs-adapter-date-fns';
+  import { onMount, tick } from 'svelte';
+  import FilterForm from '../components/forms/FilterForm.svelte';
+  import ChartCard from '../components/ui/ChartCard.svelte';
+  import StatCard from '../components/ui/StatCard.svelte';
+  import { handleBirdImageError } from '$lib/desktop/components/ui/image-utils';
 
   const logger = getLogger('app');
 
@@ -30,11 +32,23 @@
 
   interface Detection {
     id: string;
-    timestamp: string;
+    timestamp: string | null;
     commonName: string;
     scientificName: string;
     confidence: number;
     timeOfDay: string;
+  }
+
+  // API response type (may have date/time instead of timestamp)
+  interface ApiDetection {
+    id: string;
+    timestamp?: string;
+    date?: string;
+    time?: string;
+    commonName: string;
+    scientificName: string;
+    confidence: number;
+    timeOfDay?: string;
   }
 
   interface SpeciesData {
@@ -83,7 +97,7 @@
   // PERFORMANCE OPTIMIZATION: Cache theme colors with $derived to prevent repeated DOM calculations
   // In Svelte 5, $derived creates a reactive computed value that only recalculates when dependencies change
   // This avoids expensive getComputedStyle() and DOM attribute queries on every chart render
-  let cachedTheme = $derived(() => {
+  let cachedTheme = $derived.by(() => {
     const currentTheme = document.documentElement.getAttribute('data-theme');
     let textColor, gridColor, tooltipBgColor, tooltipBorderColor;
 
@@ -395,19 +409,7 @@
       const url = `/api/v2/analytics/species/summary?${params}`;
       logger.debug('Fetching summary data:', { url, startDate, endDate });
 
-      const response = await fetch(url);
-      if (!response.ok) {
-        logger.error('Summary API request failed', new Error(`HTTP ${response.status}`), {
-          url,
-          status: response.status,
-          statusText: response.statusText,
-          startDate,
-          endDate,
-        });
-        throw new Error(`Server responded with ${response.status}`);
-      }
-
-      const speciesData = await response.json();
+      const speciesData = await api.get<SpeciesData[]>(url);
       const speciesArray = Array.isArray(speciesData) ? speciesData : [];
 
       logger.debug('Summary API response:', {
@@ -458,19 +460,7 @@
       const url = `/api/v2/analytics/species/summary?${params}`;
       logger.debug('Fetching species chart data:', { url, startDate, endDate });
 
-      const response = await fetch(url);
-      if (!response.ok) {
-        logger.error('Species chart API request failed', new Error(`HTTP ${response.status}`), {
-          url,
-          status: response.status,
-          statusText: response.statusText,
-          startDate,
-          endDate,
-        });
-        throw new Error(`Server responded with ${response.status}`);
-      }
-
-      const speciesData = await response.json();
+      const speciesData = await api.get<SpeciesData[]>(url);
       chartData.species = Array.isArray(speciesData) ? speciesData : [];
 
       logger.debug('Species chart API response:', {
@@ -488,24 +478,25 @@
   // Fetch recent detections
   async function fetchRecentDetections() {
     try {
-      const response = await fetch('/api/v2/detections/recent?limit=10');
-      if (!response.ok) throw new Error(`Server responded with ${response.status}`);
-
-      const data = await response.json();
+      const data = await api.get<ApiDetection[]>('/api/v2/detections/recent?limit=10');
       const detections = Array.isArray(data) ? data : [];
 
-      recentDetections = detections.map(detection => ({
-        id: detection.id,
-        timestamp:
+      recentDetections = detections.map(detection => {
+        // Compute timestamp once to avoid 'undefined undefined' edge case
+        const computedTimestamp =
           detection.timestamp ||
-          (detection.date && detection.time ? `${detection.date} ${detection.time}` : null),
-        commonName: detection.commonName,
-        scientificName: detection.scientificName,
-        confidence: detection.confidence,
-        timeOfDay:
-          detection.timeOfDay ||
-          calculateTimeOfDay(detection.timestamp || `${detection.date} ${detection.time}`),
-      }));
+          (detection.date && detection.time ? `${detection.date} ${detection.time}` : null);
+
+        return {
+          id: detection.id,
+          timestamp: computedTimestamp,
+          commonName: detection.commonName,
+          scientificName: detection.scientificName,
+          confidence: detection.confidence,
+          timeOfDay:
+            detection.timeOfDay || (computedTimestamp ? calculateTimeOfDay(computedTimestamp) : ''),
+        };
+      });
     } catch (err) {
       logger.error('Error fetching recent detections:', err);
       recentDetections = [];
@@ -533,20 +524,8 @@
       const url = `/api/v2/analytics/time/distribution/hourly?${params}`;
       logger.debug('Fetching time of day data:', { url, startDate, endDate });
 
-      const response = await fetch(url);
-      if (!response.ok) {
-        logger.error('Time of day API request failed', new Error(`HTTP ${response.status}`), {
-          url,
-          status: response.status,
-          statusText: response.statusText,
-          startDate,
-          endDate,
-        });
-        throw new Error(`Server responded with ${response.status}`);
-      }
-
-      const timeData = await response.json();
-      chartData.timeOfDay = timeData;
+      const timeData = await api.get<TimeOfDayData[]>(url);
+      chartData.timeOfDay = Array.isArray(timeData) ? timeData : [];
 
       logger.debug('Time of day API response:', {
         url,
@@ -581,20 +560,8 @@
       const url = `/api/v2/analytics/time/daily?${params}`;
       logger.debug('Fetching trend data:', { url, startDate, endDate });
 
-      const response = await fetch(url);
-      if (!response.ok) {
-        logger.error('Trend API request failed', new Error(`HTTP ${response.status}`), {
-          url,
-          status: response.status,
-          statusText: response.statusText,
-          startDate,
-          endDate,
-        });
-        throw new Error(`Server responded with ${response.status}`);
-      }
-
-      const trendData = await response.json();
-      chartData.trend = trendData;
+      const trendData = await api.get<TrendData>(url);
+      chartData.trend = trendData ?? { data: [] };
 
       logger.debug('Trend API response:', {
         url,
@@ -617,19 +584,7 @@
       const url = `/api/v2/analytics/species/detections/new?${params}`;
       logger.debug('Fetching new species data:', { url, startDate, endDate });
 
-      const response = await fetch(url);
-      if (!response.ok) {
-        logger.error('New species API request failed', new Error(`HTTP ${response.status}`), {
-          url,
-          status: response.status,
-          statusText: response.statusText,
-          startDate,
-          endDate,
-        });
-        throw new Error(`Server responded with ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await api.get<NewSpeciesData[]>(url);
       newSpeciesData = Array.isArray(data) ? data : [];
       chartData.newSpecies = newSpeciesData;
 
@@ -736,7 +691,7 @@
             display: false,
           },
           tooltip: {
-            ...theme().tooltip,
+            ...theme.tooltip,
             callbacks: {
               label: context => `Detections: ${formatNumber(context.raw as number)}`,
             },
@@ -748,21 +703,21 @@
             title: {
               display: true,
               text: t('analytics.charts.numberOfDetections'),
-              color: theme().color.text,
+              color: theme.color.text,
             },
             ticks: {
-              color: theme().color.text,
+              color: theme.color.text,
             },
             grid: {
-              color: theme().color.grid,
+              color: theme.color.grid,
             },
           },
           y: {
             ticks: {
-              color: theme().color.text,
+              color: theme.color.text,
             },
             grid: {
-              color: theme().color.grid,
+              color: theme.color.grid,
             },
           },
         },
@@ -851,7 +806,7 @@
             display: false,
           },
           tooltip: {
-            ...theme().tooltip,
+            ...theme.tooltip,
             callbacks: {
               label: context => `Detections: ${formatNumber(context.raw as number)}`,
             },
@@ -863,26 +818,26 @@
             title: {
               display: true,
               text: t('analytics.charts.numberOfDetections'),
-              color: theme().color.text,
+              color: theme.color.text,
             },
             ticks: {
-              color: theme().color.text,
+              color: theme.color.text,
             },
             grid: {
-              color: theme().color.grid,
+              color: theme.color.grid,
             },
           },
           x: {
             title: {
               display: true,
               text: t('analytics.charts.timePeriod'),
-              color: theme().color.text,
+              color: theme.color.text,
             },
             ticks: {
-              color: theme().color.text,
+              color: theme.color.text,
             },
             grid: {
-              color: theme().color.grid,
+              color: theme.color.grid,
             },
           },
         },
@@ -961,11 +916,11 @@
             display: true,
             position: 'top',
             labels: {
-              color: theme().color.text,
+              color: theme.color.text,
             },
           },
           tooltip: {
-            ...theme().tooltip,
+            ...theme.tooltip,
             callbacks: {
               label: context => `Detections: ${formatNumber(context.raw as number)}`,
             },
@@ -977,26 +932,26 @@
             title: {
               display: true,
               text: t('analytics.charts.numberOfDetections'),
-              color: theme().color.text,
+              color: theme.color.text,
             },
             ticks: {
-              color: theme().color.text,
+              color: theme.color.text,
             },
             grid: {
-              color: theme().color.grid,
+              color: theme.color.grid,
             },
           },
           x: {
             title: {
               display: true,
               text: t('analytics.charts.date'),
-              color: theme().color.text,
+              color: theme.color.text,
             },
             ticks: {
-              color: theme().color.text,
+              color: theme.color.text,
             },
             grid: {
-              color: theme().color.grid,
+              color: theme.color.grid,
             },
           },
         },
@@ -1126,7 +1081,7 @@
         plugins: {
           legend: { display: false },
           tooltip: {
-            ...theme().tooltip,
+            ...theme.tooltip,
             callbacks: {
               title: tooltipItems => tooltipItems[0].label,
               label: context => {
@@ -1153,14 +1108,14 @@
             title: {
               display: true,
               text: t('analytics.charts.firstHeardDate'),
-              color: theme().color.text,
+              color: theme.color.text,
             },
-            ticks: { color: theme().color.text },
-            grid: { color: theme().color.grid },
+            ticks: { color: theme.color.text },
+            grid: { color: theme.color.grid },
           },
           y: {
             type: 'category',
-            ticks: { color: theme().color.text },
+            ticks: { color: theme.color.text },
             grid: { display: false },
           },
         },
@@ -1218,7 +1173,7 @@
 <div class="col-span-12 space-y-4" role="region" aria-label={t('analytics.title')}>
   {#if error}
     <div class="alert alert-error">
-      {@html alertIconsSvg.error}
+      <XCircle class="size-6" />
       <span>{error}</span>
     </div>
   {/if}
@@ -1370,7 +1325,7 @@
   />
 
   <!-- Data Table for Recent Detections -->
-  <div class="card bg-base-100 shadow-sm">
+  <div class="card bg-base-100 shadow-xs">
     <div class="card-body card-padding">
       <h2 class="card-title">{t('analytics.recentDetections.title')}</h2>
       {#if isLoading}
@@ -1378,7 +1333,8 @@
           <span class="loading loading-spinner loading-lg text-primary"></span>
         </div>
       {:else}
-        <div class="overflow-x-auto">
+        <!-- Desktop/tablet table -->
+        <div class="overflow-x-auto hidden md:block">
           <table class="table w-full">
             <thead>
               <tr>
@@ -1389,9 +1345,9 @@
               </tr>
             </thead>
             <tbody>
-              {#each recentDetections as detection, index}
+              {#each recentDetections as detection, index (detection.id ?? index)}
                 <tr class={index % 2 === 0 ? 'bg-base-100' : 'bg-base-200'}>
-                  <td>{formatDateTime(detection.timestamp)}</td>
+                  <td>{detection.timestamp ? formatDateTime(detection.timestamp) : '-'}</td>
                   <td>
                     <div class="flex items-center gap-2">
                       <div class="w-8 h-8 rounded-full bg-base-200 overflow-hidden">
@@ -1402,12 +1358,7 @@
                           )}"
                           alt={detection.commonName || 'Unknown species'}
                           class="w-full h-full object-cover"
-                          onerror={e => {
-                            const target = e.currentTarget as any;
-                            if (target) {
-                              target.src = '/assets/images/bird-placeholder.svg';
-                            }
-                          }}
+                          onerror={handleBirdImageError}
                           loading="lazy"
                           decoding="async"
                           fetchpriority="low"
@@ -1440,13 +1391,66 @@
                 </tr>
               {:else}
                 <tr>
-                  <td colspan="4" class="text-center py-4 text-base-content/50"
+                  <td colspan="4" class="text-center py-4 text-base-content opacity-50"
                     >{t('analytics.recentDetections.noRecentDetections')}</td
                   >
                 </tr>
               {/each}
             </tbody>
           </table>
+        </div>
+
+        <!-- Mobile list -->
+        <div class="md:hidden space-y-2">
+          {#each recentDetections as detection, index (detection.id ?? index)}
+            <div class="bg-base-100 rounded-lg p-3">
+              <div class="flex items-start gap-3">
+                <!-- Thumbnail -->
+                <div class="w-10 h-10 rounded-full bg-base-200 overflow-hidden shrink-0">
+                  <img
+                    src="/api/v2/media/species-image?name={encodeURIComponent(
+                      detection.scientificName
+                    )}"
+                    alt={detection.commonName || 'Unknown species'}
+                    class="w-full h-full object-cover"
+                    onerror={handleBirdImageError}
+                    loading="lazy"
+                    decoding="async"
+                    fetchpriority="low"
+                  />
+                </div>
+                <!-- Content -->
+                <div class="flex-1 min-w-0">
+                  <div class="text-sm text-base-content/70">
+                    {detection.timestamp ? formatDateTime(detection.timestamp) : '-'}
+                  </div>
+                  <div class="font-medium leading-tight truncate">
+                    {detection.commonName || t('analytics.recentDetections.unknownSpecies')}
+                  </div>
+                  <div class="text-xs opacity-60 truncate">{detection.scientificName || ''}</div>
+                  <div class="mt-2 flex items-center justify-between">
+                    <!-- Confidence badge -->
+                    <span
+                      class="badge {detection.confidence >= 0.8
+                        ? 'badge-success'
+                        : detection.confidence >= 0.4
+                          ? 'badge-warning'
+                          : 'badge-error'}"
+                    >
+                      {formatPercentage(detection.confidence)}
+                    </span>
+                    <span class="text-xs opacity-70"
+                      >{detection.timeOfDay || t('analytics.recentDetections.unknown')}</span
+                    >
+                  </div>
+                </div>
+              </div>
+            </div>
+          {:else}
+            <div class="text-center py-4 text-base-content opacity-50">
+              {t('analytics.recentDetections.noRecentDetections')}
+            </div>
+          {/each}
         </div>
       {/if}
     </div>

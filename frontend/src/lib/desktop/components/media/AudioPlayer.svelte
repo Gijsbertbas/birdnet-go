@@ -30,10 +30,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { cn } from '$lib/utils/cn.js';
-  import { mediaIcons, alertIconsSvg } from '$lib/utils/icons.js';
+  import { Play, Pause, Download, XCircle } from '@lucide/svelte';
+  import AudioSettingsButton from '$lib/desktop/features/dashboard/components/AudioSettingsButton.svelte';
   import { t } from '$lib/i18n';
   import { loggers } from '$lib/utils/logger';
   import { useDelayedLoading } from '$lib/utils/delayedLoading.svelte.js';
+  import { applyPlaybackRate, dbToGain } from '$lib/utils/audio';
 
   const logger = loggers.audio;
 
@@ -95,21 +97,12 @@
   let progressBar: HTMLDivElement;
   // svelte-ignore non_reactive_update
   let spectrogramImage: HTMLImageElement; // Template-only binding
-  // svelte-ignore non_reactive_update
-  let volumeControl!: HTMLDivElement; // Template-only binding
-  // svelte-ignore non_reactive_update
-  let filterControl!: HTMLDivElement; // Template-only binding
-  // svelte-ignore non_reactive_update
-  let volumeSlider: HTMLDivElement;
-  // svelte-ignore non_reactive_update
-  let filterSlider: HTMLDivElement;
 
   // Audio state
   let isPlaying = $state(false);
   let currentTime = $state(0);
   let duration = $state(0);
   let audioContextAvailable = $state(true);
-  let audioContextError = $state<string | null>(null);
   let progress = $state(0);
   let isLoading = $state(false);
   let error = $state<string | null>(null);
@@ -156,6 +149,7 @@
 
   // Audio processing state
   let audioContext: AudioContext | null = null;
+  let isInitializingContext = $state(false);
   let audioNodes: {
     source: MediaElementAudioSourceNode;
     gain: GainNode;
@@ -165,7 +159,6 @@
 
   // Cleanup tracking for memory leak prevention
   let resizeObserver: ResizeObserver | null = null;
-  let sliderTimeout: ReturnType<typeof setTimeout> | undefined;
   let playEndTimeout: ReturnType<typeof setTimeout> | undefined;
   let eventListeners: Array<{
     element: HTMLElement | Document | Window;
@@ -176,8 +169,7 @@
   // Control state
   let gainValue = $state(0); // dB
   let filterFreq = $state(20); // Hz
-  let showVolumeSlider = $state(false);
-  let showFilterSlider = $state(false);
+  let playbackSpeed = $state(1.0); // Playback rate multiplier
   let showControls = $state(true); // Will be set based on width
   let isMobile = $state(false);
 
@@ -201,7 +193,6 @@
   const progressId = $derived(`progress-${detectionId}`);
 
   // Utility functions
-  const dbToGain = (db: number): number => Math.pow(10, db / 20);
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
@@ -219,13 +210,6 @@
     eventListeners.push({ element, event, handler });
   };
 
-  const clearSliderTimeout = () => {
-    if (sliderTimeout) {
-      clearTimeout(sliderTimeout);
-      sliderTimeout = undefined;
-    }
-  };
-
   const clearPlayEndTimeout = () => {
     if (playEndTimeout) {
       clearTimeout(playEndTimeout);
@@ -233,19 +217,12 @@
     }
   };
 
-  const resetSliderTimeout = () => {
-    clearSliderTimeout();
-    sliderTimeout = setTimeout(() => {
-      showVolumeSlider = false;
-      showFilterSlider = false;
-    }, 5000);
-  };
-
   // Audio context setup
   const initializeAudioContext = async () => {
     try {
-      // Check if AudioContext is available
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      // Check if AudioContext is available (webkitAudioContext for Safari)
+      type WebkitWindow = Window & { webkitAudioContext?: typeof AudioContext };
+      const AudioContextClass = window.AudioContext || (window as WebkitWindow).webkitAudioContext;
       if (!AudioContextClass) {
         throw new Error('AudioContext not supported');
       }
@@ -257,14 +234,11 @@
       }
 
       audioContextAvailable = true;
-      audioContextError = null;
       return audioContext;
       // eslint-disable-next-line no-unused-vars
     } catch (_e) {
       logger.warn('Web Audio API is not supported in this browser');
       audioContextAvailable = false;
-      audioContextError =
-        'Advanced audio features (volume control, filtering) are not available in this browser.';
       return null;
     }
   };
@@ -312,12 +286,21 @@
         audioElement.pause();
       } else {
         // Initialize audio context on first play
-        if (!audioContext) {
-          audioContext = await initializeAudioContext();
-          if (audioContext && !audioNodes) {
-            audioNodes = createAudioNodes(audioContext, audioElement);
+        // Guard against rapid clicks that could create multiple AudioContexts
+        if (!audioContext && !isInitializingContext) {
+          isInitializingContext = true;
+          try {
+            audioContext = await initializeAudioContext();
+            if (audioContext && !audioNodes) {
+              audioNodes = createAudioNodes(audioContext, audioElement);
+            }
+          } finally {
+            isInitializingContext = false;
           }
         }
+
+        // Safety check: component may have unmounted during async initialization
+        if (!audioElement) return;
 
         await audioElement.play();
       }
@@ -378,17 +361,6 @@
     }
   };
 
-  const handleVolumeSlider = (event: MouseEvent) => {
-    if (!volumeSlider) return;
-
-    const rect = volumeSlider.getBoundingClientRect();
-    const clickY = event.clientY - rect.top;
-    const clickPercent = 1 - clickY / rect.height;
-    const newGainDb = clickPercent * (GAIN_MAX_DB + 60) - 60;
-
-    updateGain(newGainDb);
-  };
-
   // Filter control
   const updateFilter = (newFreq: number) => {
     filterFreq = Math.max(FILTER_HP_MIN_FREQ, Math.min(FILTER_HP_MAX_FREQ, newFreq));
@@ -397,15 +369,12 @@
     }
   };
 
-  const handleFilterSlider = (event: MouseEvent) => {
-    if (!filterSlider) return;
-
-    const rect = filterSlider.getBoundingClientRect();
-    const clickY = event.clientY - rect.top;
-    const clickPercent = 1 - clickY / rect.height;
-    const newFreq = FILTER_HP_MIN_FREQ + clickPercent * (FILTER_HP_MAX_FREQ - FILTER_HP_MIN_FREQ);
-
-    updateFilter(newFreq);
+  // Speed control
+  const handleSpeedChange = (newSpeed: number) => {
+    playbackSpeed = newSpeed;
+    if (audioElement) {
+      applyPlaybackRate(audioElement, newSpeed);
+    }
   };
 
   // Check spectrogram mode on mount/URL change to avoid double-request pattern
@@ -419,6 +388,7 @@
   // The current approach is acceptable as it eliminates the previous double-request
   // pattern where BOTH the <img> load AND a subsequent fetch() would fail before
   // showing the generate button.
+  // eslint-disable-next-line no-unused-vars
   const checkSpectrogramMode = async () => {
     if (!spectrogramUrl) {
       spectrogramMode = 'auto';
@@ -785,15 +755,13 @@
   $effect(() => {
     // Only reset loading state if URL actually changed
     if (spectrogramUrl && spectrogramUrl !== previousSpectrogramUrl && !spectrogramLoader.error) {
-      debugLog('$effect: spectrogramUrl changed', {
+      debugLog('spectrogramUrl changed', {
         from: previousSpectrogramUrl,
         to: spectrogramUrl,
       });
+
       previousSpectrogramUrl = spectrogramUrl;
-      // Check mode first to avoid double-request pattern
-      checkSpectrogramMode();
-      // Start loading when URL changes
-      spectrogramLoader.setLoading(true);
+
       // Reset retry count and clear any pending retry timer for new spectrogram
       spectrogramRetryCount = 0;
       clearSpectrogramRetryTimer();
@@ -832,6 +800,8 @@
         startInterval();
         // Clear any pending delay timeout and immediately signal play start
         clearPlayEndTimeout();
+        // Apply playback rate when starting
+        applyPlaybackRate(audioElement, playbackSpeed);
         if (onPlayStart) {
           onPlayStart();
         }
@@ -878,18 +848,20 @@
         startInterval();
       }
     }
-  });
 
-  // Watch for slider visibility changes with proper cleanup
-  $effect(() => {
-    if (showVolumeSlider || showFilterSlider) {
-      resetSliderTimeout();
+    // Check if spectrogram image is already loaded from cache on mount
+    // This handles the race condition where image loads before effects run
+    debugLog('onMount: checking spectrogram state', {
+      spectrogramUrl,
+      spectrogramImageExists: !!spectrogramImage,
+      imageComplete: spectrogramImage?.complete,
+      imageNaturalHeight: spectrogramImage?.naturalHeight,
+    });
+
+    if (spectrogramImage?.complete && spectrogramImage?.naturalHeight !== 0) {
+      debugLog('onMount: spectrogram already loaded from cache');
+      spectrogramLoader.setLoading(false);
     }
-
-    // Cleanup function for the effect
-    return () => {
-      clearSliderTimeout();
-    };
   });
 
   // Debug effect to track spectrogram loader state changes
@@ -923,7 +895,6 @@
     stopInterval();
 
     // Clear any pending timeouts
-    clearSliderTimeout();
     clearPlayEndTimeout();
     clearSpectrogramRetryTimer();
     clearStatusPollTimer();
@@ -970,8 +941,6 @@
       audioContext = null;
     }
   });
-
-  // Icons imported from centralized icon constants
 </script>
 
 <div
@@ -990,7 +959,7 @@
     <!-- Loading spinner overlay -->
     {#if spectrogramLoader.showSpinner}
       <div
-        class="absolute inset-0 flex items-center justify-center bg-base-200 bg-opacity-75 rounded-md border border-base-300"
+        class="absolute inset-0 flex items-center justify-center bg-base-200/75 rounded-md border border-base-300"
       >
         <div
           class="loading loading-spinner loading-sm md:loading-md text-primary"
@@ -1009,16 +978,14 @@
           : `width: ${typeof width === 'number' ? width + 'px' : width}; height: ${typeof height === 'number' ? height + 'px' : height};`}
       >
         <div class="text-center p-2">
-          <div class="w-6 h-6 sm:w-8 sm:h-8 mx-auto mb-1 text-base-content/30" aria-hidden="true">
-            {@html alertIconsSvg.error}
-          </div>
+          <XCircle class="size-6 sm:size-8 mx-auto mb-1 text-base-content/30" aria-hidden="true" />
           <span class="text-xs sm:text-sm text-base-content/50">Spectrogram unavailable</span>
         </div>
       </div>
     {:else if spectrogramStatus?.status === 'queued' || spectrogramStatus?.status === 'generating'}
       <!-- Show generation status -->
       <div
-        class="absolute inset-0 flex flex-col items-center justify-center bg-base-200 bg-opacity-90 rounded-md border border-base-300 p-2"
+        class="absolute inset-0 flex flex-col items-center justify-center bg-base-200/90 rounded-md border border-base-300 p-2"
       >
         <div
           class="loading loading-spinner loading-xs sm:loading-sm md:loading-md"
@@ -1066,122 +1033,22 @@
     <track kind="captions" />
   </audio>
 
-  <!-- Volume control (top controls) -->
+  <!-- Audio settings button (top-right) -->
   {#if showControls}
     <div
-      bind:this={volumeControl}
-      class="absolute top-2 right-2 volume-control transition-opacity duration-200"
-      class:opacity-0={!isMobile && !showVolumeSlider}
+      class="absolute top-2 right-2 transition-opacity duration-200"
+      class:opacity-0={!isMobile}
       class:group-hover:opacity-100={!isMobile}
     >
-      <button
-        class="flex items-center justify-center gap-1 text-white px-2 py-1 rounded-full bg-black bg-opacity-50 hover:bg-opacity-75 transition-all duration-200"
-        class:cursor-not-allowed={!audioContextAvailable}
-        class:opacity-50={!audioContextAvailable}
+      <AudioSettingsButton
+        {gainValue}
+        {filterFreq}
+        {playbackSpeed}
+        onGainChange={updateGain}
+        onFilterChange={updateFilter}
+        onSpeedChange={handleSpeedChange}
         disabled={!audioContextAvailable}
-        onclick={() => {
-          if (audioContextAvailable) {
-            showVolumeSlider = !showVolumeSlider;
-            if (showVolumeSlider) showFilterSlider = false;
-          }
-        }}
-        aria-label={t('media.audio.volume')}
-        title={!audioContextAvailable
-          ? audioContextError || 'Volume control unavailable'
-          : 'Volume control'}
-      >
-        {@html mediaIcons.volume}
-        <span class="text-xs text-white">{gainValue > 0 ? '+' : ''}{gainValue} dB</span>
-      </button>
-
-      {#if showVolumeSlider}
-        <div
-          bind:this={volumeSlider}
-          class="absolute top-0 w-8 bg-black bg-opacity-20 backdrop-blur-sm rounded p-2 volume-slider z-50"
-          style:left="calc(100% + 4px)"
-          style:height="{height}px"
-          role="button"
-          tabindex="0"
-          aria-label={t('media.audio.volumeGain', { value: gainValue })}
-          onclick={handleVolumeSlider}
-          onkeydown={e => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              const rect = volumeSlider.getBoundingClientRect();
-              const centerY = rect.top + rect.height / 2;
-              const mockEvent = { clientY: centerY } as MouseEvent;
-              handleVolumeSlider(mockEvent);
-            }
-          }}
-        >
-          <div class="relative h-full w-2 bg-white bg-opacity-50 rounded-full mx-auto">
-            <div
-              class="absolute bottom-0 w-full bg-blue-500 rounded-full transition-all duration-100"
-              style:height="{(gainValue / GAIN_MAX_DB) * 100}%"
-            ></div>
-          </div>
-        </div>
-      {/if}
-    </div>
-  {/if}
-
-  <!-- Filter control (top controls) -->
-  {#if showControls}
-    <div
-      bind:this={filterControl}
-      class="absolute top-2 left-2 filter-control transition-opacity duration-200"
-      class:opacity-0={!isMobile && !showFilterSlider}
-      class:group-hover:opacity-100={!isMobile}
-    >
-      <button
-        class="flex items-center justify-center gap-1 text-white px-2 py-1 rounded-full bg-black bg-opacity-50 hover:bg-opacity-75 transition-all duration-200"
-        class:cursor-not-allowed={!audioContextAvailable}
-        class:opacity-50={!audioContextAvailable}
-        disabled={!audioContextAvailable}
-        onclick={() => {
-          if (audioContextAvailable) {
-            showFilterSlider = !showFilterSlider;
-            if (showFilterSlider) showVolumeSlider = false;
-          }
-        }}
-        aria-label={t('media.audio.filterControl')}
-        title={!audioContextAvailable
-          ? audioContextError || 'Filter control unavailable'
-          : 'Filter control'}
-      >
-        <span class="text-xs text-white">HP: {Math.round(filterFreq)} Hz</span>
-      </button>
-
-      {#if showFilterSlider}
-        <div
-          bind:this={filterSlider}
-          class="absolute top-0 w-8 bg-black bg-opacity-20 backdrop-blur-sm rounded p-2 filter-slider z-50"
-          style:right="calc(100% + 4px)"
-          style:height="{height}px"
-          role="button"
-          tabindex="0"
-          aria-label={t('media.audio.highPassFilter', { freq: Math.round(filterFreq) })}
-          onclick={handleFilterSlider}
-          onkeydown={e => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              const rect = filterSlider.getBoundingClientRect();
-              const centerY = rect.top + rect.height / 2;
-              const mockEvent = { clientY: centerY } as MouseEvent;
-              handleFilterSlider(mockEvent);
-            }
-          }}
-        >
-          <div class="relative h-full w-2 bg-white bg-opacity-50 rounded-full mx-auto">
-            <div
-              class="absolute bottom-0 w-full bg-blue-500 rounded-full transition-all duration-100"
-              style:height="{(Math.log(filterFreq / FILTER_HP_MIN_FREQ) /
-                Math.log(FILTER_HP_MAX_FREQ / FILTER_HP_MIN_FREQ)) *
-                100}%"
-            ></div>
-          </div>
-        </div>
-      {/if}
+      />
     </div>
   {/if}
 
@@ -1195,7 +1062,7 @@
 
   <!-- Bottom overlay controls -->
   <div
-    class="absolute bottom-0 left-0 right-0 bg-black bg-opacity-25 p-1 rounded-b-md transition-opacity duration-300"
+    class="absolute bottom-0 left-0 right-0 bg-black/25 p-1 rounded-b-md transition-opacity duration-300"
     class:opacity-0={!isMobile}
     class:group-hover:opacity-100={!isMobile}
     class:opacity-100={isMobile}
@@ -1205,7 +1072,7 @@
       <button
         bind:this={playPauseButton}
         id={playPauseId}
-        class="text-white p-1 rounded-full hover:bg-white hover:bg-opacity-20 flex-shrink-0"
+        class="text-white p-1 rounded-full hover:bg-white/20 shrink-0"
         onclick={handlePlayPause}
         disabled={isLoading}
         aria-label={isPlaying ? t('media.audio.pause') : t('media.audio.play')}
@@ -1214,8 +1081,10 @@
           <div
             class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"
           ></div>
+        {:else if isPlaying}
+          <Pause class="size-4" />
         {:else}
-          {@html isPlaying ? mediaIcons.pause : mediaIcons.play}
+          <Play class="size-4" />
         {/if}
       </button>
 
@@ -1223,7 +1092,7 @@
       <div
         bind:this={progressBar}
         id={progressId}
-        class="flex-grow bg-gray-200 rounded-full h-1.5 mx-2 cursor-pointer"
+        class="grow bg-gray-200 rounded-full h-1.5 mx-2 cursor-pointer"
         role="button"
         tabindex="0"
         aria-label={t('media.audio.seekProgress', {
@@ -1248,17 +1117,17 @@
       </div>
 
       <!-- Current time -->
-      <span class="text-xs font-medium text-white flex-shrink-0">{formatTime(currentTime)}</span>
+      <span class="text-xs font-medium text-white shrink-0">{formatTime(currentTime)}</span>
 
       <!-- Download button -->
       {#if showDownload}
         <a
           href={audioUrl}
           download
-          class="text-white p-1 rounded-full hover:bg-white hover:bg-opacity-20 ml-2 flex-shrink-0"
+          class="text-white p-1 rounded-full hover:bg-white/20 ml-2 shrink-0"
           aria-label={t('media.audio.download')}
         >
-          {@html mediaIcons.download}
+          <Download class="size-4" />
         </a>
       {/if}
     </div>
@@ -1273,15 +1142,3 @@
     </div>
   {/if}
 </div>
-
-<style>
-  .volume-slider,
-  .filter-slider {
-    z-index: 1000;
-  }
-
-  .volume-control button,
-  .filter-control button {
-    backdrop-filter: blur(4px);
-  }
-</style>

@@ -14,6 +14,7 @@ import (
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/logger"
+	"github.com/tphakala/birdnet-go/internal/luistervink"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
 	"github.com/tphakala/birdnet-go/internal/weather"
 )
@@ -63,6 +64,22 @@ func (a *birdweatherTestAdapter) TestConnection(ctx context.Context, resultChan 
 }
 
 func (a *birdweatherTestAdapter) Cleanup() {
+	a.client.Close()
+}
+
+// luistervinkTestAdapter wraps luistervink.LvClient to implement IntegrationTestClient
+type luistervinkTestAdapter struct {
+	client interface {
+		TestConnection(ctx context.Context, resultChan chan<- luistervink.TestResult)
+		Close()
+	}
+}
+
+func (a *luistervinkTestAdapter) TestConnection(ctx context.Context, resultChan chan<- luistervink.TestResult) {
+	a.client.TestConnection(ctx, resultChan)
+}
+
+func (a *luistervinkTestAdapter) Cleanup() {
 	a.client.Close()
 }
 
@@ -196,6 +213,15 @@ type BirdWeatherStatus struct {
 	LastError        string  `json:"last_error,omitempty"` // Most recent error message, if any issues occurred
 }
 
+// LuistervinkStatus represents the current status of the Luistervink integration
+type LuistervinkStatus struct {
+	Enabled          bool    `json:"enabled"`              // Whether Luistervink integration is enabled
+	StationID        string  `json:"station_id"`           // The Luistervink station ID
+	Threshold        float64 `json:"threshold"`            // The confidence threshold for reporting detections
+	LocationAccuracy float64 `json:"location_accuracy"`    // The location accuracy in meters
+	LastError        string  `json:"last_error,omitempty"` // Most recent error message, if any issues occurred
+}
+
 // initIntegrationsRoutes registers all integration-related API endpoints
 func (c *Controller) initIntegrationsRoutes() {
 	c.logInfoIfEnabled("Initializing integrations routes")
@@ -213,6 +239,11 @@ func (c *Controller) initIntegrationsRoutes() {
 	bwGroup := integrationsGroup.Group("/birdweather")
 	bwGroup.GET("/status", c.GetBirdWeatherStatus)
 	bwGroup.POST("/test", c.TestBirdWeatherConnection)
+
+	// Luistervink routes
+	lvGroup := integrationsGroup.Group("/luistervink")
+	lvGroup.GET("/status", c.GetLuistervinkStatus)
+	lvGroup.POST("/test", c.TestLuistervinkConnection)
 
 	// Weather routes
 	weatherGroup := integrationsGroup.Group("/weather")
@@ -463,8 +494,116 @@ func (c *Controller) TestBirdWeatherConnection(ctx echo.Context) error {
 	return runStreamingIntegrationTest(c, ctx, resultChan, adapter, integrationLongTimeout*time.Second, "BirdWeather")
 }
 
+// GetLuistervinkStatus handles GET /api/v2/integrations/luistervink/status
+func (c *Controller) GetLuistervinkStatus(ctx echo.Context) error {
+	ip := ctx.RealIP()
+	path := ctx.Request().URL.Path
+	c.logInfoIfEnabled("Getting Luistervink status",
+		logger.String("path", path),
+		logger.String("ip", ip))
+
+	// Get Luistervink configuration from settings
+	lvConfig := c.Settings.Realtime.Luistervink
+
+	// Prepare status response
+	status := LuistervinkStatus{
+		Enabled:          lvConfig.Enabled,
+		StationID:        lvConfig.ID,
+		Threshold:        lvConfig.Threshold,
+		LocationAccuracy: lvConfig.LocationAccuracy,
+	}
+
+	// For now, we just return the configuration status
+	// In the future, we could add checks for client status here
+	c.logInfoIfEnabled("Retrieved Luistervink status successfully",
+		logger.Bool("enabled", status.Enabled),
+		logger.String("station_id", status.StationID),
+		logger.Float64("threshold", status.Threshold),
+		logger.String("path", path),
+		logger.String("ip", ip),
+	)
+
+	return ctx.JSON(http.StatusOK, status)
+}
+
+// TestLuistervinkConnection handles POST /api/v2/integrations/luistervink/test
+func (c *Controller) TestLuistervinkConnection(ctx echo.Context) error {
+	var request LuistervinkTestRequest
+	if err := ctx.Bind(&request); err != nil {
+		return c.HandleError(ctx, err, "Invalid Luistervink test request", http.StatusBadRequest)
+	}
+
+	// Validate Luistervink configuration from the request
+	if !request.Enabled {
+		return ctx.JSON(http.StatusOK, map[string]any{
+			"success": false,
+			"message": "Luistervink integration is not enabled",
+			"state":   "failed",
+		})
+	}
+
+	// Validate Luistervink configuration
+	if request.ID == "" {
+		return ctx.JSON(http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Luistervink station ID not configured",
+			"state":   "failed",
+		})
+	}
+
+	// Create temporary settings for the test
+	testSettings := &conf.Settings{
+		BirdNET: conf.BirdNETConfig{
+			Latitude:  c.Settings.BirdNET.Latitude,
+			Longitude: c.Settings.BirdNET.Longitude,
+		},
+		Realtime: conf.RealtimeSettings{
+			Audio: c.Settings.Realtime.Audio, // Required for FFmpeg path (FLAC encoding)
+			Luistervink: conf.LuistervinkSettings{
+				Enabled:          request.Enabled,
+				ID:               request.ID,
+				Threshold:        request.Threshold,
+				LocationAccuracy: request.LocationAccuracy,
+				Debug:            request.Debug,
+			},
+		},
+	}
+	// Copy main settings
+	testSettings.Main = c.Settings.Main
+
+	// Create test Luistervink client with the test configuration
+	client, err := luistervink.New(testSettings)
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": fmt.Sprintf("Failed to create Luistervink client: %v", err),
+			"state":   "failed",
+		})
+	}
+
+	// Prepare for testing
+	ctx.Response().Header().Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	ctx.Response().WriteHeader(http.StatusOK)
+
+	// Channel for test results
+	resultChan := make(chan luistervink.TestResult)
+
+	// Create adapter and run streaming test
+	adapter := &luistervinkTestAdapter{client: client}
+	return runStreamingIntegrationTest(c, ctx, resultChan, adapter, integrationLongTimeout*time.Second, "Luistervink")
+}
+
 // BirdWeatherTestRequest represents a request to test BirdWeather connectivity
 type BirdWeatherTestRequest struct {
+	Enabled          bool    `json:"enabled"`
+	ID               string  `json:"id"`
+	Threshold        float64 `json:"threshold"`
+	LocationAccuracy float64 `json:"locationAccuracy"`
+	Debug            bool    `json:"debug"`
+}
+
+// LuistervinkTestRequest represents a request to test Luistervink connectivity
+type LuistervinkTestRequest struct {
 	Enabled          bool    `json:"enabled"`
 	ID               string  `json:"id"`
 	Threshold        float64 `json:"threshold"`

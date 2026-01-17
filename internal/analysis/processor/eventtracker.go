@@ -18,6 +18,7 @@ const (
 	LogToFile                          // Represents a log to file event
 	SendNotification                   // Represents a send notification event
 	BirdWeatherSubmit                  // Represents a bird weather submit event
+	LuistervinkSubmit                  // Represents a luistervink submit event
 	MQTTPublish                        // Represents an MQTT publish event
 	SSEBroadcast                       // Represents a Server-Sent Events broadcast
 )
@@ -92,6 +93,7 @@ type EventTrackerConfig struct {
 	LogToFileInterval         time.Duration
 	NotificationInterval      time.Duration
 	BirdWeatherSubmitInterval time.Duration
+	LuistervinkSubmitInterval time.Duration
 	MQTTPublishInterval       time.Duration
 	SSEBroadcastInterval      time.Duration
 }
@@ -112,6 +114,7 @@ func initEventTracker(interval time.Duration, speciesConfigs map[string]conf.Spe
 			LogToFile:         NewEventHandler(interval, StandardEventBehavior),
 			SendNotification:  NewEventHandler(interval, StandardEventBehavior),
 			BirdWeatherSubmit: NewEventHandler(interval, StandardEventBehavior),
+			LuistervinkSubmit: NewEventHandler(interval, StandardEventBehavior),
 			MQTTPublish:       NewEventHandler(interval, StandardEventBehavior),
 			SSEBroadcast:      NewEventHandler(interval, StandardEventBehavior),
 		},

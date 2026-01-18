@@ -41,6 +41,7 @@ func setDefaultConfig() {
 	// Integration modules
 	setModuleLogDefaults("mqtt", false)        // MQTT client (disabled by default)
 	setModuleLogDefaults("birdweather", false) // BirdWeather integration (disabled by default)
+	setModuleLogDefaults("luistervink", false) // Luistervink integration (disabled by default)
 	setModuleLogDefaults("weather", false)     // Weather providers (disabled by default)
 	setModuleLogDefaults("ebird", false)       // eBird integration (disabled by default)
 
@@ -134,11 +135,11 @@ func setDefaultConfig() {
 	viper.SetDefault("realtime.dashboard.temperatureunit", "celsius") // Temperature display unit: "celsius" or "fahrenheit"
 
 	// Spectrogram pre-rendering configuration
-	viper.SetDefault("realtime.dashboard.spectrogram.enabled", false)                        // Opt-in for safety
-	viper.SetDefault("realtime.dashboard.spectrogram.mode", "auto")                          // Default to auto mode (generate on demand)
-	viper.SetDefault("realtime.dashboard.spectrogram.size", "sm")                            // 400px, matches frontend RecentDetectionsCard
-	viper.SetDefault("realtime.dashboard.spectrogram.raw", true)                             // Raw spectrogram (no axes/legend)
-	viper.SetDefault("realtime.dashboard.spectrogram.style", "default")                      // Visual style preset
+	viper.SetDefault("realtime.dashboard.spectrogram.enabled", false)                                // Opt-in for safety
+	viper.SetDefault("realtime.dashboard.spectrogram.mode", "auto")                                  // Default to auto mode (generate on demand)
+	viper.SetDefault("realtime.dashboard.spectrogram.size", "sm")                                    // 400px, matches frontend RecentDetectionsCard
+	viper.SetDefault("realtime.dashboard.spectrogram.raw", true)                                     // Raw spectrogram (no axes/legend)
+	viper.SetDefault("realtime.dashboard.spectrogram.style", "default")                              // Visual style preset
 	viper.SetDefault("realtime.dashboard.spectrogram.dynamicrange", SpectrogramDynamicRangeStandard) // Dynamic range in dB (100 = standard)
 
 	// Retention policy configuration
@@ -179,6 +180,18 @@ func setDefaultConfig() {
 	viper.SetDefault("realtime.birdweather.retrysettings.initialdelay", 60)
 	viper.SetDefault("realtime.birdweather.retrysettings.maxdelay", 3600)
 	viper.SetDefault("realtime.birdweather.retrysettings.backoffmultiplier", 2.0)
+
+	// Luistervink configuration
+	viper.SetDefault("realtime.luistervink.enabled", false)
+	viper.SetDefault("realtime.luistervink.debug", false)
+	viper.SetDefault("realtime.luistervink.id", "")
+	viper.SetDefault("realtime.luistervink.threshold", 0.7)
+	viper.SetDefault("realtime.luistervink.locationaccuracy", 0)
+	viper.SetDefault("realtime.luistervink.retrysettings.enabled", true)
+	viper.SetDefault("realtime.luistervink.retrysettings.maxretries", 5)
+	viper.SetDefault("realtime.luistervink.retrysettings.initialdelay", 60)
+	viper.SetDefault("realtime.luistervink.retrysettings.maxdelay", 3600)
+	viper.SetDefault("realtime.luistervink.retrysettings.backoffmultiplier", 2.0)
 
 	// eBird configuration
 	viper.SetDefault("realtime.ebird.enabled", false)

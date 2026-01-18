@@ -872,8 +872,8 @@ func (l *LvClient) PostTestDetection(soundscapeID, timestamp, commonName, scient
 	return nil
 }
 
-// Publish function handles the uploading of detected clips and their details to Luistervink.
-// It first parses the timestamp from the note, then uploads the soundscape, and finally posts the detection.
+// Publish function handles posting detection details to Luistervink.
+// It parses the timestamp from the note and posts the detection without uploading audio.
 func (l *LvClient) Publish(note *datastore.Note, pcmData []byte) (err error) {
 	log := GetLogger()
 
@@ -886,16 +886,6 @@ func (l *LvClient) Publish(note *datastore.Note, pcmData []byte) (err error) {
 		logger.String("common_name", note.CommonName),
 		logger.String("scientific_name", note.ScientificName),
 		logger.Float64("confidence", note.Confidence))
-
-	// Validate input
-	if len(pcmData) == 0 {
-		return errors.New(fmt.Errorf("pcmData is empty")).
-			Component("luistervink").
-			Category(errors.CategoryValidation).
-			Context("common_name", note.CommonName).
-			Context("scientific_name", note.ScientificName).
-			Build()
-	}
 
 	// Use system's local timezone for timestamp parsing
 	loc := time.Local
@@ -917,43 +907,10 @@ func (l *LvClient) Publish(note *datastore.Note, pcmData []byte) (err error) {
 	timestamp := parsedTime.Format("2006-01-02T15:04:05.000-0700")
 	log.Debug("Formatted timestamp for publish", logger.String("timestamp", timestamp))
 
-	// If debug is enabled, save the raw PCM data to help diagnose issues
-	if l.Settings.Realtime.Luistervink.Debug {
-		debugDir := filepath.Join("debug", "luistervink", "pcm")
-		debugFilename := filepath.Join(debugDir, fmt.Sprintf("lv_pcm_debug_%s.raw",
-			parsedTime.Format("20060102_150405")))
+	// Use fixed soundscape ID of "0" (no audio upload)
+	soundscapeID := "0"
 
-		// Create directory if it doesn't exist
-		if err := createDebugDirectory(debugDir); err != nil {
-			log.Warn("Could not create debug PCM directory",
-				logger.String("directory", debugDir),
-				logger.Error(err))
-		} else {
-			// Save raw PCM data
-			if err := os.WriteFile(debugFilename, pcmData, filePermission); err != nil {
-				log.Warn("Could not save debug PCM file",
-					logger.String("filename", debugFilename),
-					logger.Error(err))
-			} else {
-				log.Debug("Saved debug PCM file", logger.String("filename", debugFilename))
-			}
-		}
-	}
-
-	// Upload the soundscape to Luistervink and retrieve the soundscape ID
-	log.Debug("Calling UploadSoundscape", logger.String("timestamp", timestamp))
-	soundscapeID, err := l.UploadSoundscape(timestamp, pcmData)
-	if err != nil {
-		log.Error("Publish failed: Error during soundscape upload",
-			logger.String("timestamp", timestamp),
-			logger.Error(err))
-		return fmt.Errorf("failed to upload soundscape to Luistervink: %w", err)
-	}
-	log.Debug("UploadSoundscape completed",
-		logger.String("timestamp", timestamp),
-		logger.String("soundscape_id", soundscapeID))
-
-	// Post the detection details to Luistervink using the retrieved soundscape ID
+	// Post the detection details to Luistervink
 	log.Debug("Calling PostDetection",
 		logger.String("soundscape_id", soundscapeID),
 		logger.String("timestamp", timestamp),

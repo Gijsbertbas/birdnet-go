@@ -20,6 +20,7 @@ import (
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/luistervink"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/logger"
@@ -49,6 +50,8 @@ type Processor struct {
 	log                 logger.Logger // Logger inherited from analysis package with "processor" child module
 	BwClient            *birdweather.BwClient
 	bwClientMutex       sync.RWMutex // Mutex to protect BwClient access
+	LvClient            *luistervink.LvClient
+	lvClientMutex       sync.RWMutex // Mutex to protect LvClient access
 	MqttClient          mqtt.Client
 	mqttMutex           sync.RWMutex // Mutex to protect MQTT client access
 	BirdImageCache      *imageprovider.BirdImageCache
@@ -374,6 +377,20 @@ func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, m
 				logger.String("integration", "birdweather"))
 		} else {
 			p.SetBwClient(bwClient) // Use setter for thread safety
+		}
+	}
+
+	// Initialize Luistervink client if enabled in settings
+	if settings.Realtime.Luistervink.Enabled {
+		var err error
+		lvClient, err := luistervink.New(settings)
+		if err != nil {
+			GetLogger().Error("Failed to create Luistervink client",
+				logger.Error(err),
+				logger.String("operation", "luistervink_client_init"),
+				logger.String("integration", "luistervink"))
+		} else {
+			p.SetLvClient(lvClient) // Use setter for thread safety
 		}
 	}
 
@@ -1280,6 +1297,31 @@ func (p *Processor) getDefaultActions(detection *Detections) []Action {
 		}
 	}
 
+	// Add LuistervinkAction if enabled and client is initialized
+	if p.Settings.Realtime.Luistervink.Enabled {
+		lvClient := p.GetLvClient() // Use getter for thread safety
+		if lvClient != nil {
+			// Create Luistervink retry config from settings
+			lvRetryConfig := jobqueue.RetryConfig{
+				Enabled:      p.Settings.Realtime.Luistervink.RetrySettings.Enabled,
+				MaxRetries:   p.Settings.Realtime.Luistervink.RetrySettings.MaxRetries,
+				InitialDelay: time.Duration(p.Settings.Realtime.Luistervink.RetrySettings.InitialDelay) * time.Second,
+				MaxDelay:     time.Duration(p.Settings.Realtime.Luistervink.RetrySettings.MaxDelay) * time.Second,
+				Multiplier:   p.Settings.Realtime.Luistervink.RetrySettings.BackoffMultiplier,
+			}
+
+			actions = append(actions, &LuistervinkAction{
+				Settings:      p.Settings,
+				EventTracker:  p.GetEventTracker(),
+				LvClient:      lvClient,
+				Note:          detection.Note,
+				pcmData:       detection.pcmData3s,
+				RetryConfig:   lvRetryConfig,
+				CorrelationID: detection.CorrelationID,
+			})
+		}
+	}
+
 	// Add MQTT action if enabled and client is available
 	if p.Settings.Realtime.MQTT.Enabled {
 		mqttClient := p.GetMQTTClient()
@@ -1345,6 +1387,31 @@ func (p *Processor) DisconnectBwClient() {
 	if p.BwClient != nil {
 		p.BwClient.Close()
 		p.BwClient = nil
+	}
+}
+
+// GetLvClient safely returns the current Luistervink client
+func (p *Processor) GetLvClient() *luistervink.LvClient {
+	p.lvClientMutex.RLock()
+	defer p.lvClientMutex.RUnlock()
+	return p.LvClient
+}
+
+// SetLvClient safely sets a new Luistervink client
+func (p *Processor) SetLvClient(client *luistervink.LvClient) {
+	p.lvClientMutex.Lock()
+	defer p.lvClientMutex.Unlock()
+	p.LvClient = client
+}
+
+// DisconnectLvClient safely disconnects and removes the Luistervink client
+func (p *Processor) DisconnectLvClient() {
+	p.lvClientMutex.Lock()
+	defer p.lvClientMutex.Unlock()
+	// Call the Close method if the client exists
+	if p.LvClient != nil {
+		p.LvClient.Close()
+		p.LvClient = nil
 	}
 }
 

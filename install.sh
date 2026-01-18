@@ -58,7 +58,7 @@ trap cleanup_temp_files EXIT INT TERM
 validate_version_history_entry() {
     local line="$1"
     # Format: timestamp|image_hash|config_backup|image_tag|context
-    # Example: 20240826-134817|sha256:abc123...|config-backup-20240826-134817.yaml|ghcr.io/tphakala/birdnet-go:nightly|pre-update
+    # Example: 20240826-134817|sha256:abc123...|config-backup-20240826-134817.yaml|gbstraathof/birdnet-go:nightly|pre-update
     if [[ "$line" =~ ^[0-9]{8}-[0-9]{6}\|[^|]+\|[^|]*\|[^|]+\|[^|]+$ ]]; then
         return 0
     else
@@ -416,10 +416,10 @@ log_network_state() {
     # Test HTTPS connectivity to key endpoints
     if command_exists curl; then
         local github_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "https://github.com" 2>/dev/null)
-        local ghcr_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "https://ghcr.io/v2/" 2>/dev/null)
-        
+        local dockerhub_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "https://hub.docker.com" 2>/dev/null)
+
         log_message "INFO" "GitHub connectivity: HTTP $github_status"
-        log_message "INFO" "GitHub Container Registry: HTTP $ghcr_status"
+        log_message "INFO" "Docker Hub: HTTP $dockerhub_status"
     else
         log_message "INFO" "curl not available for HTTPS connectivity test"
     fi
@@ -1204,7 +1204,7 @@ EOF
     local urls=(
         "https://github.com"
         "https://raw.githubusercontent.com"
-        "https://ghcr.io"
+        "https://hub.docker.com"
     )
     
     for url in "${urls[@]}"; do
@@ -1219,11 +1219,11 @@ EOF
     done
 
     # Docker Registry Check
-    print_message "\n📡 Testing GitHub registry connectivity..." "$YELLOW"
-    if curl -s "https://ghcr.io/v2/" >/dev/null 2>&1; then
-        print_message "✅ GitHub registry is accessible" "$GREEN"
+    print_message "\n📡 Testing Docker Hub connectivity..." "$YELLOW"
+    if curl -s "https://hub.docker.com" >/dev/null 2>&1; then
+        print_message "✅ Docker Hub is accessible" "$GREEN"
     else
-        print_message "❌ Cannot access Docker registry" "$RED"
+        print_message "❌ Cannot access Docker Hub" "$RED"
         success=false
     fi
 
@@ -1847,14 +1847,14 @@ collect_docker_pull_diagnostics() {
     disk_space=$(df -h /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || echo "unknown")
 
     # Test registry connectivity
-    if curl -s --max-time 5 "https://ghcr.io/v2/" >/dev/null 2>&1; then
+    if curl -s --max-time 5 "https://hub.docker.com" >/dev/null 2>&1; then
         registry_reachable="yes"
     else
         registry_reachable="no"
     fi
 
-    # Test DNS resolution for ghcr.io
-    if nslookup ghcr.io >/dev/null 2>&1 || host ghcr.io >/dev/null 2>&1; then
+    # Test DNS resolution for Docker Hub
+    if nslookup hub.docker.com >/dev/null 2>&1 || host hub.docker.com >/dev/null 2>&1; then
         dns_resolution="success"
     else
         dns_resolution="failed"
@@ -2348,9 +2348,9 @@ download_base_config() {
     
     # Download new config to temporary file first
     local temp_config="/tmp/config.yaml.new"
-    if ! curl -s --fail https://raw.githubusercontent.com/tphakala/birdnet-go/main/internal/conf/config.yaml > "$temp_config"; then
+    if ! curl -s --fail https://raw.githubusercontent.com/gijsbertbas/birdnet-go/main/internal/conf/config.yaml > "$temp_config"; then
         # Collect diagnostic information about the download failure
-        local curl_error=$(curl -v --fail https://raw.githubusercontent.com/tphakala/birdnet-go/main/internal/conf/config.yaml 2>&1 | tail -5 | tr '\n' ' ' | sed 's/"/\\"/g')
+        local curl_error=$(curl -v --fail https://raw.githubusercontent.com/gijsbertbas/birdnet-go/main/internal/conf/config.yaml 2>&1 | tail -5 | tr '\n' ' ' | sed 's/"/\\"/g')
         local dns_test="unknown"
         local http_test="unknown"
 
@@ -2370,7 +2370,7 @@ download_base_config() {
 
         local diagnostic_json=$(cat <<EOF
 {
-    "url": "https://raw.githubusercontent.com/tphakala/birdnet-go/main/internal/conf/config.yaml",
+    "url": "https://raw.githubusercontent.com/gijsbertbas/birdnet-go/main/internal/conf/config.yaml",
     "curl_error": "$(echo "$curl_error" | head -c 500)",
     "dns_resolution": "$dns_test",
     "http_connectivity": "$http_test",
@@ -4704,7 +4704,7 @@ parse_arguments() {
     done
     
     # Set the Docker image URL after parsing arguments
-    BIRDNET_GO_IMAGE="ghcr.io/tphakala/birdnet-go:${BIRDNET_GO_VERSION}"
+    BIRDNET_GO_IMAGE="gbstraathof/birdnet-go:${BIRDNET_GO_VERSION}"
     
     # Log the version being used
     echo "🐳 Using BirdNET-Go version: $BIRDNET_GO_VERSION"

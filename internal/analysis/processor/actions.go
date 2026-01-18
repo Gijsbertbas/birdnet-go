@@ -18,6 +18,7 @@ import (
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
+	"github.com/tphakala/birdnet-go/internal/luistervink"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/events"
@@ -144,6 +145,18 @@ type BirdWeatherAction struct {
 	Note          datastore.Note
 	pcmData       []byte
 	BwClient      *birdweather.BwClient
+	EventTracker  *EventTracker
+	RetryConfig   jobqueue.RetryConfig // Configuration for retry behavior
+	Description   string
+	CorrelationID string     // Detection correlation ID for log tracking
+	mu            sync.Mutex // Protect concurrent access to Note and pcmData
+}
+
+type LuistervinkAction struct {
+	Settings      *conf.Settings
+	Note          datastore.Note
+	pcmData       []byte
+	LvClient      *luistervink.LvClient
 	EventTracker  *EventTracker
 	RetryConfig   jobqueue.RetryConfig // Configuration for retry behavior
 	Description   string
@@ -993,6 +1006,113 @@ func (a *BirdWeatherAction) Execute(data any) error {
 			logger.String("operation", "birdweather_upload_success"))
 	}
 	return nil
+}
+
+// Execute sends the note to the Luistervink API
+func (a *LuistervinkAction) Execute(data any) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Check event frequency (supports scientific name lookup)
+	if !a.EventTracker.TrackEventWithNames(a.Note.CommonName, a.Note.ScientificName, LuistervinkSubmit) {
+		return nil
+	}
+
+	// Early check if Luistervink is still enabled in settings
+	if !a.Settings.Realtime.Luistervink.Enabled {
+		return nil // Silently exit if Luistervink was disabled after this action was created
+	}
+
+	// Add threshold check here
+	if a.Note.Confidence < float64(a.Settings.Realtime.Luistervink.Threshold) {
+		if a.Settings.Debug {
+			// Add structured logging
+			GetLogger().Debug("Skipping Luistervink upload due to low confidence",
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.String("species", a.Note.CommonName),
+				logger.Float64("confidence", a.Note.Confidence),
+				logger.Float64("threshold", float64(a.Settings.Realtime.Luistervink.Threshold)),
+				logger.String("operation", "luistervink_threshold_check"))
+		}
+		return nil
+	}
+
+	// Safe check for nil LvClient
+	if a.LvClient == nil {
+		// Client initialization failures indicate configuration issues that require
+		// manual intervention (e.g., missing API keys, disabled service)
+		// Retrying won't fix these problems, so mark as non-retryable
+		return errors.Newf("Luistervink client is not initialized").
+			Component("analysis.processor").
+			Category(errors.CategoryIntegration).
+			Context("operation", "luistervink_upload").
+			Context("integration", "luistervink").
+			Context("retryable", false). // Configuration error - not retryable
+			Context("config_section", "realtime.luistervink").
+			Build()
+	}
+
+	// Copy data locally to reduce lock duration if needed
+	note := a.Note
+	pcmData := a.pcmData
+
+	// Try to publish with appropriate error handling
+	if err := a.LvClient.Publish(&note, pcmData); err != nil {
+		// Log the error with retry information if retries are enabled
+		// Sanitize error before logging
+		sanitizedErr := privacy.WrapError(err)
+		// Add structured logging
+		GetLogger().Error("Failed to upload to Luistervink",
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.Error(sanitizedErr),
+			logger.String("species", note.CommonName),
+			logger.String("scientific_name", note.ScientificName),
+			logger.Float64("confidence", note.Confidence),
+			logger.String("clip_name", note.ClipName),
+			logger.Bool("retry_enabled", a.RetryConfig.Enabled),
+			logger.String("operation", "luistervink_upload"))
+		if !a.RetryConfig.Enabled {
+			// Send notification for non-retryable failures
+			notification.NotifyIntegrationFailure("Luistervink", err)
+		}
+		// Network and API errors are typically transient and may succeed on retry:
+		// - Temporary network outages
+		// - API rate limiting
+		// - Server-side temporary failures
+		// The job queue will handle exponential backoff for these retryable errors
+		return errors.New(err).
+			Component("analysis.processor").
+			Category(errors.CategoryIntegration).
+			Context("operation", "luistervink_upload").
+			Context("species", note.CommonName).
+			Context("confidence", note.Confidence).
+			Context("clip_name", note.ClipName).
+			Context("integration", "luistervink").
+			Context("retryable", true). // Network/API errors are typically retryable
+			Build()
+	}
+
+	if a.Settings.Debug {
+		GetLogger().Debug("Successfully uploaded to Luistervink",
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", a.CorrelationID),
+			logger.String("species", a.Note.CommonName),
+			logger.String("scientific_name", a.Note.ScientificName),
+			logger.Float64("confidence", a.Note.Confidence),
+			logger.String("clip_name", a.Note.ClipName),
+			logger.String("operation", "luistervink_upload_success"))
+	}
+	return nil
+}
+
+// GetDescription returns a description of the action (implements Action interface)
+func (a *LuistervinkAction) GetDescription() string {
+	if a.Description != "" {
+		return a.Description
+	}
+	return "Upload detection to Luistervink"
 }
 
 // NoteWithBirdImage wraps a Note with bird image data for MQTT publishing.

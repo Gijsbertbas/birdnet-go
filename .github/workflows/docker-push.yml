@@ -1,0 +1,164 @@
+name: Docker Build and Push
+
+on:
+  push:
+    branches:
+      - main
+      - luistervink-integration
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          # Determine version
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            TAG_STRATEGY="release"
+          else
+            VERSION="nightly-$(date +'%Y%m%d')"
+            TAG_STRATEGY="nightly"
+          fi
+
+          # Determine platform suffix
+          if [ "${{ matrix.platform }}" = "linux/amd64" ]; then
+            PLATFORM_SUFFIX="amd64"
+          elif [ "${{ matrix.platform }}" = "linux/arm64" ]; then
+            PLATFORM_SUFFIX="arm64"
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag-strategy=${TAG_STRATEGY}" >> $GITHUB_OUTPUT
+          echo "platform-suffix=${PLATFORM_SUFFIX}" >> $GITHUB_OUTPUT
+
+      - name: Generate Docker tags
+        id: tags
+        run: |
+          REPO="gbstraathof/birdnet-go"
+          VERSION="${{ steps.meta.outputs.version }}"
+          SUFFIX="${{ steps.meta.outputs.platform-suffix }}"
+
+          if [ "${{ steps.meta.outputs.tag-strategy }}" = "release" ]; then
+            # Release tags: v1.2.3-amd64, v1.2.3-arm64
+            TAGS="${REPO}:${VERSION}-${SUFFIX}"
+          else
+            # Nightly tags: nightly-20260118-amd64, nightly-amd64
+            TAGS="${REPO}:${VERSION}-${SUFFIX},${REPO}:nightly-${SUFFIX}"
+          fi
+
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "Generated tags: ${TAGS}"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            BUILD_VERSION=${{ steps.meta.outputs.version }}
+            BUILDKIT_INLINE_CACHE=1
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  create-manifests:
+    needs: build-and-push
+    runs-on: ubuntu-24.04
+    if: always() && needs.build-and-push.result == 'success'
+
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine version and strategy
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            TAG_STRATEGY="release"
+          else
+            VERSION="nightly-$(date +'%Y%m%d')"
+            TAG_STRATEGY="nightly"
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag-strategy=${TAG_STRATEGY}" >> $GITHUB_OUTPUT
+
+      - name: Create and push multi-arch manifests
+        run: |
+          REPO="gbstraathof/birdnet-go"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [ "${{ steps.version.outputs.tag-strategy }}" = "release" ]; then
+            # Create release manifest
+            docker manifest create ${REPO}:${VERSION} \
+              ${REPO}:${VERSION}-amd64 \
+              ${REPO}:${VERSION}-arm64
+            docker manifest push ${REPO}:${VERSION}
+
+            # Create latest tag for releases
+            docker manifest create ${REPO}:latest \
+              ${REPO}:${VERSION}-amd64 \
+              ${REPO}:${VERSION}-arm64
+            docker manifest push ${REPO}:latest
+
+            echo "✅ Published release manifests: ${VERSION}, latest"
+          else
+            # Create nightly dated manifest
+            docker manifest create ${REPO}:${VERSION} \
+              ${REPO}:${VERSION}-amd64 \
+              ${REPO}:${VERSION}-arm64
+            docker manifest push ${REPO}:${VERSION}
+
+            # Create main nightly manifest
+            docker manifest create ${REPO}:nightly \
+              ${REPO}:nightly-amd64 \
+              ${REPO}:nightly-arm64
+            docker manifest push ${REPO}:nightly
+
+            echo "✅ Published nightly manifests: ${VERSION}, nightly"
+          fi
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Repository: gbstraathof/birdnet-go" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Strategy: ${{ steps.version.outputs.tag-strategy }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Platforms: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ✅ Published to Docker Hub" >> $GITHUB_STEP_SUMMARY

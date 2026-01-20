@@ -63,8 +63,10 @@ BirdNET-Go is an AI solution for continuous avian monitoring and identification
 
 Quick install script for Debian, Ubuntu and Raspberry Pi OS based systems:
 
+> **⚠️ WARNING**: This installation line has been adjusted for the Luistervink integration. Use the original repository at `https://github.com/tphakala/birdnet-go` for the standard BirdNET-Go installation.
+
 ```bash
-curl -fsSL https://github.com/tphakala/birdnet-go/raw/main/install.sh -o install.sh
+curl -fsSL https://github.com/gijsbertbas/birdnet-go/raw/main/install.sh -o install.sh
 bash ./install.sh
 ```
 

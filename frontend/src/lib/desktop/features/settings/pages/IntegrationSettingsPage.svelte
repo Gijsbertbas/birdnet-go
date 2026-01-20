@@ -34,10 +34,9 @@
   import SettingsButton from '$lib/desktop/features/settings/components/SettingsButton.svelte';
   import SettingsNote from '$lib/desktop/features/settings/components/SettingsNote.svelte';
   import SettingsSection from '$lib/desktop/features/settings/components/SettingsSection.svelte';
-  import SettingsTabs from '$lib/desktop/features/settings/components/SettingsTabs.svelte';
   import type { TabDefinition } from '$lib/desktop/features/settings/components/SettingsTabs.svelte';
+  import SettingsTabs from '$lib/desktop/features/settings/components/SettingsTabs.svelte';
   import { t } from '$lib/i18n';
-  import { Bird, Radio, Activity } from '@lucide/svelte';
   import {
     integrationSettings,
     realtimeSettings,
@@ -46,12 +45,12 @@
     type MQTTSettings,
     type SettingsFormData,
   } from '$lib/stores/settings';
-  import { TriangleAlert, Info, Send } from '@lucide/svelte';
   import { toastActions } from '$lib/stores/toast';
+  import { getCsrfToken } from '$lib/utils/api';
   import { loggers } from '$lib/utils/logger';
   import { safeArrayAccess } from '$lib/utils/security';
   import { hasSettingsChanged } from '$lib/utils/settingsChanges';
-  import { getCsrfToken } from '$lib/utils/api';
+  import { Activity, AudioLines, Bird, Info, Radio, Send, TriangleAlert } from '@lucide/svelte';
 
   const logger = loggers.settings;
 
@@ -151,23 +150,23 @@
   let ffmpegAvailable = $state(true);
 
   // Tab state
-  let activeTab = $state('birdweather');
+  let activeTab = $state('luistervink');
 
   // Tab definitions
   let tabs = $derived<TabDefinition[]>([
+    {
+      id: 'luistervink',
+      label: 'Luistervink',
+      icon: AudioLines,
+      content: luistervinkTabContent,
+      hasChanges: luistervinkHasChanges,
+    },
     {
       id: 'birdweather',
       label: t('settings.integration.birdweather.title'),
       icon: Bird,
       content: birdweatherTabContent,
       hasChanges: birdweatherHasChanges,
-    },
-    {
-      id: 'luistervink',
-      label: 'Luistervink',
-      icon: Bird,
-      content: luistervinkTabContent,
-      hasChanges: luistervinkHasChanges,
     },
     {
       id: 'mqtt',
@@ -1111,7 +1110,7 @@
     <!-- Luistervink Settings Card -->
     <SettingsSection
       title="Luistervink Integration"
-      description="Connect BirdNET-Go to Luistervink for community bird sighting contributions"
+      description="Connect BirdNET-Go to Luistervink"
       originalData={(store.originalData as SettingsFormData)?.realtime?.luistervink}
       currentData={(store.formData as SettingsFormData)?.realtime?.luistervink}
     >
@@ -1161,7 +1160,7 @@
                 value={settings.luistervink!.id}
                 onUpdate={updateLuistervinkId}
                 placeholder=""
-                helpText="Your Luistervink device token from api.luistervink.nl"
+                helpText="Your Luistervink device token for api.luistervink.nl"
                 disabled={!settings.luistervink?.enabled || store.isLoading || store.isSaving}
                 allowReveal={true}
               />

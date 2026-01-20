@@ -256,6 +256,19 @@ realtime:
       maxdelay: 600 # maximum delay between retries in seconds
       backoffmultiplier: 2.0 # multiplier for exponential backoff
 
+  luistervink:
+    enabled: false # true to enable luistervink uploads
+    locationaccuracy: 0 # accuracy of location in meters
+    threshold: 0.7 # threshold for prediction confidence for uploads
+    debug: false # true to enable luistervink api debug mode
+    id: "" # luistervink station ID
+    retrysettings:
+      enabled: true # enable retry for failed submissions
+      maxretries: 5 # maximum number of retry attempts
+      initialdelay: 60 # initial delay before first retry in seconds
+      maxdelay: 3600 # maximum delay between retries in seconds
+      backoffmultiplier: 2.0 # multiplier for exponential backoff
+
   ebird:
     enabled: false # true to enable eBird API integration
     apikey: "" # eBird API key (get from https://ebird.org/api/keygen)

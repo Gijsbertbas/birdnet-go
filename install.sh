@@ -17,7 +17,7 @@ cat << "EOF"
 | |_) | | | | (_| | |\  | |___  | |   | |_| | (_) |
 |____/|_|_|  \__,_|_| \_|_____| |_|    \____|\___/ 
 EOF
-echo "${PINK}             with LUISTERVINK integration${NC}"
+echo -e "${PINK}             with LUISTERVINK integration${NC}"
 
 # Default version (will be set by parse_arguments function)
 BIRDNET_GO_VERSION="nightly"

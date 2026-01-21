@@ -5,6 +5,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 GRAY='\033[0;90m'
+PINK='\033[95m'
 NC='\033[0m' # No Color
 
 
@@ -16,7 +17,7 @@ cat << "EOF"
 | |_) | | | | (_| | |\  | |___  | |   | |_| | (_) |
 |____/|_|_|  \__,_|_| \_|_____| |_|    \____|\___/ 
 EOF
-
+echo "${PINK}             with LUISTERVINK integration${NC}"
 
 # Default version (will be set by parse_arguments function)
 BIRDNET_GO_VERSION="nightly"
